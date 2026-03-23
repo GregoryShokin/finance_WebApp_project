@@ -13,7 +13,7 @@ from app.models.import_session import ImportSession
 from app.repositories.account_repository import AccountRepository
 from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_repository import TransactionRepository
-from app.schemas.imports import ImportMappingRequest
+from app.schemas.imports import ImportMappingRequest, ImportPreviewSummary, ImportRowUpdateRequest
 from app.services.import_confidence import ImportConfidenceService
 from app.services.import_extractors import ExtractionResult, ImportExtractorRegistry
 from app.services.import_normalizer import ImportNormalizer
@@ -239,6 +239,175 @@ class ImportService:
             "total": len(items),
         }
 
+
+    def update_row(self, *, user_id: int, row_id: int, payload: ImportRowUpdateRequest) -> dict[str, Any]:
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+
+        session, row = session_row
+        row_status = str(row.status or "").strip().lower()
+        if row.created_transaction_id is not None or row_status == "committed":
+            raise ImportValidationError("Импортированную строку нельзя изменить.")
+
+        normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
+
+        for field in ("account_id", "target_account_id", "category_id", "amount", "type", "operation_type", "description", "currency"):
+            value = getattr(payload, field)
+            if value is not None:
+                normalized[field] = value
+
+        if payload.transaction_date is not None:
+            normalized["transaction_date"] = payload.transaction_date.isoformat()
+            normalized["date"] = payload.transaction_date.isoformat()
+
+        action = (payload.action or "").strip().lower()
+        issues = [item for item in (getattr(row, "errors", None) or []) if item and item != "Исключено пользователем."]
+        status = row_status if row_status not in {"committed", "duplicate"} else row_status
+
+        if action == "exclude":
+            status = "skipped"
+            issues = list(dict.fromkeys([*issues, "Исключено пользователем."]))
+        else:
+            if action == "restore" and row_status == "skipped":
+                status = "warning"
+            elif action == "confirm":
+                status = "ready"
+
+            status, issues = self._validate_manual_row(normalized=normalized, current_status=status, issues=issues)
+
+        row = self.import_repo.update_row(
+            row,
+            normalized_data=normalized,
+            status=status,
+            errors=issues,
+            review_required=status in {"warning", "error"},
+        )
+
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        self.db.refresh(row)
+        self.import_repo._hydrate_row_runtime_fields(row)
+
+        return {
+            "session_id": session.id,
+            "row": self._serialize_preview_row(row),
+            "summary": summary,
+        }
+
+    def _validate_manual_row(self, *, normalized: dict[str, Any], current_status: str, issues: list[str]) -> tuple[str, list[str]]:
+        status = current_status
+        local_issues = [item for item in issues if item]
+
+        if status == "skipped":
+            return status, list(dict.fromkeys(local_issues))
+
+        account_id = normalized.get("account_id")
+        operation_type = normalized.get("operation_type") or "regular"
+        tx_type = normalized.get("type") or "expense"
+        amount = normalized.get("amount")
+
+        if account_id in (None, "", 0):
+            local_issues.append("Не указан счёт.")
+            status = "warning"
+
+        try:
+            if amount not in (None, ""):
+                self._to_decimal(amount)
+        except (ValueError, TypeError, InvalidOperation):
+            local_issues.append("Некорректная сумма.")
+            status = "error"
+
+        if operation_type == "transfer":
+            target_account_id = normalized.get("target_account_id")
+            if target_account_id in (None, "", 0):
+                local_issues.append("Не указан счёт поступления.")
+                status = "warning"
+            elif str(target_account_id) == str(account_id):
+                local_issues.append("Счёт списания и счёт поступления не должны совпадать.")
+                status = "error"
+            normalized["category_id"] = None
+        elif operation_type in {"regular", "refund"}:
+            if normalized.get("category_id") in (None, "", 0):
+                local_issues.append("Не выбрана категория.")
+                status = "warning"
+            normalized["target_account_id"] = None
+        else:
+            normalized["target_account_id"] = None
+            normalized["category_id"] = None
+
+        if not normalized.get("description"):
+            local_issues.append("Пустое описание операции.")
+            status = "warning"
+
+        if not normalized.get("transaction_date") and not normalized.get("date"):
+            local_issues.append("Не указана дата операции.")
+            status = "error"
+
+        unique_issues = list(dict.fromkeys(local_issues))
+
+        blocking_messages = {
+            "Не указан счёт.",
+            "Не указан счёт поступления.",
+            "Не выбрана категория.",
+            "Пустое описание операции.",
+            "Не указана дата операции.",
+            "Некорректная сумма.",
+            "Счёт списания и счёт поступления не должны совпадать.",
+        }
+
+        if status != "duplicate":
+            unresolved = [item for item in unique_issues if item in blocking_messages]
+            status = "ready" if not unresolved else status
+            if status == "ready":
+                unique_issues = [item for item in unique_issues if item not in blocking_messages]
+
+        return status, unique_issues
+
+    def _recalculate_summary(self, session_id: int) -> dict[str, int]:
+        rows = self.import_repo.get_rows(session_id=session_id)
+        summary = {
+            "total_rows": len(rows),
+            "ready_rows": 0,
+            "warning_rows": 0,
+            "error_rows": 0,
+            "duplicate_rows": 0,
+            "skipped_rows": 0,
+        }
+        for row in rows:
+            status = str(row.status or "").strip().lower()
+            if status == "ready":
+                summary["ready_rows"] += 1
+            elif status == "warning":
+                summary["warning_rows"] += 1
+            elif status == "duplicate":
+                summary["duplicate_rows"] += 1
+                summary["skipped_rows"] += 1
+            elif status == "skipped":
+                summary["skipped_rows"] += 1
+            elif status == "error":
+                summary["error_rows"] += 1
+        return summary
+
+    def _serialize_preview_row(self, row: ImportRow) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "row_index": row.row_index,
+            "status": row.status,
+            "confidence": float(getattr(row, "confidence_score", 0.0) or 0.0),
+            "confidence_label": self._confidence_label(getattr(row, "confidence_score", 0.0) or 0.0),
+            "issues": getattr(row, "errors", None) or [],
+            "unresolved_fields": [],
+            "error_message": row.error_message,
+            "review_required": bool(getattr(row, "review_required", False)),
+            "raw_data": getattr(row, "raw_data", None) or (row.raw_data_json or {}),
+            "normalized_data": getattr(row, "normalized_data", None) or (row.normalized_data_json or {}),
+        }
+
+
     def build_preview(self, *, user_id: int, session_id: int, payload: ImportMappingRequest) -> dict[str, Any]:
         session = self.get_session(user_id=user_id, session_id=session_id)
         account = self.account_repo.get_by_id_and_user(payload.account_id, user_id)
@@ -367,22 +536,7 @@ class ImportService:
 
         self.import_repo.replace_rows(session=session, rows=preview_rows)
 
-        response_rows = [
-            {
-                "id": row.id,
-                "row_index": row.row_index,
-                "status": row.status,
-                "confidence": float(getattr(row, "confidence_score", 0.0) or 0.0),
-                "confidence_label": self._confidence_label(getattr(row, "confidence_score", 0.0) or 0.0),
-                "issues": getattr(row, "errors", None) or [],
-                "unresolved_fields": [],
-                "error_message": row.error_message,
-                "review_required": bool(getattr(row, "review_required", False)),
-                "raw_data": getattr(row, "raw_data", None) or (row.raw_data_json or {}),
-                "normalized_data": getattr(row, "normalized_data", None) or (row.normalized_data_json or {}),
-            }
-            for row in preview_rows
-        ]
+        response_rows = [self._serialize_preview_row(row) for row in preview_rows]
 
         self.import_repo.update_session(
             session,
@@ -427,24 +581,16 @@ class ImportService:
                 skipped_count += 1
                 continue
 
-            should_import_with_review = row_status == "warning" and not import_ready_only
-
-            if row_status == "warning" and import_ready_only:
+            if row_status == "warning":
                 review_count += 1
                 skipped_count += 1
                 continue
 
-            if row_status not in {"ready", "warning"}:
+            if row_status not in {"ready"}:
                 skipped_count += 1
                 continue
 
             normalized = row.normalized_data or {}
-            if should_import_with_review:
-                normalized = {
-                    **normalized,
-                    "needs_review": True,
-                    "review_required": True,
-                }
 
             try:
                 payload = self._prepare_transaction_payload(normalized)
@@ -466,9 +612,6 @@ class ImportService:
                 )
                 continue
 
-            if should_import_with_review:
-                payload["needs_review"] = True
-
             try:
                 transaction = self.transaction_service.create_transaction(
                     user_id=user_id,
@@ -477,8 +620,6 @@ class ImportService:
                 row.status = "committed"
                 row.created_transaction_id = transaction.id
                 imported_count += 1
-                if should_import_with_review:
-                    review_count += 1
             except TransactionValidationError as exc:
                 row.status = "error"
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))

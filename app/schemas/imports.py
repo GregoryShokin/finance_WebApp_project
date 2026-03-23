@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -112,8 +113,23 @@ class ImportPreviewResponse(BaseModel):
     rows: list[ImportPreviewRowResponse]
 
 
-class ImportRowSendToReviewResponse(ImportPreviewRowResponse):
+class ImportRowUpdateRequest(BaseModel):
+    account_id: int | None = None
+    target_account_id: int | None = None
+    category_id: int | None = None
+    amount: Decimal | None = None
+    type: str | None = None
+    operation_type: str | None = None
+    description: str | None = None
+    transaction_date: datetime | None = None
+    currency: str | None = None
+    action: str | None = None
+
+
+class ImportRowUpdateResponse(BaseModel):
     session_id: int
+    row: ImportPreviewRowResponse
+    summary: ImportPreviewSummary
 
 
 class ImportCommitRequest(BaseModel):

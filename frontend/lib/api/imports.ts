@@ -5,6 +5,8 @@ import type {
   ImportPreviewResponse,
   ImportPreviewRow,
   ImportReviewQueueResponse,
+  ImportRowUpdatePayload,
+  ImportRowUpdateResponse,
   ImportUploadResponse,
 } from '@/types/import';
 
@@ -39,8 +41,9 @@ export function getImportReviewQueue() {
 }
 
 
-export function sendImportRowToReview(rowId: number) {
-  return apiClient<ImportPreviewRow>(`/imports/rows/${rowId}/send-to-review`, {
-    method: 'POST',
+export function updateImportRow(rowId: number, payload: ImportRowUpdatePayload) {
+  return apiClient<ImportRowUpdateResponse>(`/imports/rows/${rowId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
   });
 }

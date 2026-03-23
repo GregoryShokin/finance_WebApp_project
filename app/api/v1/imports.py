@@ -11,7 +11,8 @@ from app.schemas.imports import (
     ImportMappingRequest,
     ImportPreviewResponse,
     ImportReviewQueueResponse,
-    ImportRowSendToReviewResponse,
+    ImportRowUpdateRequest,
+    ImportRowUpdateResponse,
     ImportSessionResponse,
     ImportUploadResponse,
 )
@@ -50,15 +51,19 @@ async def upload_import_file(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-@router.post("/rows/{row_id}/send-to-review", response_model=ImportRowSendToReviewResponse)
-def send_import_row_to_review(
+
+
+
+@router.patch("/rows/{row_id}", response_model=ImportRowUpdateResponse)
+def update_import_row(
     row_id: int,
+    payload: ImportRowUpdateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     service = ImportService(db)
     try:
-        return service.send_row_to_review(user_id=current_user.id, row_id=row_id)
+        return service.update_row(user_id=current_user.id, row_id=row_id, payload=payload)
     except ImportNotFoundError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

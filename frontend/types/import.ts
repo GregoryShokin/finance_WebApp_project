@@ -87,6 +87,25 @@ export type ImportCommitResponse = {
   review_count: number;
 };
 
+export type ImportRowUpdatePayload = {
+  account_id?: number | null;
+  target_account_id?: number | null;
+  category_id?: number | null;
+  amount?: number | null;
+  type?: string | null;
+  operation_type?: string | null;
+  description?: string | null;
+  transaction_date?: string | null;
+  currency?: string | null;
+  action?: 'confirm' | 'exclude' | 'restore' | null;
+};
+
+export type ImportRowUpdateResponse = {
+  session_id: number;
+  row: ImportPreviewRow;
+  summary: ImportPreviewResponse['summary'];
+};
+
 
 export type ImportReviewRow = {
   id: number;
