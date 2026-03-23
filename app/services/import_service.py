@@ -257,6 +257,16 @@ class ImportService:
             if value is not None:
                 normalized[field] = value
 
+        if payload.split_items is not None:
+            normalized["split_items"] = [
+                {
+                    "category_id": item.category_id,
+                    "amount": str(item.amount),
+                    "description": item.description,
+                }
+                for item in payload.split_items
+            ]
+
         if payload.transaction_date is not None:
             normalized["transaction_date"] = payload.transaction_date.isoformat()
             normalized["date"] = payload.transaction_date.isoformat()
@@ -305,18 +315,33 @@ class ImportService:
         if status == "skipped":
             return status, list(dict.fromkeys(local_issues))
 
+        blocking_messages = {
+            "Не указан счёт.",
+            "Не указан счёт поступления.",
+            "Не выбрана категория.",
+            "Разбивка заполнена некорректно.",
+            "Сумма разбивки должна совпадать с суммой транзакции.",
+            "В разбивке каждая часть должна быть больше нуля.",
+            "В разбивке для каждой части нужна категория.",
+            "Пустое описание операции.",
+            "Не указана дата операции.",
+            "Некорректная сумма.",
+            "Счёт списания и счёт поступления не должны совпадать.",
+        }
+        local_issues = [item for item in local_issues if item not in blocking_messages]
+
         account_id = normalized.get("account_id")
         operation_type = normalized.get("operation_type") or "regular"
-        tx_type = normalized.get("type") or "expense"
         amount = normalized.get("amount")
 
         if account_id in (None, "", 0):
             local_issues.append("Не указан счёт.")
             status = "warning"
 
+        amount_decimal = None
         try:
             if amount not in (None, ""):
-                self._to_decimal(amount)
+                amount_decimal = self._to_decimal(amount)
         except (ValueError, TypeError, InvalidOperation):
             local_issues.append("Некорректная сумма.")
             status = "error"
@@ -330,14 +355,63 @@ class ImportService:
                 local_issues.append("Счёт списания и счёт поступления не должны совпадать.")
                 status = "error"
             normalized["category_id"] = None
-        elif operation_type in {"regular", "refund"}:
+            normalized["split_items"] = []
+        elif operation_type == "regular":
+            split_items = normalized.get("split_items") or []
+            normalized["target_account_id"] = None
+            if split_items:
+                valid_split = True
+                split_total = Decimal("0")
+                cleaned_split_items: list[dict[str, Any]] = []
+                for item in split_items:
+                    category_id = item.get("category_id") if isinstance(item, dict) else None
+                    raw_amount = item.get("amount") if isinstance(item, dict) else None
+                    description = item.get("description") if isinstance(item, dict) else None
+                    if category_id in (None, "", 0):
+                        valid_split = False
+                        local_issues.append("В разбивке для каждой части нужна категория.")
+                        break
+                    try:
+                        split_amount = self._to_decimal(raw_amount)
+                    except (ValueError, TypeError, InvalidOperation):
+                        valid_split = False
+                        local_issues.append("Разбивка заполнена некорректно.")
+                        break
+                    if split_amount <= 0:
+                        valid_split = False
+                        local_issues.append("В разбивке каждая часть должна быть больше нуля.")
+                        break
+                    split_total += split_amount
+                    cleaned_split_items.append({
+                        "category_id": int(category_id),
+                        "amount": str(split_amount),
+                        "description": description,
+                    })
+
+                if valid_split and amount_decimal is not None and split_total != amount_decimal:
+                    valid_split = False
+                    local_issues.append("Сумма разбивки должна совпадать с суммой транзакции.")
+
+                if valid_split and len(cleaned_split_items) >= 2:
+                    normalized["split_items"] = cleaned_split_items
+                    normalized["category_id"] = None
+                else:
+                    status = "warning" if status != "error" else status
+            else:
+                normalized["split_items"] = []
+                if normalized.get("category_id") in (None, "", 0):
+                    local_issues.append("Не выбрана категория.")
+                    status = "warning"
+        elif operation_type == "refund":
+            normalized["target_account_id"] = None
+            normalized["split_items"] = []
             if normalized.get("category_id") in (None, "", 0):
                 local_issues.append("Не выбрана категория.")
                 status = "warning"
-            normalized["target_account_id"] = None
         else:
             normalized["target_account_id"] = None
             normalized["category_id"] = None
+            normalized["split_items"] = []
 
         if not normalized.get("description"):
             local_issues.append("Пустое описание операции.")
@@ -349,21 +423,9 @@ class ImportService:
 
         unique_issues = list(dict.fromkeys(local_issues))
 
-        blocking_messages = {
-            "Не указан счёт.",
-            "Не указан счёт поступления.",
-            "Не выбрана категория.",
-            "Пустое описание операции.",
-            "Не указана дата операции.",
-            "Некорректная сумма.",
-            "Счёт списания и счёт поступления не должны совпадать.",
-        }
-
         if status != "duplicate":
             unresolved = [item for item in unique_issues if item in blocking_messages]
             status = "ready" if not unresolved else status
-            if status == "ready":
-                unique_issues = [item for item in unique_issues if item not in blocking_messages]
 
         return status, unique_issues
 
@@ -593,7 +655,7 @@ class ImportService:
             normalized = row.normalized_data or {}
 
             try:
-                payload = self._prepare_transaction_payload(normalized)
+                payloads = self._prepare_transaction_payloads(normalized)
             except (ValueError, TypeError, InvalidOperation) as exc:
                 skipped_count += 1
                 error_count += 1
@@ -601,7 +663,7 @@ class ImportService:
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))
                 continue
 
-            if not payload:
+            if not payloads:
                 skipped_count += 1
                 error_count += 1
                 row.status = "error"
@@ -613,13 +675,15 @@ class ImportService:
                 continue
 
             try:
-                transaction = self.transaction_service.create_transaction(
-                    user_id=user_id,
-                    payload=payload,
-                )
+                last_transaction = None
+                for payload in payloads:
+                    last_transaction = self.transaction_service.create_transaction(
+                        user_id=user_id,
+                        payload=payload,
+                    )
+                    imported_count += 1
                 row.status = "committed"
-                row.created_transaction_id = transaction.id
-                imported_count += 1
+                row.created_transaction_id = last_transaction.id if last_transaction is not None else None
             except TransactionValidationError as exc:
                 row.status = "error"
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))
@@ -648,13 +712,13 @@ class ImportService:
         }
 
     @staticmethod
-    def _prepare_transaction_payload(normalized: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_transaction_payloads(normalized: dict[str, Any]) -> list[dict[str, Any]]:
         if not normalized:
-            return {}
+            return []
 
         transaction_date = normalized.get("transaction_date") or normalized.get("date")
         if transaction_date is None:
-            return {}
+            return []
 
         account_id = normalized.get("account_id")
         amount = normalized.get("amount")
@@ -673,7 +737,7 @@ class ImportService:
         if not operation_type:
             raise ValueError("Не указан operation_type транзакции.")
 
-        payload: dict[str, Any] = {
+        base_payload: dict[str, Any] = {
             "account_id": int(account_id),
             "target_account_id": normalized.get("target_account_id"),
             "category_id": normalized.get("category_id"),
@@ -689,17 +753,36 @@ class ImportService:
             ),
         }
 
-        if payload.get("target_account_id") not in (None, "", 0):
-            payload["target_account_id"] = int(payload["target_account_id"])
+        if base_payload.get("target_account_id") not in (None, "", 0):
+            base_payload["target_account_id"] = int(base_payload["target_account_id"])
         else:
-            payload["target_account_id"] = None
+            base_payload["target_account_id"] = None
 
-        if payload.get("category_id") not in (None, "", 0):
-            payload["category_id"] = int(payload["category_id"])
+        if base_payload.get("category_id") not in (None, "", 0):
+            base_payload["category_id"] = int(base_payload["category_id"])
         else:
-            payload["category_id"] = None
+            base_payload["category_id"] = None
 
-        return payload
+        split_items = normalized.get("split_items") or []
+        if str(operation_type) == "regular" and isinstance(split_items, list) and len(split_items) >= 2:
+            payloads: list[dict[str, Any]] = []
+            for item in split_items:
+                if not isinstance(item, dict):
+                    raise ValueError("Разбивка заполнена некорректно.")
+                category_id = item.get("category_id")
+                if category_id in (None, "", 0):
+                    raise ValueError("В разбивке для каждой части нужна категория.")
+                split_amount = ImportService._to_decimal(item.get("amount"))
+                description = (item.get("description") or base_payload["description"] or "")[:1000]
+                payloads.append({
+                    **base_payload,
+                    "category_id": int(category_id),
+                    "amount": split_amount,
+                    "description": description,
+                })
+            return payloads
+
+        return [base_payload]
 
     @staticmethod
     def _to_decimal(value: Any) -> Decimal:

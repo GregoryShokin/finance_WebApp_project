@@ -113,6 +113,12 @@ class ImportPreviewResponse(BaseModel):
     rows: list[ImportPreviewRowResponse]
 
 
+class ImportSplitItemRequest(BaseModel):
+    category_id: int
+    amount: Decimal
+    description: str | None = None
+
+
 class ImportRowUpdateRequest(BaseModel):
     account_id: int | None = None
     target_account_id: int | None = None
@@ -123,6 +129,7 @@ class ImportRowUpdateRequest(BaseModel):
     description: str | None = None
     transaction_date: datetime | None = None
     currency: str | None = None
+    split_items: list[ImportSplitItemRequest] | None = None
     action: str | None = None
 
 

@@ -87,6 +87,13 @@ export type ImportCommitResponse = {
   review_count: number;
 };
 
+
+export type ImportSplitItem = {
+  category_id: number;
+  amount: number;
+  description?: string | null;
+};
+
 export type ImportRowUpdatePayload = {
   account_id?: number | null;
   target_account_id?: number | null;
@@ -97,6 +104,7 @@ export type ImportRowUpdatePayload = {
   description?: string | null;
   transaction_date?: string | null;
   currency?: string | null;
+  split_items?: ImportSplitItem[] | null;
   action?: 'confirm' | 'exclude' | 'restore' | null;
 };
 
