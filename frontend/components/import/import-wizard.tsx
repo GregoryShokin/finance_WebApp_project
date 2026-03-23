@@ -367,7 +367,13 @@ export function ImportWizard() {
   }
 
   function updateRowForm(rowId: number, patch: Partial<RowEditState>) {
-    setRowForms((prev) => ({ ...prev, [rowId]: { ...(prev[rowId] ?? getRowEditState(previewRows.find((item) => item.id === rowId)!), ...patch } }));
+    setRowForms((prev) => ({
+      ...prev,
+      [rowId]: {
+        ...(prev[rowId] ?? getRowEditState(previewRows.find((item) => item.id === rowId)!)),
+        ...patch,
+      },
+    }));
   }
 
   function updateRowQuery(rowId: number, patch: Partial<RowQueries>) {
