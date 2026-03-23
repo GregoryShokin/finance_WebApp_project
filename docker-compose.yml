@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: finance_api
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build: .
+    container_name: finance_worker
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    command: celery -A app.core.celery_app.celery_app worker --loglevel=info
+
+  db:
+    image: postgres:16
+    container_name: finance_db
+    environment:
+      POSTGRES_DB: FinanceDataBase
+      POSTGRES_USER: Gregory
+      POSTGRES_PASSWORD: 4frt667nzb9ki
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: finance_redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:

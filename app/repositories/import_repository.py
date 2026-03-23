@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+from sqlalchemy.orm import Session
+
+from app.models.import_row import ImportRow
+from app.models.import_session import ImportSession
+
+
+class ImportRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create_session(
+        self,
+        *,
+        user_id: int,
+        filename: str,
+        file_content: str,
+        detected_columns: list[str],
+        parse_settings: dict,
+        source_type: str = "csv",
+    ) -> ImportSession:
+        session = ImportSession(
+            user_id=user_id,
+            filename=filename,
+            source_type=source_type,
+            status="uploaded",
+            file_content=file_content,
+            detected_columns=detected_columns,
+            parse_settings=parse_settings,
+            mapping_json={},
+            summary_json={},
+        )
+        self.db.add(session)
+        self.db.flush()
+        return session
+
+    def get_session(self, *, session_id: int, user_id: int) -> ImportSession | None:
+        return (
+            self.db.query(ImportSession)
+            .filter(ImportSession.id == session_id, ImportSession.user_id == user_id)
+            .first()
+        )
+
+    def update_session(self, session: ImportSession, **updates) -> ImportSession:
+        for key, value in updates.items():
+            setattr(session, key, value)
+        self.db.add(session)
+        self.db.flush()
+        return session
+
+    def create_row(
+        self,
+        *,
+        session_id: int,
+        row_index: int,
+        raw_data: dict,
+        normalized_data: dict,
+        status: str,
+        errors: list[str] | None = None,
+        confidence_score: float | None = None,
+        duplicate_candidate: bool | None = None,
+        review_required: bool | None = None,
+    ) -> ImportRow:
+        row = ImportRow(
+            session_id=session_id,
+            row_index=row_index,
+            raw_data_json=raw_data or {},
+            normalized_data_json=normalized_data or {},
+            status=status,
+            error_message="\n".join([item for item in (errors or []) if item]) or None,
+        )
+        self._hydrate_row_runtime_fields(
+            row,
+            errors=errors,
+            confidence_score=confidence_score,
+            duplicate_candidate=duplicate_candidate,
+            review_required=review_required,
+        )
+        return row
+
+    def replace_rows(
+        self,
+        *,
+        rows: list[ImportRow],
+        session_id: int | None = None,
+        session: ImportSession | None = None,
+    ) -> None:
+        resolved_session_id = session_id or (session.id if session is not None else None)
+        if resolved_session_id is None:
+            raise ValueError("session_id or session is required")
+
+        self.db.query(ImportRow).filter(ImportRow.session_id == resolved_session_id).delete(synchronize_session=False)
+        if rows:
+            self.db.add_all(rows)
+        self.db.flush()
+
+        for row in rows:
+            self._hydrate_row_runtime_fields(row)
+
+        if session is not None:
+            setattr(session, "rows", rows)
+
+    def list_rows(self, *, session_id: int) -> list[ImportRow]:
+        rows = (
+            self.db.query(ImportRow)
+            .filter(ImportRow.session_id == session_id)
+            .order_by(ImportRow.row_index.asc(), ImportRow.id.asc())
+            .all()
+        )
+        for row in rows:
+            self._hydrate_row_runtime_fields(row)
+        return rows
+
+    def get_rows(self, *, session_id: int) -> list[ImportRow]:
+        return self.list_rows(session_id=session_id)
+
+
+    def get_row_for_user(self, *, row_id: int, user_id: int) -> tuple[ImportSession, ImportRow] | None:
+        result = (
+            self.db.query(ImportSession, ImportRow)
+            .join(ImportRow, ImportRow.session_id == ImportSession.id)
+            .filter(ImportSession.user_id == user_id, ImportRow.id == row_id)
+            .first()
+        )
+        if result is None:
+            return None
+        session, row = result
+        self._hydrate_row_runtime_fields(row)
+        return session, row
+
+    def list_review_queue(self, *, user_id: int) -> list[tuple[ImportSession, ImportRow]]:
+        rows = (
+            self.db.query(ImportSession, ImportRow)
+            .join(ImportRow, ImportRow.session_id == ImportSession.id)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportRow.status.in_(["warning", "error"]),
+                ImportRow.created_transaction_id.is_(None),
+            )
+            .order_by(ImportSession.updated_at.desc(), ImportRow.row_index.asc(), ImportRow.id.asc())
+            .all()
+        )
+        for _, row in rows:
+            self._hydrate_row_runtime_fields(row)
+        return rows
+
+    def update_row(self, row: ImportRow, **updates) -> ImportRow:
+        alias_map = {
+            "raw_data": "raw_data_json",
+            "normalized_data": "normalized_data_json",
+            "errors": "error_message",
+        }
+        for key, value in updates.items():
+            target_key = alias_map.get(key, key)
+            if target_key == "error_message" and isinstance(value, list):
+                value = "\n".join([item for item in value if item]) or None
+            setattr(row, target_key, value)
+        self._hydrate_row_runtime_fields(row)
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    @staticmethod
+    def _hydrate_row_runtime_fields(
+        row: ImportRow,
+        *,
+        errors: list[str] | None = None,
+        confidence_score: float | None = None,
+        duplicate_candidate: bool | None = None,
+        review_required: bool | None = None,
+    ) -> None:
+        row.raw_data = getattr(row, "raw_data", None) or (row.raw_data_json or {})
+        row.normalized_data = getattr(row, "normalized_data", None) or (row.normalized_data_json or {})
+
+        if errors is None:
+            message = row.error_message or ""
+            errors = [item.strip() for item in message.splitlines() if item.strip()]
+        row.errors = errors
+
+        row.confidence_score = confidence_score if confidence_score is not None else getattr(row, "confidence_score", 0.0)
+        row.duplicate_candidate = duplicate_candidate if duplicate_candidate is not None else getattr(row, "duplicate_candidate", False)
+        row.review_required = review_required if review_required is not None else getattr(
+            row,
+            "review_required",
+            row.status in {"warning", "error"},
+        )

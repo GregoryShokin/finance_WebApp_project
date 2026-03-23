@@ -1,0 +1,50 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from app.api.v1.accounts import router as accounts_router
+from app.api.v1.auth import router as auth_router
+from app.api.v1.categories import router as categories_router
+from app.api.v1.health import router as health_router
+from app.api.v1.imports import router as imports_router
+from app.api.v1.transactions import router as transactions_router
+from app.core.config import settings
+from app.core.middleware import SecurityHeadersMiddleware
+
+app = FastAPI(title=settings.APP_NAME, version="0.3.0", debug=settings.DEBUG)
+
+if settings.ENABLE_HTTPS_REDIRECT:
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.TRUSTED_HOSTS or ["localhost", "127.0.0.1"],
+)
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin"],
+)
+
+app.include_router(health_router, prefix=settings.API_V1_PREFIX)
+app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
+app.include_router(accounts_router, prefix=settings.API_V1_PREFIX)
+app.include_router(categories_router, prefix=settings.API_V1_PREFIX)
+app.include_router(transactions_router, prefix=settings.API_V1_PREFIX)
+app.include_router(imports_router, prefix=settings.API_V1_PREFIX)
+
+
+@app.get("/")
+def root():
+    return {
+        "service": settings.APP_NAME,
+        "docs": "/docs",
+        "api_prefix": settings.API_V1_PREFIX,
+        "environment": settings.APP_ENV,
+    }
