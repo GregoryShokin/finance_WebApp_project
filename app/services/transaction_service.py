@@ -384,7 +384,7 @@ class TransactionService:
         if category is None:
             raise TransactionValidationError("Категория не найдена.")
 
-        if transaction_type is not None and category.kind != transaction_type:
+        if transaction_type is not None and category.kind != transaction_type and operation_type != "refund":
             raise TransactionValidationError("Тип транзакции не совпадает с типом выбранной категории.")
 
     def _get_category(self, *, category_id: int, user_id: int) -> Category | None:
