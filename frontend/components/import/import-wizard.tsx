@@ -1491,7 +1491,7 @@ export function ImportWizard() {
                             },
                           }}
                         />
-                      ) : null}
+                      )}
 
                       {form.main_type === 'credit_operation' && form.credit_operation_kind === 'payment' ? (
                         <>
