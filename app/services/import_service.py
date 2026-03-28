@@ -252,7 +252,7 @@ class ImportService:
 
         normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
 
-        for field in ("account_id", "target_account_id", "category_id", "amount", "type", "operation_type", "description", "currency"):
+        for field in ("account_id", "target_account_id", "credit_account_id", "category_id", "counterparty_id", "amount", "type", "operation_type", "debt_direction", "description", "currency", "credit_principal_amount", "credit_interest_amount"):
             value = getattr(payload, field)
             if value is not None:
                 normalized[field] = value
@@ -274,6 +274,7 @@ class ImportService:
         action = (payload.action or "").strip().lower()
         issues = [item for item in (getattr(row, "errors", None) or []) if item and item != "Исключено пользователем."]
         status = row_status if row_status not in {"committed", "duplicate"} else row_status
+        allow_ready_status = action == "confirm"
 
         if action == "exclude":
             status = "skipped"
@@ -283,8 +284,15 @@ class ImportService:
                 status = "warning"
             elif action == "confirm":
                 status = "ready"
+            elif row_status in {"ready", "warning"}:
+                status = "warning"
 
-            status, issues = self._validate_manual_row(normalized=normalized, current_status=status, issues=issues)
+            status, issues = self._validate_manual_row(
+                normalized=normalized,
+                current_status=status,
+                issues=issues,
+                allow_ready_status=allow_ready_status,
+            )
 
         row = self.import_repo.update_row(
             row,
@@ -308,7 +316,7 @@ class ImportService:
             "summary": summary,
         }
 
-    def _validate_manual_row(self, *, normalized: dict[str, Any], current_status: str, issues: list[str]) -> tuple[str, list[str]]:
+    def _validate_manual_row(self, *, normalized: dict[str, Any], current_status: str, issues: list[str], allow_ready_status: bool = True) -> tuple[str, list[str]]:
         status = current_status
         local_issues = [item for item in issues if item]
 
@@ -318,11 +326,16 @@ class ImportService:
         blocking_messages = {
             "Не указан счёт.",
             "Не указан счёт поступления.",
+            "Не выбран кредитный счёт.",
             "Не выбрана категория.",
             "Разбивка заполнена некорректно.",
             "Сумма разбивки должна совпадать с суммой транзакции.",
             "В разбивке каждая часть должна быть больше нуля.",
             "В разбивке для каждой части нужна категория.",
+            "Для платежа по кредиту нужно указать основной долг.",
+            "Для платежа по кредиту нужно указать проценты.",
+            "Сумма основного долга и процентов должна совпадать с общей суммой платежа.",
+            "Основной долг и проценты не могут быть отрицательными.",
             "Пустое описание операции.",
             "Не указана дата операции.",
             "Некорректная сумма.",
@@ -348,6 +361,9 @@ class ImportService:
 
         if operation_type == "transfer":
             target_account_id = normalized.get("target_account_id")
+            normalized["credit_account_id"] = None
+            normalized["credit_principal_amount"] = None
+            normalized["credit_interest_amount"] = None
             if target_account_id in (None, "", 0):
                 local_issues.append("Не указан счёт поступления.")
                 status = "warning"
@@ -356,6 +372,57 @@ class ImportService:
                 status = "error"
             normalized["category_id"] = None
             normalized["split_items"] = []
+        elif operation_type == "credit_disbursement":
+            normalized["target_account_id"] = None
+            normalized["credit_account_id"] = None
+            normalized["credit_principal_amount"] = None
+            normalized["credit_interest_amount"] = None
+            normalized["category_id"] = None
+            normalized["split_items"] = []
+        elif operation_type == "credit_payment":
+            credit_account_id = normalized.get("credit_account_id") or normalized.get("target_account_id")
+            normalized["category_id"] = None
+            normalized["split_items"] = []
+            normalized["target_account_id"] = credit_account_id
+            normalized["credit_account_id"] = credit_account_id
+            if credit_account_id in (None, "", 0):
+                local_issues.append("Не выбран кредитный счёт.")
+                status = "warning"
+
+            principal_raw = normalized.get("credit_principal_amount")
+            interest_raw = normalized.get("credit_interest_amount")
+            principal_amount = None
+            interest_amount = None
+
+            if principal_raw in (None, ""):
+                local_issues.append("Для платежа по кредиту нужно указать основной долг.")
+                status = "warning"
+            else:
+                try:
+                    principal_amount = self._to_decimal(principal_raw)
+                except (ValueError, TypeError, InvalidOperation):
+                    local_issues.append("Некорректная сумма.")
+                    status = "error"
+
+            if interest_raw in (None, ""):
+                local_issues.append("Для платежа по кредиту нужно указать проценты.")
+                status = "warning"
+            else:
+                try:
+                    interest_amount = self._to_decimal(interest_raw)
+                except (ValueError, TypeError, InvalidOperation):
+                    local_issues.append("Некорректная сумма.")
+                    status = "error"
+
+            if principal_amount is not None and interest_amount is not None:
+                if principal_amount < 0 or interest_amount < 0:
+                    local_issues.append("Основной долг и проценты не могут быть отрицательными.")
+                    status = "error"
+                elif amount_decimal is not None and principal_amount + interest_amount != amount_decimal:
+                    local_issues.append("Сумма основного долга и процентов должна совпадать с общей суммой платежа.")
+                    status = "error"
+                normalized["credit_principal_amount"] = str(principal_amount)
+                normalized["credit_interest_amount"] = str(interest_amount)
         elif operation_type == "regular":
             split_items = normalized.get("split_items") or []
             normalized["target_account_id"] = None
@@ -425,12 +492,16 @@ class ImportService:
 
         if status != "duplicate":
             unresolved = [item for item in unique_issues if item in blocking_messages]
-            status = "ready" if not unresolved else status
+            if unresolved:
+                status = status if status in {"warning", "error", "skipped"} else "warning"
+            elif allow_ready_status:
+                status = "ready"
+            elif status not in {"error", "skipped"}:
+                status = "warning"
 
         return status, unique_issues
 
-    def _recalculate_summary(self, session_id: int) -> dict[str, int]:
-        rows = self.import_repo.get_rows(session_id=session_id)
+    def _build_summary_from_rows(self, rows: list[ImportRow]) -> dict[str, int]:
         summary = {
             "total_rows": len(rows),
             "ready_rows": 0,
@@ -453,6 +524,10 @@ class ImportService:
             elif status == "error":
                 summary["error_rows"] += 1
         return summary
+
+    def _recalculate_summary(self, session_id: int) -> dict[str, int]:
+        rows = self.import_repo.get_rows(session_id=session_id)
+        return self._build_summary_from_rows(rows)
 
     def _serialize_preview_row(self, row: ImportRow) -> dict[str, Any]:
         return {
@@ -648,6 +723,10 @@ class ImportService:
                 skipped_count += 1
                 continue
 
+            if import_ready_only and row_status != "ready":
+                skipped_count += 1
+                continue
+
             if row_status not in {"ready"}:
                 skipped_count += 1
                 continue
@@ -661,6 +740,7 @@ class ImportService:
                 error_count += 1
                 row.status = "error"
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))
+                self.import_repo.update_row(row, status=row.status, errors=row.errors, review_required=True)
                 continue
 
             if not payloads:
@@ -672,6 +752,7 @@ class ImportService:
                         [*(row.errors or []), "Строка не содержит корректных данных для создания транзакции."]
                     )
                 )
+                self.import_repo.update_row(row, status=row.status, errors=row.errors, review_required=True)
                 continue
 
             try:
@@ -682,28 +763,44 @@ class ImportService:
                         payload=payload,
                     )
                     imported_count += 1
-                row.status = "committed"
-                row.created_transaction_id = last_transaction.id if last_transaction is not None else None
+                self.import_repo.update_row(
+                    row,
+                    status="committed",
+                    created_transaction_id=last_transaction.id if last_transaction is not None else None,
+                    review_required=False,
+                )
             except TransactionValidationError as exc:
                 row.status = "error"
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))
+                self.import_repo.update_row(row, status=row.status, errors=row.errors, review_required=True)
                 skipped_count += 1
                 error_count += 1
 
-        session.status = "committed"
+        remaining_rows = [
+            row
+            for row in self.import_repo.get_rows(session_id=session.id)
+            if (row.created_transaction_id is None and str(row.status or "").strip().lower() != "committed")
+        ]
+        remaining_summary = self._build_summary_from_rows(remaining_rows)
+        session.status = "committed" if not remaining_rows else "preview_ready"
         session.summary_json = {
             **(session.summary_json or {}),
+            **remaining_summary,
             "imported_count": imported_count,
             "skipped_count": skipped_count,
             "duplicate_count": duplicate_count,
             "error_count": error_count,
             "review_count": review_count,
         }
+        self.db.add(session)
         self.db.commit()
         self.db.refresh(session)
 
         return {
             "session_id": session.id,
+            "status": session.status,
+            "summary": remaining_summary,
+            "remaining_rows": [self._serialize_preview_row(row) for row in remaining_rows],
             "imported_count": imported_count,
             "skipped_count": skipped_count,
             "duplicate_count": duplicate_count,
@@ -740,6 +837,7 @@ class ImportService:
         base_payload: dict[str, Any] = {
             "account_id": int(account_id),
             "target_account_id": normalized.get("target_account_id"),
+            "credit_account_id": normalized.get("credit_account_id"),
             "category_id": normalized.get("category_id"),
             "amount": ImportService._to_decimal(amount),
             "currency": str(currency).upper(),
@@ -747,6 +845,10 @@ class ImportService:
             "operation_type": str(operation_type),
             "description": (normalized.get("description") or "")[:1000],
             "transaction_date": ImportService._to_datetime(transaction_date),
+            "credit_principal_amount": normalized.get("credit_principal_amount"),
+            "credit_interest_amount": normalized.get("credit_interest_amount"),
+            "counterparty_id": normalized.get("counterparty_id"),
+            "debt_direction": normalized.get("debt_direction"),
             "needs_review": bool(
                 normalized.get("needs_review")
                 or normalized.get("review_required")
@@ -758,10 +860,33 @@ class ImportService:
         else:
             base_payload["target_account_id"] = None
 
+        if base_payload.get("credit_account_id") not in (None, "", 0):
+            base_payload["credit_account_id"] = int(base_payload["credit_account_id"])
+        else:
+            base_payload["credit_account_id"] = None
+
+        if base_payload.get("credit_principal_amount") not in (None, ""):
+            base_payload["credit_principal_amount"] = ImportService._to_decimal(base_payload["credit_principal_amount"])
+        else:
+            base_payload["credit_principal_amount"] = None
+
+        if base_payload.get("credit_interest_amount") not in (None, ""):
+            base_payload["credit_interest_amount"] = ImportService._to_decimal(base_payload["credit_interest_amount"])
+        else:
+            base_payload["credit_interest_amount"] = None
+
         if base_payload.get("category_id") not in (None, "", 0):
             base_payload["category_id"] = int(base_payload["category_id"])
         else:
             base_payload["category_id"] = None
+
+        if base_payload.get("counterparty_id") not in (None, "", 0):
+            base_payload["counterparty_id"] = int(base_payload["counterparty_id"])
+        else:
+            base_payload["counterparty_id"] = None
+
+        if str(operation_type) == "credit_payment" and base_payload.get("target_account_id") in (None, "", 0):
+            base_payload["target_account_id"] = base_payload.get("credit_account_id")
 
         split_items = normalized.get("split_items") or []
         if str(operation_type) == "regular" and isinstance(split_items, list) and len(split_items) >= 2:

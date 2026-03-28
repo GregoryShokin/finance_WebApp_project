@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowRightLeft, CheckCircle2, Plus, ShieldAlert, Trash2 } from 'lucide-react';
+import { ArrowRightLeft, CheckCircle2, Plus, RotateCcw, ShieldAlert, Trash2 } from 'lucide-react';
+import { CategoryIcon } from '@/components/categories/category-icon';
 import { toast } from 'sonner';
 
 import { PageShell } from '@/components/layout/page-shell';
@@ -32,6 +33,7 @@ import type {
 } from '@/types/transaction';
 import type { ImportReviewRow } from '@/types/import';
 import { operationTypeLabels, transactionTypeLabels } from '@/components/transactions/constants';
+import { useDelayedDelete } from '@/hooks/use-delayed-delete';
 
 const priorityLabels: Record<CategoryPriority, string> = {
   expense_essential: 'Обязательный',
@@ -146,12 +148,12 @@ function getOperationOptionItems(): SearchSelectItem[] {
     { value: 'transfer', label: 'Перевод', searchText: 'перевод между счетами transfer' },
     { value: 'refund', label: 'Возврат', searchText: 'возврат refund' },
     { value: 'adjustment', label: 'Корректировка', searchText: 'корректировка adjustment' },
-    { value: 'credit_payment', label: 'Погашение тела кредита', searchText: 'погашение тела кредита credit payment кредит' },
+    { value: 'credit_payment', label: 'Кредитная операция', searchText: 'платеж по кредиту credit payment кредит' },
   ];
 }
 
 function getOperationLabel(value: TransactionOperationType) {
-  if (value === 'credit_payment') return 'Погашение тела кредита';
+  if (value === 'credit_payment') return 'Кредитная операция';
   if (value === 'transfer') return 'Перевод';
   if (value === 'refund') return 'Возврат';
   if (value === 'adjustment') return 'Корректировка';
@@ -180,6 +182,7 @@ export default function ReviewPage() {
   const [splitTransactionId, setSplitTransactionId] = useState<number | null>(null);
   const [splitRows, setSplitRows] = useState<SplitRow[]>([{ ...EMPTY_SPLIT_ROW }, { ...EMPTY_SPLIT_ROW }]);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const delayedDelete = useDelayedDelete();
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
   const [pendingAccountDraft, setPendingAccountDraft] = useState<Partial<CreateAccountPayload> | null>(null);
@@ -396,7 +399,6 @@ export default function ReviewPage() {
       name: payload.name,
       kind: payload.kind,
       priority: defaultCategoryPriorityByKind[payload.kind],
-      color: '#22c55e',
     });
     setCategoryDialogOpen(true);
   }
@@ -553,7 +555,7 @@ export default function ReviewPage() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-3">
-                          {category?.color ? <div className="h-4 w-4 shrink-0 rounded-full border border-slate-300" style={{ backgroundColor: category.color }} /> : null}
+                          {category ? <div className="flex size-7 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-700"><CategoryIcon iconName={category.icon_name} className="size-4" /></div> : null}
                           <h3 className="truncate text-base font-semibold text-slate-950">{title}</h3>
                         </div>
 
@@ -681,16 +683,29 @@ export default function ReviewPage() {
                       >
                         Подтвердить
                       </Button>
-                      <Button
-                        variant="danger"
-                        size="icon"
-                        onClick={() => deleteMutation.mutate(transaction.id)}
-                        disabled={deletingId === transaction.id}
-                        aria-label={deletingId === transaction.id ? 'Удаляем транзакцию' : 'Удалить транзакцию'}
-                        title={deletingId === transaction.id ? 'Удаляем...' : 'Удалить'}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
+                      {delayedDelete.isPending(transaction.id) ? (
+                        <Button
+                          variant="secondary"
+                          size="icon"
+                          onClick={() => delayedDelete.cancelDelete(transaction.id)}
+                          disabled={deletingId === transaction.id}
+                          aria-label={deletingId === transaction.id ? 'Транзакция удаляется' : 'Отменить удаление транзакции'}
+                          title={deletingId === transaction.id ? 'Удаляем...' : 'Отменить удаление'}
+                        >
+                          <RotateCcw className="size-4" />
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="danger"
+                          size="icon"
+                          onClick={() => delayedDelete.scheduleDelete(transaction.id, () => deleteMutation.mutate(transaction.id))}
+                          disabled={deletingId === transaction.id}
+                          aria-label={deletingId === transaction.id ? 'Удаляем транзакцию' : 'Удалить транзакцию'}
+                          title={deletingId === transaction.id ? 'Удаляем...' : 'Удалить'}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </div>

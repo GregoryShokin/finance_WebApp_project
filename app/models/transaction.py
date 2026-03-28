@@ -35,7 +35,9 @@ class Transaction(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     target_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    credit_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
+    counterparty_id: Mapped[int | None] = mapped_column(ForeignKey("counterparties.id", ondelete="SET NULL"), nullable=True, index=True)
 
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default="RUB", server_default="RUB")
@@ -47,6 +49,9 @@ class Transaction(Base):
         server_default=TransactionOperationType.regular.value,
         index=True,
     )
+    credit_principal_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    credit_interest_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    debt_direction: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     normalized_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -59,8 +64,15 @@ class Transaction(Base):
     user = relationship("User", back_populates="transactions")
     account = relationship("Account", back_populates="transactions", foreign_keys=[account_id])
     target_account = relationship("Account", foreign_keys=[target_account_id])
+    credit_account = relationship("Account", foreign_keys=[credit_account_id])
     category = relationship("Category", back_populates="transactions")
+    counterparty = relationship("Counterparty", back_populates="transactions")
 
     @property
     def category_priority(self) -> str | None:
         return self.category.priority if self.category else None
+
+
+    @property
+    def counterparty_name(self) -> str | None:
+        return self.counterparty.name if self.counterparty else None

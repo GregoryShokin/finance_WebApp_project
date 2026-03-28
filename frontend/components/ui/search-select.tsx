@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check } from 'lucide-react';
+import { Check, Trash2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
@@ -16,8 +16,8 @@ export type SearchSelectItem = {
   badgeClassName?: string;
 };
 
-function normalize(value: string) {
-  return value.trim().toLowerCase();
+function normalize(value?: string | null) {
+  return (value ?? '').trim().toLowerCase();
 }
 
 function getFilteredItems(items: SearchSelectItem[], query: string, limit: number) {
@@ -38,6 +38,8 @@ export function SearchSelect({
   onSelect,
   error,
   createAction,
+  onDeleteItem,
+  deleteItemLabel = 'Удалить',
   showAllOnFocus = false,
   limit = 8,
   disabled = false,
@@ -53,6 +55,8 @@ export function SearchSelect({
   onSelect: (item: SearchSelectItem) => void;
   error?: string;
   createAction?: { visible: boolean; label: string; onClick: () => void };
+  onDeleteItem?: (item: SearchSelectItem) => void;
+  deleteItemLabel?: string;
   showAllOnFocus?: boolean;
   limit?: number;
   disabled?: boolean;
@@ -162,26 +166,46 @@ export function SearchSelect({
                 const isHighlighted = highlightedIndex === index;
 
                 return (
-                  <button
+                  <div
                     key={item.value}
-                    type="button"
                     className={cn(
-                      'flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition',
+                      'flex w-full items-center gap-3 px-3 py-2 text-sm transition',
                       isHighlighted ? 'bg-slate-100' : 'hover:bg-slate-50',
                     )}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      onSelect(item);
-                      setOpen(false);
-                      setIsBrowsingOnFocus(false);
-                    }}
                   >
-                    <span className="min-w-0 flex-1 truncate text-slate-800">{item.label}</span>
-                    {item.badge ? (
-                      <span className={cn('shrink-0 text-xs text-slate-500', item.badgeClassName)}>{item.badge}</span>
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        onSelect(item);
+                        setOpen(false);
+                        setIsBrowsingOnFocus(false);
+                      }}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-slate-800">{item.label}</span>
+                      {item.badge ? (
+                        <span className={cn('shrink-0 text-xs text-slate-500', item.badgeClassName)}>{item.badge}</span>
+                      ) : null}
+                      {isSelected ? <Check className="size-4 shrink-0 text-slate-900" /> : null}
+                    </button>
+                    {onDeleteItem ? (
+                      <button
+                        type="button"
+                        className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onDeleteItem(item);
+                        }}
+                        aria-label={`${deleteItemLabel}: ${item.label}`}
+                        title={`${deleteItemLabel}: ${item.label}`}
+                      >
+                        <Trash2 className="size-4" />
+                      </button>
                     ) : null}
-                    {isSelected ? <Check className="size-4 shrink-0 text-slate-900" /> : null}
-                  </button>
+                  </div>
                 );
               })}
             </div>

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+
 from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.models.user import User
@@ -9,16 +10,17 @@ from app.services.account_service import AccountNotFoundError, AccountService
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
 
 
+def _prepare_payload(data: dict) -> dict:
+    if "currency" in data and data["currency"] is not None:
+        data["currency"] = str(data["currency"]).upper()
+    return data
+
+
 @router.post("", response_model=AccountResponse, status_code=status.HTTP_201_CREATED)
 def create_account(payload: AccountCreateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return AccountService(db).create(
-        user_id=current_user.id,
-        name=payload.name,
-        currency=payload.currency.upper(),
-        balance=payload.balance,
-        is_active=payload.is_active,
-        is_credit=payload.is_credit,
-    )
+    data = _prepare_payload(payload.model_dump(exclude_unset=True, by_alias=False))
+    data["user_id"] = current_user.id
+    return AccountService(db).create(**data)
 
 
 @router.get("", response_model=list[AccountResponse])
@@ -37,9 +39,7 @@ def get_account(account_id: int, db: Session = Depends(get_db), current_user: Us
 @router.put("/{account_id}", response_model=AccountResponse)
 def update_account(account_id: int, payload: AccountUpdateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
-        data = payload.model_dump(exclude_unset=True)
-        if "currency" in data and data["currency"] is not None:
-            data["currency"] = data["currency"].upper()
+        data = _prepare_payload(payload.model_dump(exclude_unset=True, by_alias=False))
         return AccountService(db).update(account_id=account_id, user_id=current_user.id, **data)
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

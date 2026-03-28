@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Boolean, func
+from sqlalchemy import DateTime, ForeignKey, Numeric, String, Boolean, Integer, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
 
@@ -13,7 +13,12 @@ class Account(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="RUB")
     balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    account_type: Mapped[str] = mapped_column(String(32), nullable=False, default="regular", server_default="regular", index=True)
     is_credit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", index=True)
+    credit_limit_original: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    credit_current_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    credit_interest_rate: Mapped[Decimal | None] = mapped_column(Numeric(8, 3), nullable=True)
+    credit_term_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

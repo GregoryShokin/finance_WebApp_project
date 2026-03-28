@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from decimal import Decimal
+from typing import Any
+
 from sqlalchemy.orm import Session
 
 from app.models.import_row import ImportRow
@@ -26,8 +29,8 @@ class ImportRepository:
             source_type=source_type,
             status="uploaded",
             file_content=file_content,
-            detected_columns=detected_columns,
-            parse_settings=parse_settings,
+            detected_columns=self._to_json_safe(detected_columns),
+            parse_settings=self._to_json_safe(parse_settings),
             mapping_json={},
             summary_json={},
         )
@@ -43,7 +46,10 @@ class ImportRepository:
         )
 
     def update_session(self, session: ImportSession, **updates) -> ImportSession:
+        json_fields = {"detected_columns", "parse_settings", "mapping_json", "summary_json"}
         for key, value in updates.items():
+            if key in json_fields:
+                value = self._to_json_safe(value)
             setattr(session, key, value)
         self.db.add(session)
         self.db.flush()
@@ -65,10 +71,10 @@ class ImportRepository:
         row = ImportRow(
             session_id=session_id,
             row_index=row_index,
-            raw_data_json=raw_data or {},
-            normalized_data_json=normalized_data or {},
+            raw_data_json=self._to_json_safe(raw_data or {}),
+            normalized_data_json=self._to_json_safe(normalized_data or {}),
             status=status,
-            error_message="\n".join([item for item in (errors or []) if item]) or None,
+            error_message="".join([item for item in (errors or []) if item]) or None,
         )
         self._hydrate_row_runtime_fields(
             row,
@@ -92,6 +98,9 @@ class ImportRepository:
 
         self.db.query(ImportRow).filter(ImportRow.session_id == resolved_session_id).delete(synchronize_session=False)
         if rows:
+            for row in rows:
+                row.raw_data_json = self._to_json_safe(row.raw_data_json or {})
+                row.normalized_data_json = self._to_json_safe(row.normalized_data_json or {})
             self.db.add_all(rows)
         self.db.flush()
 
@@ -114,7 +123,6 @@ class ImportRepository:
 
     def get_rows(self, *, session_id: int) -> list[ImportRow]:
         return self.list_rows(session_id=session_id)
-
 
     def get_row_for_user(self, *, row_id: int, user_id: int) -> tuple[ImportSession, ImportRow] | None:
         result = (
@@ -151,15 +159,28 @@ class ImportRepository:
             "normalized_data": "normalized_data_json",
             "errors": "error_message",
         }
+        json_fields = {"raw_data_json", "normalized_data_json"}
         for key, value in updates.items():
             target_key = alias_map.get(key, key)
             if target_key == "error_message" and isinstance(value, list):
-                value = "\n".join([item for item in value if item]) or None
+                value = "".join([item for item in value if item]) or None
+            if target_key in json_fields:
+                value = self._to_json_safe(value or {})
             setattr(row, target_key, value)
         self._hydrate_row_runtime_fields(row)
         self.db.add(row)
         self.db.flush()
         return row
+
+    @classmethod
+    def _to_json_safe(cls, value: Any) -> Any:
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): cls._to_json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [cls._to_json_safe(item) for item in value]
+        return value
 
     @staticmethod
     def _hydrate_row_runtime_fields(
@@ -170,8 +191,8 @@ class ImportRepository:
         duplicate_candidate: bool | None = None,
         review_required: bool | None = None,
     ) -> None:
-        row.raw_data = getattr(row, "raw_data", None) or (row.raw_data_json or {})
-        row.normalized_data = getattr(row, "normalized_data", None) or (row.normalized_data_json or {})
+        row.raw_data = row.raw_data_json or {}
+        row.normalized_data = row.normalized_data_json or {}
 
         if errors is None:
             message = row.error_message or ""

@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils/cn';
 
 const labels: Record<ImportRowStatus, string> = {
   ready: 'Готово',
-  warning: 'Требует внимания',
+  warning: 'Требует подтверждения',
   error: 'Ошибка',
   duplicate: 'Дубликат',
   skipped: 'Исключена',

@@ -4,34 +4,47 @@ import { TransactionForm } from '@/components/transactions/transaction-form';
 import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
 import type { CreateTransactionPayload, Transaction } from '@/types/transaction';
+import type { Counterparty } from '@/types/counterparty';
 
 export function TransactionsList({
   transactions,
   accounts,
   categories,
+  counterparties,
   onEdit,
   onDelete,
+  onCancelDelete,
   deletingId,
+  pendingDeleteIds,
   editingTransaction,
   isSubmittingEdit,
   onSubmitEdit,
   onCancelEdit,
   onCreateCategoryRequest,
   onCreateAccountRequest,
+  onCreateCounterpartyRequest,
+  onDeleteCounterpartyRequest,
 }: {
   transactions: Transaction[];
   accounts: Account[];
   categories: Category[];
+  counterparties?: Counterparty[];
   onEdit: (transaction: Transaction) => void;
   onDelete?: (transaction: Transaction) => void;
+  onCancelDelete?: (transactionId: number) => void;
   deletingId?: number | null;
+  pendingDeleteIds?: number[];
   editingTransaction?: Transaction | null;
   isSubmittingEdit?: boolean;
   onSubmitEdit?: (values: CreateTransactionPayload) => void;
   onCancelEdit?: () => void;
   onCreateCategoryRequest?: (payload: { name: string; kind: CategoryKind }) => void;
   onCreateAccountRequest?: (payload: { name: string }) => void;
+  onCreateCounterpartyRequest?: (payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) => void;
+  onDeleteCounterpartyRequest?: (counterparty: Counterparty) => void;
 }) {
+  const pendingSet = new Set(pendingDeleteIds ?? []);
+
   return (
     <div className="grid gap-4">
       {transactions.map((transaction) => {
@@ -45,6 +58,8 @@ export function TransactionsList({
               categories={categories}
               onEdit={onEdit}
               onDelete={onDelete}
+              onCancelDelete={onCancelDelete}
+              isDeletePending={pendingSet.has(transaction.id)}
               isDeleting={deletingId === transaction.id}
               isEditing={isEditing}
             />
@@ -64,11 +79,14 @@ export function TransactionsList({
                   initialData={editingTransaction}
                   accounts={accounts}
                   categories={categories}
+                  counterparties={counterparties ?? []}
                   isSubmitting={isSubmittingEdit}
                   onCancel={onCancelEdit}
                   onSubmit={onSubmitEdit}
                   onCreateAccountRequest={onCreateAccountRequest}
                   onCreateCategoryRequest={onCreateCategoryRequest}
+                  onCreateCounterpartyRequest={onCreateCounterpartyRequest}
+                  onDeleteCounterpartyRequest={onDeleteCounterpartyRequest}
                 />
               </Card>
             ) : null}

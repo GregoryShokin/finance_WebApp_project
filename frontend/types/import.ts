@@ -80,6 +80,9 @@ export type ImportPreviewResponse = {
 
 export type ImportCommitResponse = {
   session_id: number;
+  status: ImportSessionStatus;
+  summary: ImportPreviewResponse['summary'];
+  remaining_rows: ImportPreviewRow[];
   imported_count: number;
   skipped_count: number;
   duplicate_count: number;
@@ -97,13 +100,18 @@ export type ImportSplitItem = {
 export type ImportRowUpdatePayload = {
   account_id?: number | null;
   target_account_id?: number | null;
+  credit_account_id?: number | null;
   category_id?: number | null;
+  counterparty_id?: number | null;
   amount?: number | null;
   type?: string | null;
   operation_type?: string | null;
+  debt_direction?: string | null;
   description?: string | null;
   transaction_date?: string | null;
   currency?: string | null;
+  credit_principal_amount?: number | null;
+  credit_interest_amount?: number | null;
   split_items?: ImportSplitItem[] | null;
   action?: 'confirm' | 'exclude' | 'restore' | null;
 };

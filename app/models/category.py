@@ -43,6 +43,12 @@ class Category(Base):
         index=True,
     )
     color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    icon_name: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default='tag',
+        server_default='tag',
+    )
     is_system: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

@@ -105,30 +105,48 @@ function DateField({
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  const openPicker = () => {
+    if (!inputRef.current) return;
+
+    const input = inputRef.current as HTMLInputElement & {
+      showPicker?: () => void;
+    };
+
+    input.focus();
+
+    if (typeof input.showPicker === 'function') {
+      input.showPicker();
+      return;
+    }
+
+    input.click();
+  };
+
   return (
     <div className="grid gap-1.5">
       <label className="text-xs font-medium text-slate-600">{label}</label>
+
       <div className="relative">
         <button
           type="button"
-          className="flex h-11 w-full items-center justify-between rounded-xl border bg-white px-3 py-2 text-sm text-slate-900 transition hover:border-slate-400"
-          onClick={() => {
-            if (inputRef.current && 'showPicker' in inputRef.current) {
-              (inputRef.current as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
-            }
-            inputRef.current?.focus();
-          }}
+          onClick={openPicker}
+          className="flex h-11 w-full items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 transition hover:border-slate-400 focus:border-slate-300 focus:outline-none focus:ring-2 focus:ring-slate-200"
+          aria-label={label}
         >
-          <span className={cn(value ? 'text-slate-900' : 'text-slate-400')}>{formatDisplayDate(value)}</span>
-          <CalendarDays className="size-4 text-slate-500" />
+          <span className={cn(value ? 'text-slate-900' : 'text-slate-400')}>
+            {formatDisplayDate(value)}
+          </span>
+          <CalendarDays className="size-4 shrink-0 text-slate-500" />
         </button>
+
         <input
           ref={inputRef}
           type="date"
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-          aria-label={label}
+          className="pointer-events-none absolute left-0 top-0 h-px w-px opacity-0"
+          tabIndex={-1}
+          aria-hidden="true"
         />
       </div>
     </div>
@@ -142,6 +160,7 @@ export function TransactionFilters({
   collapsed,
   onToggle,
   onChange,
+  onReset,
 }: {
   value: {
     search: string;
@@ -159,6 +178,7 @@ export function TransactionFilters({
   accounts: Account[];
   categories: Category[];
   collapsed: boolean;
+  onReset: () => void;
   onToggle: () => void;
   onChange: (next: {
     search: string;
@@ -295,16 +315,23 @@ export function TransactionFilters({
   }, [reviewItems, value.needs_review]);
 
   return (
-    <Card className="rounded-2xl bg-white p-4 shadow-soft">
-      <div className="mb-4 flex items-center justify-between gap-3">
+    <Card className="p-4">
+    <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-slate-900">Фильтр транзакций</h2>
           <p className="text-xs text-slate-500">Поиск по признакам, диапазону дат и сумме.</p>
         </div>
-        <Button variant="secondary" onClick={onToggle}>
-          {collapsed ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
-          {collapsed ? 'Показать фильтр' : 'Скрыть фильтр'}
-        </Button>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="secondary" onClick={onReset}>
+            Сбросить фильтр
+          </Button>
+
+          <Button variant="secondary" onClick={onToggle}>
+            {collapsed ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
+            {collapsed ? 'Показать фильтр' : 'Скрыть фильтр'}
+          </Button>
+        </div>
       </div>
 
       {!collapsed ? (

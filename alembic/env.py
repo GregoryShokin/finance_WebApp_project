@@ -7,6 +7,7 @@ from app.models.user import User  # noqa: F401
 from app.models.account import Account  # noqa: F401
 from app.models.category import Category  # noqa: F401
 from app.models.transaction import Transaction  # noqa: F401
+from app.models.counterparty import Counterparty  # noqa: F401
 from app.models.import_session import ImportSession  # noqa: F401
 from app.models.import_row import ImportRow  # noqa: F401
 from app.models.transaction_category_rule import TransactionCategoryRule  # noqa: F401

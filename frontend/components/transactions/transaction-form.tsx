@@ -9,28 +9,38 @@ import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-sele
 import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
 import type { CreateTransactionPayload, Transaction, TransactionKind, TransactionOperationType } from '@/types/transaction';
+import type { Counterparty } from '@/types/counterparty';
 import { operationTypeLabels, transactionTypeLabels } from '@/components/transactions/constants';
 
 type TransactionFormValues = {
   account_id: string;
   target_account_id: string;
   category_id: string;
+  counterparty_id: string;
+  credit_account_id: string;
   amount: string;
+  credit_principal_amount: string;
+  credit_interest_amount: string;
   operation_type: TransactionOperationType;
   description: string;
   transaction_date: string;
   needs_review: string;
 };
 
-type MainTypeValue = 'regular' | 'transfer' | 'investment' | 'credit_principal' | 'debt';
+type MainTypeValue = 'regular' | 'refund' | 'transfer' | 'investment' | 'credit_operation' | 'debt';
 type InvestmentDirection = '' | 'buy' | 'sell';
-type DebtDirection = '' | 'lent' | 'borrowed';
+type DebtDirection = '' | 'lent' | 'borrowed' | 'repaid' | 'collected';
+type CreditOperationKind = '' | 'disbursement' | 'payment';
 
 const defaultValues: TransactionFormValues = {
   account_id: '',
   target_account_id: '',
   category_id: '',
+  credit_account_id: '',
+  counterparty_id: '',
   amount: '',
+  credit_principal_amount: '',
+  credit_interest_amount: '',
   operation_type: 'regular',
   description: '',
   transaction_date: '',
@@ -54,48 +64,69 @@ function normalize(value: string) {
   return value.trim().toLowerCase();
 }
 
+
+function isLoanAccount(account: Account) {
+  return account.account_type === 'credit' || account.is_credit;
+}
+
+function isSelectableTransactionAccount(account: Account) {
+  return !isLoanAccount(account);
+}
+
 function mapOperationToUi(
   operationType: TransactionOperationType,
-  transactionKind?: TransactionKind | null,
-): {
+  debtDirectionOrKind?: DebtDirection | TransactionKind | null,
+) : {
   mainType: MainTypeValue;
   investmentDirection: InvestmentDirection;
   debtDirection: DebtDirection;
+  creditOperationKind: CreditOperationKind;
 } {
   if (operationType === 'transfer') {
-    return { mainType: 'transfer', investmentDirection: '', debtDirection: '' };
+    return { mainType: 'transfer', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
+  }
+  if (operationType === 'refund') {
+    return { mainType: 'refund', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
   }
   if (operationType === 'investment_buy') {
-    return { mainType: 'investment', investmentDirection: 'buy', debtDirection: '' };
+    return { mainType: 'investment', investmentDirection: 'buy', debtDirection: '', creditOperationKind: '' };
   }
   if (operationType === 'investment_sell') {
-    return { mainType: 'investment', investmentDirection: 'sell', debtDirection: '' };
+    return { mainType: 'investment', investmentDirection: 'sell', debtDirection: '', creditOperationKind: '' };
   }
   if (operationType === 'credit_disbursement' || operationType === 'credit_payment') {
-    return { mainType: 'credit_principal', investmentDirection: '', debtDirection: '' };
+    return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: operationType === 'credit_disbursement' ? 'disbursement' : 'payment' };
   }
   if (operationType === 'debt') {
     return {
       mainType: 'debt',
       investmentDirection: '',
-      debtDirection: transactionKind === 'income' ? 'borrowed' : 'lent',
+      debtDirection: debtDirectionOrKind === 'lent' || debtDirectionOrKind === 'borrowed' || debtDirectionOrKind === 'repaid' || debtDirectionOrKind === 'collected' ? debtDirectionOrKind : debtDirectionOrKind === 'income' ? 'borrowed' : 'lent',
+      creditOperationKind: '',
     };
   }
-  return { mainType: 'regular', investmentDirection: '', debtDirection: '' };
+  return { mainType: 'regular', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
 }
 
-function mapUiToOperation(mainType: MainTypeValue, investmentDirection: InvestmentDirection): TransactionOperationType {
+function mapUiToOperation(mainType: MainTypeValue, investmentDirection: InvestmentDirection, creditOperationKind: CreditOperationKind): TransactionOperationType {
   if (mainType === 'transfer') return 'transfer';
+  if (mainType === 'refund') return 'refund';
   if (mainType === 'investment') {
     return investmentDirection === 'sell' ? 'investment_sell' : 'investment_buy';
   }
-  if (mainType === 'credit_principal') {
-    return 'credit_payment';
+  if (mainType === 'credit_operation') {
+    return creditOperationKind === 'disbursement' ? 'credit_disbursement' : 'credit_payment';
   }
   if (mainType === 'debt') {
     return 'debt';
   }
   return 'regular';
+}
+
+function getCreditOperationKindLabel(kind: CreditOperationKind) {
+  if (kind === 'disbursement') return 'Получение кредита';
+  if (kind === 'payment') return 'Платёж по кредиту';
+  return 'Вид кредитной операции не выбран';
 }
 
 function getFixedTypeByOperation(operationType: TransactionOperationType): TransactionKind | null {
@@ -108,6 +139,8 @@ function getFixedTypeByOperation(operationType: TransactionOperationType): Trans
     credit_payment: 'expense',
     credit_interest: 'expense',
     debt: null,
+    refund: 'income',
+    adjustment: null,
   };
   return map[operationType] ?? null;
 }
@@ -118,7 +151,10 @@ function getDerivedType(
   debtDirection: DebtDirection,
 ): TransactionKind {
   if (operationType === 'debt') {
-    return debtDirection === 'borrowed' ? 'income' : 'expense';
+    return debtDirection === 'borrowed' || debtDirection === 'collected' ? 'income' : 'expense';
+  }
+  if (operationType === 'refund') {
+    return 'income';
   }
   if (category?.kind) return category.kind as TransactionKind;
   return getFixedTypeByOperation(operationType) ?? 'expense';
@@ -129,13 +165,23 @@ function getOperationSummaryLabel(
   investmentDirection: InvestmentDirection,
   debtDirection: DebtDirection,
   hasValidDebtDirection: boolean,
+  creditOperationKind: CreditOperationKind,
+  hasValidCreditOperationKind: boolean,
 ) {
   if (operationType === 'debt') {
     if (!hasValidDebtDirection) return 'Долг: направление не выбрано';
-    return debtDirection === 'borrowed' ? 'Долг: мне заняли' : 'Долг: занял';
+    if (debtDirection === 'borrowed') return 'Долг: мне заняли';
+    if (debtDirection === 'lent') return 'Долг: я занял';
+    if (debtDirection === 'repaid') return 'Долг: вернул';
+    if (debtDirection === 'collected') return 'Долг: мне вернули';
+    return 'Долг';
   }
   if (operationType === 'investment_buy' || operationType === 'investment_sell') {
     if (!investmentDirection) return 'Инвестиционный: действие не выбрано';
+  }
+  if (operationType === 'credit_disbursement' || operationType === 'credit_payment') {
+    if (!hasValidCreditOperationKind) return 'Кредитная операция: вид не выбран';
+    return `Кредитная операция: ${getCreditOperationKindLabel(creditOperationKind)}`;
   }
   return operationTypeLabels[operationType];
 }
@@ -144,20 +190,26 @@ export function TransactionForm({
   initialData,
   accounts,
   categories,
+  counterparties = [],
   isSubmitting,
   onSubmit,
   onCancel,
   onCreateCategoryRequest,
   onCreateAccountRequest,
+  onCreateCounterpartyRequest,
+  onDeleteCounterpartyRequest,
 }: {
   initialData?: Transaction | null;
   accounts: Account[];
   categories: Category[];
+  counterparties?: Counterparty[];
   isSubmitting?: boolean;
   onSubmit: (values: CreateTransactionPayload) => void;
   onCancel: () => void;
   onCreateCategoryRequest?: (payload: { name: string; kind: CategoryKind }) => void;
   onCreateAccountRequest?: (payload: { name: string }) => void;
+  onCreateCounterpartyRequest?: (payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) => void;
+  onDeleteCounterpartyRequest?: (counterparty: Counterparty) => void;
 }) {
   const {
     register,
@@ -171,25 +223,32 @@ export function TransactionForm({
   const selectedAccountId = watch('account_id');
   const selectedTargetAccountId = watch('target_account_id');
   const selectedCategoryId = watch('category_id');
+  const selectedCreditAccountId = watch('credit_account_id');
+  const selectedCounterpartyId = watch('counterparty_id');
   const needsReviewValue = watch('needs_review');
 
   const [mainType, setMainType] = useState<MainTypeValue>('regular');
   const [mainTypeQuery, setMainTypeQuery] = useState('Обычный');
   const [investmentDirection, setInvestmentDirection] = useState<InvestmentDirection>('');
   const [investmentDirectionQuery, setInvestmentDirectionQuery] = useState('');
+  const [creditOperationKind, setCreditOperationKind] = useState<CreditOperationKind>('');
+  const [creditOperationKindQuery, setCreditOperationKindQuery] = useState('');
   const [debtDirection, setDebtDirection] = useState<DebtDirection>('');
   const [debtDirectionQuery, setDebtDirectionQuery] = useState('');
   const [accountQuery, setAccountQuery] = useState('');
   const [targetAccountQuery, setTargetAccountQuery] = useState('');
   const [categoryQuery, setCategoryQuery] = useState('');
+  const [creditAccountQuery, setCreditAccountQuery] = useState('');
+  const [counterpartyQuery, setCounterpartyQuery] = useState('');
   const [reviewQuery, setReviewQuery] = useState('Нет');
 
   const mainTypeItems = useMemo<SearchSelectItem[]>(
     () => [
       { value: 'regular', label: 'Обычный', searchText: 'обычный обычная regular' },
+      { value: 'refund', label: 'Возврат', searchText: 'возврат refund' },
       { value: 'transfer', label: 'Перевод', searchText: 'перевод transfer между счетами' },
       { value: 'investment', label: 'Инвестиционный', searchText: 'инвестиционный инвестиции investment' },
-      { value: 'credit_principal', label: 'Тело кредита', searchText: 'тело кредита кредит principal' },
+      { value: 'credit_operation', label: 'Кредитная операция', searchText: 'кредитная операция кредит payment disbursement loan credit' },
       { value: 'debt', label: 'Долг', searchText: 'долг долги debt займ' },
     ],
     [],
@@ -203,17 +262,27 @@ export function TransactionForm({
     [],
   );
 
+  const creditOperationKindItems = useMemo<SearchSelectItem[]>(
+    () => [
+      { value: 'disbursement', label: 'Получение кредита', searchText: 'получение кредита выдача кредита disbursement' },
+      { value: 'payment', label: 'Платёж по кредиту', searchText: 'платеж по кредиту погашение кредита payment' },
+    ],
+    [],
+  );
+
   const debtDirectionItems = useMemo<SearchSelectItem[]>(
     () => [
-      { value: 'lent', label: 'Занял', searchText: 'занял выдал долг дал в долг расход выбытие' },
+      { value: 'lent', label: 'Я занял', searchText: 'я занял выдал долг дал в долг расход выбытие' },
       { value: 'borrowed', label: 'Мне заняли', searchText: 'мне заняли взял в долг поступление доход' },
+      { value: 'repaid', label: 'Вернул', searchText: 'вернул погасил долг отдал долг' },
+      { value: 'collected', label: 'Мне вернули', searchText: 'мне вернули возврат долга вернули деньги' },
     ],
     [],
   );
 
   const accountItems = useMemo<SearchSelectItem[]>(
     () =>
-      accounts.map((account) => ({
+      accounts.filter(isSelectableTransactionAccount).map((account) => ({
         value: String(account.id),
         label: account.name,
         searchText: `${account.name} ${account.currency}`,
@@ -234,6 +303,21 @@ export function TransactionForm({
           badgeClassName: category.kind === 'income' ? 'text-emerald-600' : 'text-rose-600',
         })),
     [categories],
+  );
+
+
+  const counterpartyItems = useMemo<SearchSelectItem[]>(
+    () =>
+      [...counterparties]
+        .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
+        .map((item) => ({
+          value: String(item.id),
+          label: item.name,
+          searchText: item.name,
+          badge: Number(item.receivable_amount) > 0 ? 'Мне должны' : Number(item.payable_amount) > 0 ? 'Я должен' : undefined,
+          badgeClassName: Number(item.receivable_amount) > 0 ? 'text-emerald-600' : Number(item.payable_amount) > 0 ? 'text-amber-600' : undefined,
+        })),
+    [counterparties],
   );
 
   const reviewItems = useMemo<SearchSelectItem[]>(
@@ -259,17 +343,39 @@ export function TransactionForm({
     [categories, selectedCategoryId],
   );
 
+  const selectedCreditAccount = useMemo(
+    () => accounts.find((account) => String(account.id) === selectedCreditAccountId) ?? null,
+    [accounts, selectedCreditAccountId],
+  );
+
+  const selectedCounterparty = useMemo(
+    () => counterparties.find((item) => String(item.id) === selectedCounterpartyId) ?? null,
+    [counterparties, selectedCounterpartyId],
+  );
+
   const exactMatchedAccount = useMemo(() => {
     const normalized = normalize(accountQuery);
     if (!normalized) return null;
-    return accounts.find((account) => normalize(account.name) === normalized) ?? null;
+    return accounts.find((account) => isSelectableTransactionAccount(account) && normalize(account.name) === normalized) ?? null;
   }, [accounts, accountQuery]);
 
   const exactMatchedTargetAccount = useMemo(() => {
     const normalized = normalize(targetAccountQuery);
     if (!normalized) return null;
-    return accounts.find((account) => normalize(account.name) === normalized) ?? null;
+    return accounts.find((account) => isSelectableTransactionAccount(account) && normalize(account.name) === normalized) ?? null;
   }, [accounts, targetAccountQuery]);
+
+  const exactMatchedCreditAccount = useMemo(() => {
+    const normalized = normalize(creditAccountQuery);
+    if (!normalized) return null;
+    return accounts.find((account) => isLoanAccount(account) && normalize(account.name) === normalized) ?? null;
+  }, [accounts, creditAccountQuery]);
+
+  const exactMatchedCounterparty = useMemo(() => {
+    const normalized = normalize(counterpartyQuery);
+    if (!normalized) return null;
+    return counterparties.find((item) => normalize(item.name) === normalized) ?? null;
+  }, [counterparties, counterpartyQuery]);
 
   const exactMatchedCategory = useMemo(() => {
     const normalized = normalize(categoryQuery);
@@ -287,6 +393,11 @@ export function TransactionForm({
     [investmentDirectionItems, investmentDirection],
   );
 
+  const selectedCreditOperationKindItem = useMemo(
+    () => creditOperationKindItems.find((item) => item.value === creditOperationKind) ?? null,
+    [creditOperationKindItems, creditOperationKind],
+  );
+
   const selectedDebtDirectionItem = useMemo(
     () => debtDirectionItems.find((item) => item.value === debtDirection) ?? null,
     [debtDirectionItems, debtDirection],
@@ -297,6 +408,11 @@ export function TransactionForm({
     [accountItems, selectedTargetAccountId],
   );
 
+  const selectedCounterpartyItem = useMemo(
+    () => counterpartyItems.find((item) => item.value === selectedCounterpartyId) ?? null,
+    [counterpartyItems, selectedCounterpartyId],
+  );
+
   const selectedReviewItem = useMemo(
     () => reviewItems.find((item) => item.value === needsReviewValue) ?? null,
     [reviewItems, needsReviewValue],
@@ -304,13 +420,21 @@ export function TransactionForm({
 
   const showTransferTarget = mainType === 'transfer';
   const showInvestmentDirection = mainType === 'investment';
+  const showCreditOperationKind = mainType === 'credit_operation';
+  const showCreditPaymentFields = mainType === 'credit_operation' && creditOperationKind === 'payment';
+  const showCreditDisbursementInfo = mainType === 'credit_operation' && creditOperationKind === 'disbursement';
   const showDebtDirection = mainType === 'debt';
-  const showCategory = mainType === 'regular';
+  const showCounterparty = mainType === 'debt';
+  const showCategory = mainType === 'regular' || mainType === 'refund';
   const hasValidInvestmentDirection = mainType !== 'investment' || Boolean(investmentDirection);
+  const hasValidCreditOperationKind = mainType !== 'credit_operation' || Boolean(creditOperationKind);
   const hasValidDebtDirection = mainType !== 'debt' || Boolean(debtDirection);
+  const hasValidCounterparty = mainType !== 'debt' || Boolean(selectedCounterpartyId);
   const hasValidTargetAccount = !showTransferTarget || (Boolean(selectedTargetAccountId) && selectedTargetAccountId !== selectedAccountId);
-  const hasValidDirection = hasValidInvestmentDirection && hasValidDebtDirection && hasValidTargetAccount;
-  const resolvedOperationType = mapUiToOperation(mainType, investmentDirection || 'buy');
+  const hasValidCreditAccount = !showCreditPaymentFields || (Boolean(selectedCreditAccountId) && selectedCreditAccountId !== selectedAccountId);
+  const hasValidCreditBreakdown = !showCreditPaymentFields || (Number(watch('credit_principal_amount')) >= 0 && Number(watch('credit_interest_amount')) >= 0 && Number(watch('amount')) === Number(watch('credit_principal_amount')) + Number(watch('credit_interest_amount')));
+  const hasValidDirection = hasValidInvestmentDirection && hasValidCreditOperationKind && hasValidDebtDirection && hasValidTargetAccount && hasValidCreditAccount && hasValidCreditBreakdown && hasValidCounterparty;
+  const resolvedOperationType = mapUiToOperation(mainType, investmentDirection || 'buy', creditOperationKind);
   const derivedType = useMemo(
     () => getDerivedType(resolvedOperationType, showCategory ? selectedCategory : null, debtDirection),
     [resolvedOperationType, selectedCategory, showCategory, debtDirection],
@@ -318,6 +442,8 @@ export function TransactionForm({
 
   const showCreateAccountAction = Boolean(accountQuery.trim()) && !exactMatchedAccount;
   const showCreateCategoryAction = showCategory && Boolean(categoryQuery.trim()) && !exactMatchedCategory;
+  const showCreateCreditAccountAction = showCreditPaymentFields && Boolean(creditAccountQuery.trim()) && !exactMatchedCreditAccount;
+  const showCreateCounterpartyAction = showCounterparty && Boolean(counterpartyQuery.trim()) && !exactMatchedCounterparty;
   const categoryKindForCreate = derivedType === 'income' ? 'income' : 'expense';
 
   useEffect(() => {
@@ -353,6 +479,17 @@ export function TransactionForm({
   }, [targetAccountQuery, exactMatchedTargetAccount, setValue, showTransferTarget]);
 
   useEffect(() => {
+    if (!showCounterparty) {
+      setValue('counterparty_id', '', { shouldValidate: true, shouldDirty: true });
+      setCounterpartyQuery('');
+    } else if (exactMatchedCounterparty) {
+      setValue('counterparty_id', String(exactMatchedCounterparty.id), { shouldValidate: true, shouldDirty: true });
+    } else if (counterpartyQuery.trim()) {
+      setValue('counterparty_id', '', { shouldValidate: true, shouldDirty: true });
+    }
+  }, [counterpartyQuery, exactMatchedCounterparty, setValue, showCounterparty]);
+
+  useEffect(() => {
     if (!showCategory) {
       setValue('category_id', '', { shouldValidate: true, shouldDirty: true });
       setCategoryQuery('');
@@ -370,8 +507,31 @@ export function TransactionForm({
   }, [categoryQuery, exactMatchedCategory, setValue, showCategory]);
 
   useEffect(() => {
+    if (!showCreditOperationKind) {
+      setCreditOperationKind('');
+      setCreditOperationKindQuery('');
+    }
+  }, [showCreditOperationKind]);
+
+  useEffect(() => {
+    if (!showCreditPaymentFields) {
+      setValue('credit_account_id', '', { shouldValidate: true });
+      setValue('credit_principal_amount', '', { shouldValidate: true });
+      setValue('credit_interest_amount', '', { shouldValidate: true });
+      setCreditAccountQuery('');
+      return;
+    }
+
+    if (exactMatchedCreditAccount) {
+      setValue('credit_account_id', String(exactMatchedCreditAccount.id), { shouldValidate: true, shouldDirty: true });
+    } else if (!creditAccountQuery.trim()) {
+      setValue('credit_account_id', '', { shouldValidate: true, shouldDirty: true });
+    }
+  }, [creditAccountQuery, exactMatchedCreditAccount, setValue, showCreditPaymentFields]);
+
+  useEffect(() => {
     if (initialData) {
-      const mapped = mapOperationToUi(initialData.operation_type, initialData.type);
+      const mapped = mapOperationToUi(initialData.operation_type, initialData.debt_direction ?? initialData.type);
       const initialAccount = accounts.find((account) => account.id === initialData.account_id) ?? null;
       const initialTargetAccount = initialData.target_account_id ? accounts.find((account) => account.id === initialData.target_account_id) ?? null : null;
       const initialCategory = initialData.category_id ? categories.find((category) => category.id === initialData.category_id) ?? null : null;
@@ -380,7 +540,11 @@ export function TransactionForm({
         account_id: String(initialData.account_id),
         target_account_id: initialData.target_account_id ? String(initialData.target_account_id) : '',
         category_id: initialData.category_id ? String(initialData.category_id) : '',
+        credit_account_id: initialData.credit_account_id ? String(initialData.credit_account_id) : '',
+        counterparty_id: initialData.counterparty_id ? String(initialData.counterparty_id) : '',
         amount: String(initialData.amount),
+        credit_principal_amount: initialData.credit_principal_amount != null ? String(initialData.credit_principal_amount) : '',
+        credit_interest_amount: initialData.credit_interest_amount != null ? String(initialData.credit_interest_amount) : '',
         operation_type: initialData.operation_type,
         description: initialData.description ?? '',
         transaction_date: toDatetimeLocal(initialData.transaction_date),
@@ -391,11 +555,14 @@ export function TransactionForm({
       setMainTypeQuery(mainTypeItems.find((item) => item.value === mapped.mainType)?.label ?? 'Обычный');
       setInvestmentDirection(mapped.investmentDirection);
       setInvestmentDirectionQuery(mapped.investmentDirection === 'buy' ? 'Покупка' : mapped.investmentDirection === 'sell' ? 'Продажа' : '');
+      setCreditOperationKind(mapped.creditOperationKind);
+      setCreditOperationKindQuery(mapped.creditOperationKind ? getCreditOperationKindLabel(mapped.creditOperationKind) : '');
       setDebtDirection(mapped.debtDirection);
-      setDebtDirectionQuery(mapped.debtDirection === 'borrowed' ? 'Мне заняли' : mapped.debtDirection === 'lent' ? 'Занял' : '');
+      setDebtDirectionQuery(mapped.debtDirection === 'borrowed' ? 'Мне заняли' : mapped.debtDirection === 'lent' ? 'Я занял' : mapped.debtDirection === 'repaid' ? 'Вернул' : mapped.debtDirection === 'collected' ? 'Мне вернули' : '');
       setAccountQuery(initialAccount?.name ?? '');
       setTargetAccountQuery(initialTargetAccount?.name ?? '');
       setCategoryQuery(initialCategory?.name ?? '');
+      setCounterpartyQuery(initialData.counterparty_name ?? '');
       setReviewQuery(initialData.needs_review ? 'Да' : 'Нет');
       return;
     }
@@ -405,6 +572,9 @@ export function TransactionForm({
     setMainTypeQuery('Обычный');
     setInvestmentDirection('');
     setInvestmentDirectionQuery('');
+    setCreditOperationKind('');
+    setCreditOperationKindQuery('');
+    setCounterpartyQuery('');
     setDebtDirection('');
     setDebtDirectionQuery('');
     setAccountQuery('');
@@ -416,6 +586,12 @@ export function TransactionForm({
   function handleCreateAccountClick() {
     const name = accountQuery.trim() || 'Новый счёт';
     onCreateAccountRequest?.({ name });
+  }
+
+  function handleCreateCounterpartyClick() {
+    const name = counterpartyQuery.trim() || 'Новый контрагент';
+    const opening_balance_kind = debtDirection === 'borrowed' || debtDirection === 'repaid' ? 'payable' : 'receivable';
+    onCreateCounterpartyRequest?.({ name, opening_balance_kind });
   }
 
   function handleCreateCategoryClick() {
@@ -432,8 +608,13 @@ export function TransactionForm({
         onSubmit({
           account_id: Number(values.account_id),
           target_account_id: showTransferTarget && values.target_account_id ? Number(values.target_account_id) : null,
+          credit_account_id: showCreditPaymentFields && values.credit_account_id ? Number(values.credit_account_id) : null,
           category_id: showCategory && values.category_id ? Number(values.category_id) : null,
+          counterparty_id: showCounterparty && values.counterparty_id ? Number(values.counterparty_id) : null,
           amount: Number(values.amount),
+          credit_principal_amount: showCreditPaymentFields ? Number(values.credit_principal_amount) : null,
+          credit_interest_amount: showCreditPaymentFields ? Number(values.credit_interest_amount) : null,
+          debt_direction: showCounterparty && debtDirection ? debtDirection : null,
           currency: (selectedAccount?.currency ?? selectedTargetAccount?.currency ?? 'RUB').trim().toUpperCase(),
           type: getDerivedType(
             values.operation_type,
@@ -449,6 +630,7 @@ export function TransactionForm({
     >
       <input type="hidden" {...register('operation_type', { required: true })} />
       <input type="hidden" {...register('account_id', { required: 'Выбери счёт отправления' })} />
+      <input type="hidden" {...register('counterparty_id')} />
       <input
         type="hidden"
         {...register('target_account_id', {
@@ -457,6 +639,18 @@ export function TransactionForm({
             if (!targetAccountQuery.trim()) return 'Выбери счёт поступления';
             if (!value) return 'Выбери счёт поступления из списка';
             if (value === selectedAccountId) return 'Счёт отправления и поступления должны отличаться';
+            return true;
+          },
+        })}
+      />
+      <input
+        type="hidden"
+        {...register('credit_account_id', {
+          validate: (value) => {
+            if (!showCreditPaymentFields) return true;
+            if (!creditAccountQuery.trim()) return 'Выбери кредит';
+            if (!value) return 'Выбери кредит из списка';
+            if (value === selectedAccountId) return 'Счёт списания и кредит должны отличаться';
             return true;
           },
         })}
@@ -492,9 +686,23 @@ export function TransactionForm({
               setInvestmentDirection('');
               setInvestmentDirectionQuery('');
             }
+            if (nextType !== 'credit_operation') {
+              setCreditOperationKind('');
+              setCreditOperationKindQuery('');
+            }
             if (nextType !== 'debt') {
               setDebtDirection('');
               setDebtDirectionQuery('');
+            }
+            if (nextType === 'refund') {
+              setValue('target_account_id', '', { shouldValidate: true, shouldDirty: true });
+              setTargetAccountQuery('');
+              setValue('credit_account_id', '', { shouldValidate: true, shouldDirty: true });
+              setCreditAccountQuery('');
+              setValue('counterparty_id', '', { shouldValidate: true, shouldDirty: true });
+              setCounterpartyQuery('');
+              setValue('credit_principal_amount', '', { shouldValidate: true, shouldDirty: true });
+              setValue('credit_interest_amount', '', { shouldValidate: true, shouldDirty: true });
             }
           }}
         />
@@ -518,6 +726,25 @@ export function TransactionForm({
           />
         ) : null}
 
+        {showCreditOperationKind ? (
+          <SearchSelect
+            id="tx-credit-operation-kind"
+            label="Вид кредитной операции"
+            placeholder="Выбери вид"
+            widthClassName="w-full"
+            query={creditOperationKindQuery}
+            setQuery={setCreditOperationKindQuery}
+            items={creditOperationKindItems}
+            selectedValue={selectedCreditOperationKindItem?.value}
+            showAllOnFocus
+            onSelect={(item) => {
+              setCreditOperationKind(item.value as CreditOperationKind);
+              setCreditOperationKindQuery(item.label);
+            }}
+            error={submitCount > 0 && !hasValidCreditOperationKind ? 'Выбери вид кредитной операции' : undefined}
+          />
+        ) : null}
+
         {showDebtDirection ? (
           <SearchSelect
             id="tx-debt-direction"
@@ -537,10 +764,43 @@ export function TransactionForm({
           />
         ) : null}
 
+        {showCounterparty ? (
+          <SearchSelect
+            id="tx-counterparty"
+            label="Контрагент"
+            placeholder="Выбери контрагента"
+            widthClassName="w-full"
+            query={counterpartyQuery}
+            setQuery={setCounterpartyQuery}
+            items={counterpartyItems}
+            selectedValue={selectedCounterpartyItem?.value}
+            showAllOnFocus
+            onSelect={(item) => {
+              setValue('counterparty_id', item.value, { shouldValidate: true, shouldDirty: true });
+              setCounterpartyQuery(item.label);
+            }}
+            error={submitCount > 0 && !hasValidCounterparty ? 'Выбери контрагента' : undefined}
+            onDeleteItem={onDeleteCounterpartyRequest ? (item) => {
+              const found = counterparties.find((counterparty) => String(counterparty.id) === item.value);
+              if (found) onDeleteCounterpartyRequest(found);
+            } : undefined}
+            deleteItemLabel="Удалить контрагента"
+            createAction={
+              onCreateCounterpartyRequest
+                ? {
+                    visible: showCreateCounterpartyAction,
+                    label: 'Создать контрагента',
+                    onClick: handleCreateCounterpartyClick,
+                  }
+                : undefined
+            }
+          />
+        ) : null}
+
         <div>
           <SearchSelect
             id="tx-account"
-            label={showTransferTarget ? 'Счёт отправления' : 'Счёт'}
+            label={showTransferTarget ? 'Счёт отправления' : showCreditDisbursementInfo ? 'Счёт поступления' : 'Счёт'}
             placeholder="Выбери счёт"
             widthClassName="w-full"
             query={accountQuery}
@@ -586,8 +846,38 @@ export function TransactionForm({
           </div>
         ) : null}
 
+        {showCreditPaymentFields ? (
+          <div>
+            <SearchSelect
+              id="tx-credit-account"
+              label="Кредит"
+              placeholder="Выбери кредит"
+              widthClassName="w-full"
+              query={creditAccountQuery}
+              setQuery={setCreditAccountQuery}
+              items={accounts.filter((account) => isLoanAccount(account) && String(account.id) !== selectedAccountId).map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency }))}
+              selectedValue={selectedCreditAccountId}
+              showAllOnFocus
+              onSelect={(item) => {
+                setValue('credit_account_id', item.value, { shouldValidate: true, shouldDirty: true });
+                setCreditAccountQuery(item.label);
+              }}
+              error={errors.credit_account_id?.message || (submitCount > 0 && !hasValidCreditAccount ? 'Выбери кредит' : undefined)}
+              createAction={
+                onCreateAccountRequest
+                  ? {
+                      visible: showCreateCreditAccountAction,
+                      label: 'Создать кредит',
+                      onClick: () => onCreateAccountRequest({ name: creditAccountQuery.trim() }),
+                    }
+                  : undefined
+              }
+            />
+          </div>
+        ) : null}
+
         <div>
-          <Label htmlFor="tx-amount">Сумма</Label>
+          <Label htmlFor="tx-amount">{showCreditPaymentFields ? 'Общая сумма платежа' : showCreditDisbursementInfo ? 'Сумма кредита' : 'Сумма'}</Label>
           <Input
             id="tx-amount"
             className="h-9"
@@ -601,6 +891,20 @@ export function TransactionForm({
           />
           {errors.amount ? <p className="mt-1 text-xs text-danger">{errors.amount.message}</p> : null}
         </div>
+
+        {showCreditPaymentFields ? (
+          <>
+            <div>
+              <Label htmlFor="tx-credit-principal">Основной долг</Label>
+              <Input id="tx-credit-principal" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_principal_amount', { validate: (value) => !showCreditPaymentFields || Number(value) >= 0 || 'Введите корректную сумму' })} />
+            </div>
+            <div>
+              <Label htmlFor="tx-credit-interest">Проценты</Label>
+              <Input id="tx-credit-interest" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_interest_amount', { validate: (value) => !showCreditPaymentFields || Number(value) >= 0 || 'Введите корректную сумму' })} />
+              {submitCount > 0 && !hasValidCreditBreakdown ? <p className="mt-1 text-xs text-danger">Сумма должна быть равна основному долгу и процентам</p> : null}
+            </div>
+          </>
+        ) : null}
 
         {showCategory ? (
           <div>
@@ -666,10 +970,10 @@ export function TransactionForm({
           </span>
           <span className="text-slate-300">•</span>
           <span>
-            Валюта: <strong>{selectedAccount?.currency ?? selectedTargetAccount?.currency ?? '—'}</strong>
+            Валюта: <strong>{selectedAccount?.currency ?? selectedTargetAccount?.currency ?? selectedCreditAccount?.currency ?? '—'}</strong>
           </span>
           <span className="text-slate-300">•</span>
-          <span>{getOperationSummaryLabel(watch('operation_type'), investmentDirection, debtDirection, hasValidDebtDirection)}</span>
+          <span>{getOperationSummaryLabel(watch('operation_type'), investmentDirection, debtDirection, hasValidDebtDirection, creditOperationKind, hasValidCreditOperationKind)}</span>
         </div>
       </div>
 

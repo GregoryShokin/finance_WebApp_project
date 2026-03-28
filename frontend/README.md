@@ -16,7 +16,9 @@ npm run dev
 NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
 ```
 
-## Команды
+## Команды'
+## Команда для выполнения миграций
+docker compose exec api alembic upgrade head
 
 ```bash
 npm run dev

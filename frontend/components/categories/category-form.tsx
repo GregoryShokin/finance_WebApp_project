@@ -12,14 +12,12 @@ type CategoryFormValues = {
   name: string;
   kind: CategoryKind;
   priority: CategoryPriority;
-  color: string;
 };
 
 const defaultValues: CategoryFormValues = {
   name: '',
   kind: 'expense',
   priority: 'expense_essential',
-  color: '#22c55e',
 };
 
 const expenseOptions: { value: CategoryPriority; label: string }[] = [
@@ -57,7 +55,6 @@ export function CategoryForm({
     defaultValues,
   });
 
-  const selectedColor = watch('color') || '#22c55e';
   const selectedKind = watch('kind');
   const selectedPriority = watch('priority');
 
@@ -81,7 +78,6 @@ export function CategoryForm({
         name: initialData.name,
         kind: initialData.kind,
         priority: initialData.priority,
-        color: initialData.color ?? '#22c55e',
       });
       return;
     }
@@ -93,7 +89,6 @@ export function CategoryForm({
       priority:
         initialValues?.priority ??
         (initialValues?.kind === 'income' ? 'income_active' : 'expense_essential'),
-      color: initialValues?.color ?? '#22c55e',
     });
   }, [initialData, initialValues, reset]);
 
@@ -105,7 +100,6 @@ export function CategoryForm({
           name: values.name,
           kind: values.kind,
           priority: values.priority,
-          color: values.color,
         }),
       )}
     >
@@ -143,19 +137,6 @@ export function CategoryForm({
         </div>
       </div>
 
-      <div>
-        <Label htmlFor="category-color">Цвет</Label>
-        <div className="flex items-center gap-3">
-          <Input id="category-color" type="color" className="h-11 w-16 cursor-pointer p-1" {...register('color')} />
-          <div
-            className="h-8 w-8 rounded-lg border border-slate-300 shadow-sm"
-            style={{ backgroundColor: selectedColor }}
-            aria-label="Предпросмотр выбранного цвета"
-            title={selectedColor}
-          />
-        </div>
-        {errors.color ? <p className="mt-1 text-sm text-danger">{errors.color.message}</p> : null}
-      </div>
 
       <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
         <Button type="button" variant="secondary" onClick={onCancel}>

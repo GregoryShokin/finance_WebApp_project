@@ -10,9 +10,9 @@ export const operationTypeLabels: Record<TransactionOperationType, string> = {
   transfer: 'Перевод между счетами',
   investment_buy: 'Инвестиционный: покупка',
   investment_sell: 'Инвестиционный: продажа',
-  credit_disbursement: 'Тело кредита: получение',
-  credit_payment: 'Тело кредита: погашение',
-  credit_interest: 'Проценты по кредиту',
+  credit_disbursement: 'Кредитная операция: получение кредита',
+  credit_payment: 'Кредитная операция: платёж по кредиту',
+  credit_interest: 'Кредитная операция: проценты',
   debt: 'Долг',
   refund: 'Возврат',
   adjustment: 'Корректировка',
@@ -27,7 +27,7 @@ export function getOperationOptionsByKind(kind?: string | null) {
       { value: 'adjustment', label: 'Корректировка' },
       { value: 'investment_buy', label: 'Инвестиции (покупка)' },
       { value: 'investment_sell', label: 'Инвестиции (продажа)' },
-      { value: 'credit_disbursement', label: 'Тело кредита' },
+      { value: 'credit_disbursement', label: 'Кредитная операция: получение кредита' },
       { value: 'debt', label: 'Долг' },
     ];
   }
@@ -36,7 +36,7 @@ export function getOperationOptionsByKind(kind?: string | null) {
     return [
       { value: 'regular', label: 'Обычный' },
       { value: 'investment_sell', label: 'Инвестиции (продажа)' },
-      { value: 'credit_disbursement', label: 'Тело кредита' },
+      { value: 'credit_disbursement', label: 'Кредитная операция: получение кредита' },
       { value: 'debt', label: 'Долг' },
     ];
   }

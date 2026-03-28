@@ -1,6 +1,7 @@
 
 from app.models.category import Category
 from app.repositories.category_repository import CategoryRepository
+from app.services.category_defaults import DEFAULT_CATEGORIES, resolve_category_icon_name, resolve_next_category_color
 
 
 class CategoryNotFoundError(Exception):
@@ -36,14 +37,17 @@ class CategoryService:
     def list_categories(self, *, user_id: int, kind: str | None = None, priority: str | None = None, search: str | None = None) -> list[Category]:
         return self.repo.list(user_id=user_id, kind=kind, priority=priority, search=search)
 
-    def create_category(self, *, user_id: int, name: str, kind: str, priority: str, color: str | None, is_system: bool) -> Category:
+    def create_category(self, *, user_id: int, name: str, kind: str, priority: str, color: str | None = None, icon_name: str | None = None, is_system: bool = False) -> Category:
         validate_category_priority(kind, priority)
+        selected_color = color or resolve_next_category_color(self.repo.list_used_colors(user_id=user_id))
+        selected_icon_name = (icon_name or resolve_category_icon_name(name)).strip() or 'tag'
         return self.repo.create(
             user_id=user_id,
             name=name,
             kind=kind,
             priority=priority,
-            color=color,
+            color=selected_color,
+            icon_name=selected_icon_name,
             is_system=is_system,
         )
 
@@ -52,14 +56,45 @@ class CategoryService:
         if not category:
             raise CategoryNotFoundError("Category not found")
 
-        effective_kind = updates.get("kind", category.kind)
-        effective_priority = updates.get("priority", category.priority)
+        effective_kind = updates.get('kind', category.kind)
+        effective_priority = updates.get('priority', category.priority)
+        effective_name = updates.get('name', category.name)
         validate_category_priority(effective_kind, effective_priority)
 
-        return self.repo.update(category, **updates)
+        sanitized_updates = dict(updates)
+        sanitized_updates.pop('color', None)
+        sanitized_updates['icon_name'] = resolve_category_icon_name(effective_name)
+        if not category.color:
+            sanitized_updates['color'] = resolve_next_category_color(self.repo.list_used_colors(user_id=user_id))
+
+        return self.repo.update(category, **sanitized_updates)
 
     def delete_category(self, *, user_id: int, category_id: int) -> None:
         category = self.repo.get_by_id(category_id=category_id, user_id=user_id)
         if not category:
             raise CategoryNotFoundError("Category not found")
         self.repo.delete(category)
+
+
+    def ensure_default_categories(self, *, user_id: int) -> list[Category]:
+        created_categories: list[Category] = []
+        for item in DEFAULT_CATEGORIES:
+            existing_count = self.repo.count_by_identity(
+                user_id=user_id,
+                name=item.name,
+                kind=item.kind,
+                priority=item.priority,
+            )
+            if existing_count:
+                continue
+            created_categories.append(
+                self.create_category(
+                    user_id=user_id,
+                    name=item.name,
+                    kind=item.kind,
+                    priority=item.priority,
+                    icon_name=item.icon_name,
+                    is_system=False,
+                )
+            )
+        return created_categories

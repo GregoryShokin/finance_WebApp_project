@@ -13,12 +13,14 @@ import { createAccount, deleteAccount, getAccounts, updateAccount } from '@/lib/
 import type { Account, CreateAccountPayload } from '@/types/account';
 import { MoneyAmount } from '@/components/shared/money-amount';
 import { StatCard } from '@/components/shared/stat-card';
+import { useDelayedDelete } from '@/hooks/use-delayed-delete';
 
 export default function AccountsPage() {
   const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const delayedDelete = useDelayedDelete();
 
   const accountsQuery = useQuery({
     queryKey: ['accounts'],
@@ -86,11 +88,10 @@ export default function AccountsPage() {
   }
 
   function handleDelete(account: Account) {
-    const confirmed = window.confirm(`Удалить счёт «${account.name}»?`);
-    if (!confirmed) return;
-
-    setDeletingId(account.id);
-    deleteMutation.mutate(account.id);
+    delayedDelete.scheduleDelete(account.id, () => {
+      setDeletingId(account.id);
+      deleteMutation.mutate(account.id);
+    });
   }
 
   return (
@@ -119,7 +120,14 @@ export default function AccountsPage() {
       ) : null}
 
       {!accountsQuery.isLoading && !accountsQuery.isError && (accountsQuery.data?.length ?? 0) > 0 ? (
-        <AccountsList accounts={accountsQuery.data ?? []} onEdit={openEditDialog} onDelete={handleDelete} deletingId={deletingId} />
+        <AccountsList
+          accounts={accountsQuery.data ?? []}
+          onEdit={openEditDialog}
+          onDelete={handleDelete}
+          onCancelDelete={delayedDelete.cancelDelete}
+          deletingId={deletingId}
+          pendingDeleteIds={Object.keys(delayedDelete.pendingIds).map(Number)}
+        />
       ) : null}
 
       <AccountDialog

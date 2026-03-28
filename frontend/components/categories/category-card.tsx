@@ -1,9 +1,10 @@
 "use client";
 
-import { Pencil, Tag, Trash2 } from 'lucide-react';
+import { Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { StatusBadge } from '@/components/shared/status-badge';
+import { CategoryIcon } from '@/components/categories/category-icon';
 import type { Category } from '@/types/category';
 
 const kindMap = {
@@ -23,11 +24,15 @@ export function CategoryCard({
   category,
   onEdit,
   onDelete,
+  onCancelDelete,
+  isDeletePending,
   isDeleting,
 }: {
   category: Category;
   onEdit: (category: Category) => void;
   onDelete: (category: Category) => void;
+  onCancelDelete: (categoryId: number) => void;
+  isDeletePending?: boolean;
   isDeleting?: boolean;
 }) {
   return (
@@ -36,7 +41,7 @@ export function CategoryCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-4">
             <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
-              <Tag className="size-5" />
+              <CategoryIcon iconName={category.icon_name} className="size-5" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-3">
@@ -67,17 +72,31 @@ export function CategoryCard({
           >
             <Pencil className="size-4" />
           </Button>
-          <Button
-            type="button"
-            variant="danger"
-            size="icon"
-            onClick={() => onDelete(category)}
-            disabled={isDeleting}
-            aria-label={isDeleting ? 'Удаляем категорию' : 'Удалить категорию'}
-            title={isDeleting ? 'Удаляем...' : 'Удалить'}
-          >
-            <Trash2 className="size-4" />
-          </Button>
+          {isDeletePending ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="icon"
+              onClick={() => onCancelDelete(category.id)}
+              disabled={isDeleting}
+              aria-label={isDeleting ? 'Категория удаляется' : 'Отменить удаление категории'}
+              title={isDeleting ? 'Удаляем...' : 'Отменить удаление'}
+            >
+              <RotateCcw className="size-4" />
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="danger"
+              size="icon"
+              onClick={() => onDelete(category)}
+              disabled={isDeleting}
+              aria-label={isDeleting ? 'Удаляем категорию' : 'Удалить категорию'}
+              title={isDeleting ? 'Удаляем...' : 'Удалить'}
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          )}
         </div>
       </div>
     </Card>

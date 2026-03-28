@@ -15,6 +15,7 @@ import { Select } from '@/components/ui/select';
 import { createCategory, deleteCategory, getCategories, updateCategory } from '@/lib/api/categories';
 import type { Category, CategoryKind, CategoryPriority, CreateCategoryPayload } from '@/types/category';
 import { StatCard } from '@/components/shared/stat-card';
+import { useDelayedDelete } from '@/hooks/use-delayed-delete';
 
 const allTypeOptions: { value: CategoryPriority; label: string }[] = [
   { value: 'expense_essential', label: 'Основной' },
@@ -32,6 +33,7 @@ export default function CategoriesPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const delayedDelete = useDelayedDelete();
 
   const [search, setSearch] = useState('');
   const [kindFilter, setKindFilter] = useState<'all' | CategoryKind>('all');
@@ -115,10 +117,10 @@ export default function CategoriesPage() {
   }
 
   function handleDelete(category: Category) {
-    const confirmed = window.confirm(`Удалить категорию «${category.name}»?`);
-    if (!confirmed) return;
-    setDeletingId(category.id);
-    deleteMutation.mutate(category.id);
+    delayedDelete.scheduleDelete(category.id, () => {
+      setDeletingId(category.id);
+      deleteMutation.mutate(category.id);
+    });
   }
 
   function handleKindFilterChange(value: 'all' | CategoryKind) {
@@ -130,7 +132,7 @@ export default function CategoriesPage() {
   return (
     <PageShell
       title="Категории"
-      description="Настрой справочник доходов и расходов в одном продуктовом формате: цвета, типы и приоритеты отображаются одинаково по всему приложению."
+      description="Настрой справочник доходов и расходов в едином стиле: иконки назначаются автоматически, а цвет для каждой категории система подбирает сама."
       actions={
         <Button onClick={openCreateDialog}>
           <PlusCircle className="size-4" />
@@ -177,7 +179,14 @@ export default function CategoriesPage() {
       ) : null}
 
       {!categoriesQuery.isLoading && !categoriesQuery.isError && (categoriesQuery.data?.length ?? 0) > 0 ? (
-        <CategoriesList categories={categoriesQuery.data ?? []} onEdit={openEditDialog} onDelete={handleDelete} deletingId={deletingId} />
+        <CategoriesList
+          categories={categoriesQuery.data ?? []}
+          onEdit={openEditDialog}
+          onDelete={handleDelete}
+          onCancelDelete={delayedDelete.cancelDelete}
+          deletingId={deletingId}
+          pendingDeleteIds={Object.keys(delayedDelete.pendingIds).map(Number)}
+        />
       ) : null}
 
       <CategoryDialog

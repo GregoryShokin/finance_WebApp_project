@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 
 from sqlalchemy.orm import Session
+
+from sqlalchemy import func
 
 from app.models.category import Category
 
@@ -42,6 +46,7 @@ class CategoryRepository:
         kind: str,
         priority: str,
         color: str | None,
+        icon_name: str,
         is_system: bool,
     ) -> Category:
         category = Category(
@@ -50,6 +55,7 @@ class CategoryRepository:
             kind=kind,
             priority=priority,
             color=color,
+            icon_name=icon_name,
             is_system=is_system,
         )
         self.db.add(category)
@@ -69,3 +75,27 @@ class CategoryRepository:
     def delete(self, category: Category) -> None:
         self.db.delete(category)
         self.db.commit()
+
+
+    def list_used_colors(self, *, user_id: int) -> list[str]:
+        return [
+            color
+            for (color,) in self.db.query(Category.color)
+            .filter(Category.user_id == user_id, Category.color.isnot(None))
+            .order_by(Category.id.asc())
+            .all()
+            if color
+        ]
+
+    def count_by_identity(self, *, user_id: int, name: str, kind: str, priority: str) -> int:
+        return (
+            self.db.query(func.count(Category.id))
+            .filter(
+                Category.user_id == user_id,
+                Category.name == name,
+                Category.kind == kind,
+                Category.priority == priority,
+            )
+            .scalar()
+            or 0
+        )

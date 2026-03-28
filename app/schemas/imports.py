@@ -116,19 +116,25 @@ class ImportPreviewResponse(BaseModel):
 class ImportSplitItemRequest(BaseModel):
     category_id: int
     amount: Decimal
+    debt_direction: str | None = None
     description: str | None = None
 
 
 class ImportRowUpdateRequest(BaseModel):
     account_id: int | None = None
     target_account_id: int | None = None
+    credit_account_id: int | None = None
     category_id: int | None = None
+    counterparty_id: int | None = None
     amount: Decimal | None = None
     type: str | None = None
     operation_type: str | None = None
+    debt_direction: str | None = None
     description: str | None = None
     transaction_date: datetime | None = None
     currency: str | None = None
+    credit_principal_amount: Decimal | None = None
+    credit_interest_amount: Decimal | None = None
     split_items: list[ImportSplitItemRequest] | None = None
     action: str | None = None
 
@@ -145,6 +151,9 @@ class ImportCommitRequest(BaseModel):
 
 class ImportCommitResponse(BaseModel):
     session_id: int
+    status: ImportSessionStatus
+    summary: ImportPreviewSummary
+    remaining_rows: list[ImportPreviewRowResponse] = Field(default_factory=list)
     imported_count: int
     skipped_count: int
     duplicate_count: int

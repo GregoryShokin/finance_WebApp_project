@@ -19,12 +19,18 @@ export type Transaction = {
   user_id: number;
   account_id: number;
   target_account_id: number | null;
+  credit_account_id: number | null;
   category_id: number | null;
+  counterparty_id: number | null;
   category_priority?: CategoryPriority | null;
   amount: number;
+  credit_principal_amount?: number | null;
+  credit_interest_amount?: number | null;
+  debt_direction?: 'lent' | 'borrowed' | 'repaid' | 'collected' | null;
   currency: string;
   type: TransactionKind;
   operation_type: TransactionOperationType;
+  counterparty_name?: string | null;
   description: string | null;
   normalized_description: string | null;
   transaction_date: string;
@@ -37,8 +43,13 @@ export type Transaction = {
 export type CreateTransactionPayload = {
   account_id: number;
   target_account_id?: number | null;
+  credit_account_id?: number | null;
   category_id?: number | null;
+  counterparty_id?: number | null;
   amount: number;
+  credit_principal_amount?: number | null;
+  credit_interest_amount?: number | null;
+  debt_direction?: 'lent' | 'borrowed' | 'repaid' | 'collected' | null;
   currency: string;
   type: TransactionKind;
   operation_type: TransactionOperationType;

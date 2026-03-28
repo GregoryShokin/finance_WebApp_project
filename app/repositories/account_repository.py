@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
@@ -7,25 +9,38 @@ class AccountRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def create(
-        self,
-        *,
-        user_id: int,
-        name: str,
-        currency: str,
-        balance,
-        is_active: bool = True,
-        is_credit: bool = False,
-        auto_commit: bool = True,
-    ) -> Account:
-        account = Account(
-            user_id=user_id,
-            name=name,
-            currency=currency,
-            balance=balance,
-            is_active=is_active,
-            is_credit=is_credit,
-        )
+    @staticmethod
+    def _normalize_kwargs(kwargs: dict) -> dict:
+        data = dict(kwargs)
+
+        # Совместимость между разными версиями полей кредита.
+        aliases = {
+            "credit_limit_original": "credit_limit_original",
+            "credit_current_amount": "credit_current_amount",
+            "credit_interest_rate": "credit_interest_rate",
+            "credit_term_remaining": "credit_term_remaining",
+            "principal_original": "credit_limit_original",
+            "principal_current": "credit_current_amount",
+            "interest_rate": "credit_interest_rate",
+            "remaining_term_months": "credit_term_remaining",
+        }
+
+        for source_key, target_key in aliases.items():
+            if source_key in data and target_key not in data:
+                data[target_key] = data[source_key]
+
+        return data
+
+    @staticmethod
+    def _assign_known_fields(account: Account, data: dict) -> None:
+        normalized = AccountRepository._normalize_kwargs(data)
+        for key, value in normalized.items():
+            if hasattr(account, key):
+                setattr(account, key, value)
+
+    def create(self, auto_commit: bool = True, **kwargs) -> Account:
+        account = Account()
+        self._assign_known_fields(account, kwargs)
         self.db.add(account)
         if auto_commit:
             self.db.commit()
@@ -60,8 +75,7 @@ class AccountRepository:
         )
 
     def update(self, account: Account, auto_commit: bool = True, **kwargs) -> Account:
-        for key, value in kwargs.items():
-            setattr(account, key, value)
+        self._assign_known_fields(account, kwargs)
         self.db.add(account)
         if auto_commit:
             self.db.commit()

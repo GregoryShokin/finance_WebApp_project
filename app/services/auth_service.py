@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from app.core.security import PasswordTooLongError, create_access_token, hash_password, verify_password
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
+from app.services.category_service import CategoryService
 
 class UserAlreadyExistsError(Exception): pass
 class InvalidCredentialsError(Exception): pass
@@ -17,8 +18,10 @@ class AuthService:
         try:
             password_hash = hash_password(password)
         except PasswordTooLongError as exc:
-            raise InvalidPasswordError("Password is too long. Maximum allowed length is 72 bytes in UTF-8.") from exc
-        return self.user_repo.create(email=email, password_hash=password_hash, full_name=full_name)
+            raise InvalidPasswordError('Password is too long. Maximum allowed length is 72 bytes in UTF-8.') from exc
+        user = self.user_repo.create(email=email, password_hash=password_hash, full_name=full_name)
+        CategoryService(self.user_repo.db).ensure_default_categories(user_id=user.id)
+        return user
     def login(self, *, email: str, password: str) -> str:
         user = self.user_repo.get_by_email(email)
         if not user:

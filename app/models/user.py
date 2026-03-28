@@ -16,3 +16,4 @@ class User(Base):
     accounts = relationship("Account", back_populates="user", cascade="all, delete-orphan")
     categories = relationship("Category", back_populates="user", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="user", cascade="all, delete-orphan")
+    counterparties = relationship("Counterparty", back_populates="user", cascade="all, delete-orphan")

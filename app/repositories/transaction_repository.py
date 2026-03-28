@@ -17,6 +17,7 @@ class TransactionRepository:
             joinedload(Transaction.account),
             joinedload(Transaction.target_account),
             joinedload(Transaction.category),
+            joinedload(Transaction.counterparty),
         )
 
     def list_transactions(

@@ -1,12 +1,13 @@
 'use client';
 
-import { ChangeEvent, FormEvent, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, FileUp, Plus, ShieldOff, Sparkles, Split, Trash2, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { getAccounts, createAccount } from '@/lib/api/accounts';
 import { getCategories, createCategory } from '@/lib/api/categories';
+import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
 import { commitImport, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -16,14 +17,17 @@ import { EmptyState, ErrorState, LoadingState } from '@/components/states/page-s
 import { ImportStatusBadge } from '@/components/import/import-status-badge';
 import { AccountDialog } from '@/components/accounts/account-dialog';
 import { CategoryDialog } from '@/components/categories/category-dialog';
+import { CounterpartyDialog } from '@/components/counterparties/counterparty-dialog';
 import type { Account, CreateAccountPayload } from '@/types/account';
 import type { Category, CategoryKind, CategoryPriority, CreateCategoryPayload } from '@/types/category';
+import type { Counterparty, CreateCounterpartyPayload } from '@/types/counterparty';
 import type {
   ImportCommitResponse,
   ImportDetection,
   ImportMappingPayload,
   ImportPreviewResponse,
   ImportPreviewRow,
+  ImportRowUpdatePayload,
   ImportSourceType,
   ImportSplitItem,
   ImportUploadResponse,
@@ -58,15 +62,20 @@ type MappingState = {
   skip_duplicates: boolean;
 };
 
-type MainOperationType = 'regular' | 'investment' | 'debt' | 'refund' | 'transfer' | 'credit_payment';
+type MainOperationType = 'regular' | 'investment' | 'debt' | 'refund' | 'transfer' | 'credit_operation';
 type InvestmentDirection = '' | 'buy' | 'sell';
-type DebtDirection = '' | 'lent' | 'borrowed';
+type DebtDirection = '' | 'lent' | 'borrowed' | 'repaid' | 'collected';
+type CreditOperationKind = '' | 'disbursement' | 'payment';
 
 type RowEditState = {
   account_id: string;
   target_account_id: string;
+  credit_account_id: string;
   category_id: string;
+  counterparty_id: string;
   amount: string;
+  credit_principal_amount: string;
+  credit_interest_amount: string;
   type: 'income' | 'expense';
   operation_type: string;
   description: string;
@@ -75,20 +84,25 @@ type RowEditState = {
   main_type: MainOperationType;
   investment_direction: InvestmentDirection;
   debt_direction: DebtDirection;
+  credit_operation_kind: CreditOperationKind;
 };
 
 type RowQueries = {
   account_id: string;
   target_account_id: string;
+  credit_account_id: string;
   category_id: string;
+  counterparty_id: string;
   main_type: string;
   investment_direction: string;
   debt_direction: string;
+  credit_operation_kind: string;
   import_account: string;
 };
 
 type SplitRowState = {
   category_id: string;
+  counterparty_id: string;
   amount: string;
   description: string;
 };
@@ -97,13 +111,27 @@ type SplitRowQueries = {
   category_id: string;
 };
 
+type ImportWizardDraft = {
+  uploadForm: UploadFormState;
+  mappingForm: MappingState;
+  uploadResult: ImportUploadResponse | null;
+  previewResult: ImportPreviewResponse | null;
+  commitResult: ImportCommitResponse | null;
+  rowForms: Record<number, RowEditState>;
+  rowQueries: Record<number, RowQueries>;
+  splitExpanded: Record<number, boolean>;
+  splitRows: Record<number, SplitRowState[]>;
+  splitQueries: Record<number, SplitRowQueries[]>;
+};
+
 type PendingFieldTarget =
-  | { rowId: number; field: 'account_id' | 'target_account_id' | 'category_id' }
+  | { rowId: number; field: 'account_id' | 'target_account_id' | 'credit_account_id' | 'category_id' | 'counterparty_id' }
   | { rowId: number; field: 'split_category_id'; splitIndex: number }
   | { rowId: null; field: 'import_account' };
 
 const defaultUploadForm: UploadFormState = { delimiter: ',' };
-const DEFAULT_SPLIT_ROW: SplitRowState = { category_id: '', amount: '', description: '' };
+const DEFAULT_SPLIT_ROW: SplitRowState = { category_id: '', counterparty_id: '', amount: '', description: '' };
+const IMPORT_DRAFT_STORAGE_KEY = 'financeapp.import-wizard.draft.v2';
 
 const priorityLabels: Record<CategoryPriority, string> = {
   expense_essential: 'Обязательный',
@@ -126,6 +154,38 @@ function sourceLabel(source: ImportSourceType) {
 
 function normalize(value: string) {
   return value.trim().toLowerCase();
+}
+
+function isLoanAccount(account: Account) {
+  return account.account_type === 'credit' || account.is_credit;
+}
+
+function isSelectableTransactionAccount(account: Account) {
+  return !isLoanAccount(account);
+}
+
+function resolveTransactionAccountId(accounts: Account[], accountId: unknown, fallbackAccountId = '') {
+  const normalizedAccountId = String(accountId ?? '').trim();
+  if (!normalizedAccountId) return fallbackAccountId;
+
+  const matchedAccount = accounts.find((account) => String(account.id) === normalizedAccountId);
+  if (matchedAccount && isSelectableTransactionAccount(matchedAccount)) {
+    return normalizedAccountId;
+  }
+
+  return fallbackAccountId;
+}
+
+function resolveCreditAccountId(accounts: Account[], accountId: unknown) {
+  const normalizedAccountId = String(accountId ?? '').trim();
+  if (!normalizedAccountId) return '';
+
+  const matchedAccount = accounts.find((account) => String(account.id) === normalizedAccountId);
+  if (matchedAccount && isLoanAccount(matchedAccount)) {
+    return normalizedAccountId;
+  }
+
+  return '';
 }
 
 function buildMappingState(detection: ImportDetection, accounts: Account[], selectedAccountId?: string): MappingState {
@@ -167,16 +227,19 @@ function statCard(label: string, value: number, tone: 'default' | 'success' | 'w
 function mapOperationToUi(
   operationType: string | undefined,
   txType: 'income' | 'expense',
-): { mainType: MainOperationType; investmentDirection: InvestmentDirection; debtDirection: DebtDirection } {
-  if (operationType === 'transfer') return { mainType: 'transfer', investmentDirection: '', debtDirection: '' };
-  if (operationType === 'refund') return { mainType: 'refund', investmentDirection: '', debtDirection: '' };
-  if (operationType === 'investment_buy') return { mainType: 'investment', investmentDirection: 'buy', debtDirection: '' };
-  if (operationType === 'investment_sell') return { mainType: 'investment', investmentDirection: 'sell', debtDirection: '' };
-  if (operationType === 'debt') return { mainType: 'debt', investmentDirection: '', debtDirection: txType === 'income' ? 'borrowed' : 'lent' };
-  if (operationType === 'credit_payment' || operationType === 'credit_disbursement') {
-    return { mainType: 'credit_payment', investmentDirection: '', debtDirection: '' };
+): { mainType: MainOperationType; investmentDirection: InvestmentDirection; debtDirection: DebtDirection; creditOperationKind: CreditOperationKind } {
+  if (operationType === 'transfer') return { mainType: 'transfer', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
+  if (operationType === 'refund') return { mainType: 'refund', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
+  if (operationType === 'investment_buy') return { mainType: 'investment', investmentDirection: 'buy', debtDirection: '', creditOperationKind: '' };
+  if (operationType === 'investment_sell') return { mainType: 'investment', investmentDirection: 'sell', debtDirection: '', creditOperationKind: '' };
+  if (operationType === 'debt') return { mainType: 'debt', investmentDirection: '', debtDirection: txType === 'income' ? 'borrowed' : 'lent', creditOperationKind: '' };
+  if (operationType === 'credit_disbursement') {
+    return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'disbursement' };
   }
-  return { mainType: 'regular', investmentDirection: '', debtDirection: '' };
+  if (operationType === 'credit_payment') {
+    return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'payment' };
+  }
+  return { mainType: 'regular', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
 }
 
 function resolveOperationFields(form: RowEditState): Pick<RowEditState, 'operation_type' | 'type'> {
@@ -186,9 +249,11 @@ function resolveOperationFields(form: RowEditState): Pick<RowEditState, 'operati
     return { operation_type: form.investment_direction === 'sell' ? 'investment_sell' : 'investment_buy', type: form.investment_direction === 'sell' ? 'income' : 'expense' };
   }
   if (form.main_type === 'debt') {
-    return { operation_type: 'debt', type: form.debt_direction === 'borrowed' ? 'income' : 'expense' };
+    return { operation_type: 'debt', type: form.debt_direction === 'borrowed' || form.debt_direction === 'collected' ? 'income' : 'expense' };
   }
-  if (form.main_type === 'credit_payment') return { operation_type: 'credit_payment', type: 'expense' };
+  if (form.main_type === 'credit_operation') {
+    return { operation_type: form.credit_operation_kind === 'disbursement' ? 'credit_disbursement' : 'credit_payment', type: form.credit_operation_kind === 'disbursement' ? 'income' : 'expense' };
+  }
   return { operation_type: 'regular', type: form.type };
 }
 
@@ -221,18 +286,35 @@ function getMainTypeLabel(value: MainOperationType) {
   if (value === 'debt') return 'Долг';
   if (value === 'refund') return 'Возврат';
   if (value === 'transfer') return 'Перевод';
-  return 'Тело кредита';
+  return 'Кредитная операция';
 }
 
-function getRowEditState(row: ImportPreviewRow): RowEditState {
+function getCreditOperationKindLabel(value: CreditOperationKind) {
+  if (value === 'disbursement') return 'Получение кредита';
+  if (value === 'payment') return 'Платёж по кредиту';
+  return '';
+}
+
+function getRowEditState(row: ImportPreviewRow, accounts: Account[], fallbackAccountId = ''): RowEditState {
   const rawType = (String(row.normalized_data.type ?? 'expense') as 'income' | 'expense') ?? 'expense';
   const operationType = String(row.normalized_data.operation_type ?? 'regular');
   const ui = mapOperationToUi(operationType, rawType);
+  const resolvedAccountId = resolveTransactionAccountId(accounts, row.normalized_data.account_id, fallbackAccountId);
+  const resolvedTargetAccountId = resolveTransactionAccountId(accounts, row.normalized_data.target_account_id, '');
+  const resolvedCreditAccountId = resolveCreditAccountId(
+    accounts,
+    row.normalized_data.credit_account_id ?? row.normalized_data.target_account_id,
+  );
+
   return {
-    account_id: row.normalized_data.account_id ? String(row.normalized_data.account_id) : '',
-    target_account_id: row.normalized_data.target_account_id ? String(row.normalized_data.target_account_id) : '',
+    account_id: resolvedAccountId,
+    target_account_id: resolvedTargetAccountId,
+    credit_account_id: resolvedCreditAccountId,
     category_id: row.normalized_data.category_id ? String(row.normalized_data.category_id) : '',
+    counterparty_id: row.normalized_data.counterparty_id ? String(row.normalized_data.counterparty_id) : '',
     amount: String(row.normalized_data.amount ?? ''),
+    credit_principal_amount: String(row.normalized_data.credit_principal_amount ?? ''),
+    credit_interest_amount: String(row.normalized_data.credit_interest_amount ?? ''),
     type: rawType,
     operation_type: operationType,
     description: String(row.normalized_data.description ?? ''),
@@ -241,18 +323,29 @@ function getRowEditState(row: ImportPreviewRow): RowEditState {
     main_type: ui.mainType,
     investment_direction: ui.investmentDirection,
     debt_direction: ui.debtDirection,
+    credit_operation_kind: ui.creditOperationKind,
   };
 }
 
-function getInitialQueries(row: ImportPreviewRow, accounts: Account[], categories: Category[], importAccountName: string): RowQueries {
-  const state = getRowEditState(row);
+function getInitialQueries(
+  row: ImportPreviewRow,
+  accounts: Account[],
+  categories: Category[],
+  counterparties: Counterparty[],
+  importAccountName: string,
+  fallbackAccountId = '',
+): RowQueries {
+  const state = getRowEditState(row, accounts, fallbackAccountId);
   return {
     account_id: accounts.find((item) => String(item.id) === state.account_id)?.name ?? '',
     target_account_id: accounts.find((item) => String(item.id) === state.target_account_id)?.name ?? '',
+    credit_account_id: accounts.find((item) => String(item.id) === state.credit_account_id)?.name ?? '',
     category_id: categories.find((item) => String(item.id) === state.category_id)?.name ?? '',
+    counterparty_id: counterparties.find((item) => String(item.id) === state.counterparty_id)?.name ?? '',
     main_type: getMainTypeLabel(state.main_type),
     investment_direction: state.investment_direction === 'sell' ? 'Продажа' : state.investment_direction === 'buy' ? 'Покупка' : '',
-    debt_direction: state.debt_direction === 'borrowed' ? 'Мне заняли' : state.debt_direction === 'lent' ? 'Занял' : '',
+    debt_direction: state.debt_direction === 'borrowed' ? 'Мне заняли' : state.debt_direction === 'lent' ? 'Я занял' : state.debt_direction === 'repaid' ? 'Вернул' : state.debt_direction === 'collected' ? 'Мне вернули' : '',
+    credit_operation_kind: getCreditOperationKindLabel(state.credit_operation_kind),
     import_account: importAccountName,
   };
 }
@@ -265,6 +358,7 @@ function getSplitState(row: ImportPreviewRow): SplitRowState[] {
   return items.map((item) => ({
     category_id: item && typeof item === 'object' && 'category_id' in item ? String((item as Record<string, unknown>).category_id ?? '') : '',
     amount: item && typeof item === 'object' && 'amount' in item ? String((item as Record<string, unknown>).amount ?? '') : '',
+    counterparty_id: '',
     description: item && typeof item === 'object' && 'description' in item ? String((item as Record<string, unknown>).description ?? '') : '',
   }));
 }
@@ -279,10 +373,71 @@ function isRegularSplitApplicable(form: RowEditState) {
   return form.main_type === 'regular';
 }
 
+function toNumericValue(value: string) {
+  if (!value.trim()) return null;
+  return Number(value.replace(',', '.'));
+}
+
+function buildRowUpdatePayload(
+  row: ImportPreviewRow,
+  form: RowEditState,
+  splitExpandedMap: Record<number, boolean>,
+  splitRowsMap: Record<number, SplitRowState[]>,
+): ImportRowUpdatePayload {
+  const resolved = resolveOperationFields(form);
+  const activeSplit = Boolean(splitExpandedMap[row.id]) && form.main_type === 'regular';
+  const splitPayload: ImportSplitItem[] | undefined = activeSplit
+    ? (splitRowsMap[row.id] ?? getSplitState(row)).map((item) => ({
+        category_id: Number(item.category_id),
+        amount: Number(String(item.amount).replace(',', '.')),
+        description: item.description || form.description || null,
+      }))
+    : [];
+
+  return {
+    account_id: form.account_id ? Number(form.account_id) : null,
+    target_account_id: resolved.operation_type === 'transfer'
+      ? (form.target_account_id ? Number(form.target_account_id) : null)
+      : resolved.operation_type === 'credit_payment'
+        ? (form.credit_account_id ? Number(form.credit_account_id) : null)
+        : null,
+    credit_account_id: resolved.operation_type === 'credit_payment' ? (form.credit_account_id ? Number(form.credit_account_id) : null) : null,
+    category_id: resolved.operation_type === 'regular' || resolved.operation_type === 'refund' ? (splitPayload && splitPayload.length >= 2 ? null : form.category_id ? Number(form.category_id) : null) : null,
+    counterparty_id: resolved.operation_type === 'debt' ? (form.counterparty_id ? Number(form.counterparty_id) : null) : null,
+    amount: toNumericValue(form.amount),
+    type: resolved.type,
+    operation_type: resolved.operation_type,
+    debt_direction: resolved.operation_type === 'debt' ? form.debt_direction || null : null,
+    description: form.description,
+    transaction_date: form.transaction_date ? new Date(form.transaction_date).toISOString() : null,
+    currency: form.currency,
+    credit_principal_amount: resolved.operation_type === 'credit_payment' ? toNumericValue(form.credit_principal_amount) : null,
+    credit_interest_amount: resolved.operation_type === 'credit_payment' ? toNumericValue(form.credit_interest_amount) : null,
+    split_items: splitPayload,
+  };
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, innerValue]) => [key, stableValue(innerValue)])
+    );
+  }
+  return value;
+}
+
+function arePayloadsEqual(left: ImportRowUpdatePayload, right: ImportRowUpdatePayload) {
+  return JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right));
+}
+
 export function ImportWizard() {
   const queryClient = useQueryClient();
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'import-preview'], queryFn: () => getCategories() });
+  const counterpartiesQuery = useQuery({ queryKey: ['counterparties', 'import-preview'], queryFn: getCounterparties });
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadForm, setUploadForm] = useState<UploadFormState>(defaultUploadForm);
@@ -304,35 +459,203 @@ export function ImportWizard() {
   const [splitQueries, setSplitQueries] = useState<Record<number, SplitRowQueries[]>>({});
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [counterpartyDialogOpen, setCounterpartyDialogOpen] = useState(false);
   const [pendingAccountDraft, setPendingAccountDraft] = useState<Partial<CreateAccountPayload> | null>(null);
   const [pendingCategoryDraft, setPendingCategoryDraft] = useState<Partial<CreateCategoryPayload> | null>(null);
+  const [pendingCounterpartyDraft, setPendingCounterpartyDraft] = useState<Partial<CreateCounterpartyPayload> | null>(null);
+  const [draftHydrated, setDraftHydrated] = useState(false);
   const [pendingFieldTarget, setPendingFieldTarget] = useState<PendingFieldTarget | null>(null);
 
   const accounts = accountsQuery.data ?? [];
   const categories = categoriesQuery.data ?? [];
+  const counterparties = counterpartiesQuery.data ?? [];
   const previewRows = previewResult?.rows ?? [];
+
+  const isRowDirty = (row: ImportPreviewRow) => {
+    const currentPayload = buildRowUpdatePayload(row, getRowForm(row), splitExpanded, splitRows);
+    const savedPayload = buildRowUpdatePayload(row, getRowEditState(row, accounts, mappingForm.account_id), {}, {});
+    return !arePayloadsEqual(currentPayload, savedPayload);
+  };
+
+  const previewSummary = useMemo(() => {
+    if (!previewResult) return null;
+
+    return previewRows.reduce(
+      (summary, row) => {
+        const effectiveStatus = isRowDirty(row) && row.status === 'ready' ? 'warning' : row.status;
+        if (effectiveStatus === 'ready') summary.ready_rows += 1;
+        else if (effectiveStatus === 'warning') summary.warning_rows += 1;
+        else if (effectiveStatus === 'error') summary.error_rows += 1;
+        else if (effectiveStatus === 'duplicate') summary.duplicate_rows += 1;
+        else if (effectiveStatus === 'skipped') summary.skipped_rows += 1;
+        return summary;
+      },
+      {
+        total_rows: previewRows.length,
+        ready_rows: 0,
+        warning_rows: 0,
+        error_rows: 0,
+        duplicate_rows: 0,
+        skipped_rows: 0,
+      }
+    );
+  }, [previewResult, previewRows, rowForms, splitExpanded, splitRows, accounts, mappingForm.account_id]);
+
+  const hasDirtyReadyRows = previewRows.some((row) => isRowDirty(row) && row.status === 'ready');
+
+  useEffect(() => {
+    if (!previewRows.length) return;
+
+    setRowForms((prev) => {
+      let changed = false;
+      const nextEntries = Object.entries(prev).map(([rowId, form]) => {
+        const fallbackAccountId = resolveTransactionAccountId(accounts, mappingForm.account_id, '');
+        const nextAccountId = resolveTransactionAccountId(accounts, form.account_id, fallbackAccountId);
+        const nextTargetAccountId = form.main_type === 'transfer'
+          ? resolveTransactionAccountId(accounts, form.target_account_id, '')
+          : '';
+        const nextCreditAccountId = form.main_type === 'credit_operation' && form.credit_operation_kind === 'payment'
+          ? resolveCreditAccountId(accounts, form.credit_account_id)
+          : '';
+
+        if (nextAccountId === form.account_id && nextTargetAccountId === form.target_account_id && nextCreditAccountId === form.credit_account_id) {
+          return [rowId, form] as const;
+        }
+
+        changed = true;
+        return [
+          rowId,
+          {
+            ...form,
+            account_id: nextAccountId,
+            target_account_id: nextTargetAccountId,
+            credit_account_id: nextCreditAccountId,
+          },
+        ] as const;
+      });
+
+      return changed ? Object.fromEntries(nextEntries) : prev;
+    });
+  }, [accounts, mappingForm.account_id, previewRows]);
+
+    useEffect(() => {
+    if (draftHydrated || typeof window === 'undefined') return;
+
+    try {
+      const rawDraft = window.localStorage.getItem(IMPORT_DRAFT_STORAGE_KEY);
+
+      if (!rawDraft) {
+        setDraftHydrated(true);
+        return;
+      }
+
+      const draft = JSON.parse(rawDraft) as ImportWizardDraft;
+
+      setUploadForm(draft.uploadForm ?? defaultUploadForm);
+      setMappingForm(
+        draft.mappingForm ?? {
+          account_id: '',
+          currency: 'RUB',
+          date_format: '%d.%m.%Y',
+          table_name: '',
+          field_mapping: {},
+          skip_duplicates: true,
+        },
+      );
+      setUploadResult(draft.uploadResult ?? null);
+      setPreviewResult(draft.previewResult ?? null);
+      setCommitResult(draft.commitResult ?? null);
+      setRowForms(draft.rowForms ?? {});
+      setRowQueries(draft.rowQueries ?? {});
+      setSplitExpanded(draft.splitExpanded ?? {});
+      setSplitRows(draft.splitRows ?? {});
+      setSplitQueries(draft.splitQueries ?? {});
+    } catch (error) {
+      console.error('Не удалось восстановить черновик импорта', error);
+      window.localStorage.removeItem(IMPORT_DRAFT_STORAGE_KEY);
+    } finally {
+      setDraftHydrated(true);
+    }
+  }, [draftHydrated]);
+
+  useEffect(() => {
+    if (!draftHydrated || typeof window === 'undefined') return;
+
+    const hasDraft = Boolean(uploadResult || (previewResult && previewResult.rows.length > 0));
+
+    if (!hasDraft) {
+      window.localStorage.removeItem(IMPORT_DRAFT_STORAGE_KEY);
+      return;
+    }
+
+    const draft: ImportWizardDraft = {
+      uploadForm,
+      mappingForm,
+      uploadResult,
+      previewResult,
+      commitResult,
+      rowForms,
+      rowQueries,
+      splitExpanded,
+      splitRows,
+      splitQueries,
+    };
+
+    window.localStorage.setItem(IMPORT_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  }, [
+    draftHydrated,
+    uploadForm,
+    mappingForm,
+    uploadResult,
+    previewResult,
+    commitResult,
+    rowForms,
+    rowQueries,
+    splitExpanded,
+    splitRows,
+    splitQueries,
+  ]);
 
   const importAccount = useMemo(
     () => accounts.find((account) => String(account.id) === mappingForm.account_id) ?? null,
     [accounts, mappingForm.account_id],
   );
 
-  const accountItems = useMemo<SearchSelectItem[]>(() => accounts.map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency })), [accounts]);
+  const accountItems = useMemo<SearchSelectItem[]>(() => accounts.filter(isSelectableTransactionAccount).map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency })), [accounts]);
+  const creditAccountItems = useMemo<SearchSelectItem[]>(() => accounts.filter(isLoanAccount).map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency })), [accounts]);
   const mainTypeItems = useMemo<SearchSelectItem[]>(() => [
     { value: 'regular', label: 'Обычный', searchText: 'обычный обычная regular' },
     { value: 'investment', label: 'Инвестиционный', searchText: 'инвестиционный инвестиции investment' },
-    { value: 'debt', label: 'Долг', searchText: 'долг заем занял мне заняли debt' },
+    { value: 'debt', label: 'Долг', searchText: 'долг заем занял мне заняли вернул мне вернули debt' },
     { value: 'refund', label: 'Возврат', searchText: 'возврат refund' },
     { value: 'transfer', label: 'Перевод', searchText: 'перевод transfer между счетами' },
-    { value: 'credit_payment', label: 'Тело кредита', searchText: 'тело кредита credit payment' },
+    { value: 'credit_operation', label: 'Кредитная операция', searchText: 'кредитная операция кредит loan credit payment disbursement' },
   ], []);
   const investmentDirectionItems = useMemo<SearchSelectItem[]>(() => [
     { value: 'buy', label: 'Покупка', searchText: 'покупка buy' },
     { value: 'sell', label: 'Продажа', searchText: 'продажа sell' },
   ], []);
   const debtDirectionItems = useMemo<SearchSelectItem[]>(() => [
-    { value: 'lent', label: 'Занял', searchText: 'занял выдал дал в долг расход' },
+    { value: 'lent', label: 'Я занял', searchText: 'я занял выдал дал в долг расход' },
     { value: 'borrowed', label: 'Мне заняли', searchText: 'мне заняли взял в долг доход' },
+    { value: 'repaid', label: 'Вернул', searchText: 'вернул погасил долг отдал долг' },
+    { value: 'collected', label: 'Мне вернули', searchText: 'мне вернули возврат долга вернули деньги' },
+  ], []);
+  const counterpartyItems = useMemo<SearchSelectItem[]>(() =>
+    [...counterparties]
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
+      .map((item) => ({
+        value: String(item.id),
+        label: item.name,
+        searchText: item.name,
+        badge: Number(item.receivable_amount) > 0 ? 'Мне должны' : Number(item.payable_amount) > 0 ? 'Я должен' : undefined,
+        badgeClassName: Number(item.receivable_amount) > 0 ? 'text-emerald-600' : Number(item.payable_amount) > 0 ? 'text-amber-600' : undefined,
+      })),
+    [counterparties],
+  );
+  const creditOperationKindItems = useMemo<SearchSelectItem[]>(() => [
+    { value: 'disbursement', label: 'Получение кредита', searchText: 'получение кредита кредит получен disbursement loan' },
+    { value: 'payment', label: 'Платёж по кредиту', searchText: 'платеж по кредиту погашение кредита payment loan' },
   ], []);
 
   const previewMutation = useMutation({
@@ -368,12 +691,78 @@ export function ImportWizard() {
     onError: (error: Error) => toast.error(error.message || 'Не удалось загрузить источник'),
   });
 
-  const commitMutation = useMutation({
+    const commitMutation = useMutation({
     mutationFn: ({ sessionId, importReadyOnly }: { sessionId: number; importReadyOnly: boolean }) => commitImport(sessionId, importReadyOnly),
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
+      const remainingRows = Array.isArray(data?.remaining_rows) ? data.remaining_rows : [];
+
       setCommitResult(data);
-      toast.success('Импорт завершён');
-      queryClient.invalidateQueries({ queryKey: ['transactions'] });
+
+      setPreviewResult((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: data.status,
+              summary: data.summary,
+              rows: remainingRows,
+            }
+          : prev
+      );
+
+      setRowForms((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([rowId]) =>
+            remainingRows.some((row) => String(row.id) === rowId)
+          )
+        )
+      );
+
+      setRowQueries((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([rowId]) =>
+            remainingRows.some((row) => String(row.id) === rowId)
+          )
+        )
+      );
+
+      setSplitExpanded((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([rowId]) =>
+            remainingRows.some((row) => String(row.id) === rowId)
+          )
+        )
+      );
+
+      setSplitRows((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([rowId]) =>
+            remainingRows.some((row) => String(row.id) === rowId)
+          )
+        )
+      );
+
+      setSplitQueries((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([rowId]) =>
+            remainingRows.some((row) => String(row.id) === rowId)
+          )
+        )
+      );
+
+      if (remainingRows.length === 0) {
+        setUploadResult(null);
+      }
+
+      toast.success(
+        data.imported_count > 0
+          ? 'Готовые транзакции импортированы'
+          : 'Нет готовых транзакций для импорта'
+      );
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['transactions'] }),
+        queryClient.invalidateQueries({ queryKey: ['accounts'] }),
+      ]);
     },
     onError: (error: Error) => toast.error(error.message || 'Не удалось завершить импорт'),
   });
@@ -382,10 +771,10 @@ export function ImportWizard() {
     mutationFn: ({ rowId, payload }: { rowId: number; payload: Parameters<typeof updateImportRow>[1] }) => updateImportRow(rowId, payload),
     onSuccess: (data) => {
       setPreviewResult((prev) => prev ? ({ ...prev, summary: data.summary, rows: prev.rows.map((row) => row.id === data.row.id ? data.row : row) }) : prev);
-      setRowForms((prev) => ({ ...prev, [data.row.id]: getRowEditState(data.row) }));
+      setRowForms((prev) => ({ ...prev, [data.row.id]: getRowEditState(data.row, accounts, mappingForm.account_id) }));
       setRowQueries((prev) => ({
         ...prev,
-        [data.row.id]: getInitialQueries(data.row, accounts, categories, importAccount?.name ?? ''),
+        [data.row.id]: getInitialQueries(data.row, accounts, categories, counterparties, importAccount?.name ?? '', mappingForm.account_id),
       }));
       if (Array.isArray(data.row.normalized_data.split_items) && data.row.normalized_data.split_items.length > 0) {
         const nextRows = getSplitState(data.row);
@@ -393,7 +782,7 @@ export function ImportWizard() {
         setSplitQueries((prev) => ({ ...prev, [data.row.id]: getSplitQueries(nextRows, categories) }));
         setSplitExpanded((prev) => ({ ...prev, [data.row.id]: true }));
       }
-      toast.success('Строка обновлена');
+      toast.success(data.row.status === 'ready' ? 'Статус изменён на «Готов»' : 'Строка обновлена');
     },
     onError: (error: Error) => toast.error(error.message || 'Не удалось обновить строку'),
   });
@@ -407,12 +796,12 @@ export function ImportWizard() {
         setRowQueries((prev) => Object.fromEntries(Object.entries(prev).map(([rowId, value]) => [rowId, { ...value, import_account: created.name }])));
       }
       if (pendingFieldTarget && pendingFieldTarget.field === 'account_id') {
-        setRowForms((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getRowEditState(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!)), account_id: String(created.id) } }));
-        setRowQueries((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getInitialQueries(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, categories, importAccount?.name ?? '')), account_id: created.name } }));
+        setRowForms((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getRowEditState(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, mappingForm.account_id)), account_id: String(created.id) } }));
+        setRowQueries((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getInitialQueries(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, categories, counterparties, importAccount?.name ?? '', mappingForm.account_id)), account_id: created.name } }));
       }
       if (pendingFieldTarget && pendingFieldTarget.field === 'target_account_id') {
-        setRowForms((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getRowEditState(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!)), target_account_id: String(created.id) } }));
-        setRowQueries((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getInitialQueries(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, categories, importAccount?.name ?? '')), target_account_id: created.name } }));
+        setRowForms((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getRowEditState(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, mappingForm.account_id)), target_account_id: String(created.id) } }));
+        setRowQueries((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getInitialQueries(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, categories, counterparties, importAccount?.name ?? '', mappingForm.account_id)), target_account_id: created.name } }));
       }
       setPendingFieldTarget(null);
       setPendingAccountDraft(null);
@@ -427,8 +816,8 @@ export function ImportWizard() {
     onSuccess: async (created) => {
       await queryClient.invalidateQueries({ queryKey: ['categories'] });
       if (pendingFieldTarget && pendingFieldTarget.field === 'category_id') {
-        setRowForms((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getRowEditState(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!)), category_id: String(created.id) } }));
-        setRowQueries((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getInitialQueries(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, categories, importAccount?.name ?? '')), category_id: created.name } }));
+        setRowForms((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getRowEditState(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, mappingForm.account_id)), category_id: String(created.id) } }));
+        setRowQueries((prev) => ({ ...prev, [pendingFieldTarget.rowId]: { ...(prev[pendingFieldTarget.rowId] ?? getInitialQueries(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, categories, counterparties, importAccount?.name ?? '', mappingForm.account_id)), category_id: created.name } }));
       }
       if (pendingFieldTarget && pendingFieldTarget.field === 'split_category_id') {
         setSplitRows((prev) => ({
@@ -448,7 +837,50 @@ export function ImportWizard() {
     onError: (error: Error) => toast.error(error.message || 'Не удалось создать категорию'),
   });
 
+
+  const createCounterpartyMutation = useMutation({
+    mutationFn: createCounterparty,
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: ['counterparties', 'import-preview'] });
+      if (pendingFieldTarget && pendingFieldTarget.field === 'counterparty_id') {
+        setRowForms((prev) => ({
+          ...prev,
+          [pendingFieldTarget.rowId]: {
+            ...(prev[pendingFieldTarget.rowId] ?? getRowEditState(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, mappingForm.account_id)),
+            counterparty_id: String(created.id),
+          },
+        }));
+        setRowQueries((prev) => ({
+          ...prev,
+          [pendingFieldTarget.rowId]: {
+            ...(prev[pendingFieldTarget.rowId] ?? getInitialQueries(previewRows.find((item) => item.id === pendingFieldTarget.rowId)!, accounts, categories, counterparties, importAccount?.name ?? '', mappingForm.account_id)),
+            counterparty_id: created.name,
+          },
+        }));
+      }
+      setPendingFieldTarget(null);
+      setPendingCounterpartyDraft(null);
+      setCounterpartyDialogOpen(false);
+      toast.success('Контрагент создан');
+    },
+    onError: (error: Error) => toast.error(error.message || 'Не удалось создать контрагента'),
+  });
+
+  const deleteCounterpartyMutation = useMutation({
+    mutationFn: deleteCounterparty,
+    onSuccess: async (_, counterpartyId) => {
+      await queryClient.invalidateQueries({ queryKey: ['counterparties', 'import-preview'] });
+      setRowForms((prev) => Object.fromEntries(Object.entries(prev).map(([rowId, form]) => [rowId, form.counterparty_id === String(counterpartyId) ? { ...form, counterparty_id: '' } : form])));
+      setRowQueries((prev) => Object.fromEntries(Object.entries(prev).map(([rowId, query]) => [rowId, query.counterparty_id && (rowForms[Number(rowId)]?.counterparty_id === String(counterpartyId)) ? { ...query, counterparty_id: '' } : query])));
+      toast.success('Контрагент удалён');
+    },
+    onError: (error: Error) => toast.error(error.message || 'Не удалось удалить контрагента'),
+  });
+
   function resetAll() {
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(IMPORT_DRAFT_STORAGE_KEY);
+    }
     setSelectedFile(null);
     setUploadForm(defaultUploadForm);
     setUploadResult(null);
@@ -489,21 +921,21 @@ export function ImportWizard() {
   }
 
   function getRowForm(row: ImportPreviewRow) {
-    return rowForms[row.id] ?? getRowEditState(row);
+    return rowForms[row.id] ?? getRowEditState(row, accounts, mappingForm.account_id);
   }
 
   function updateRowForm(rowId: number, patch: Partial<RowEditState>) {
     setRowForms((prev) => ({
       ...prev,
       [rowId]: {
-        ...(prev[rowId] ?? getRowEditState(previewRows.find((item) => item.id === rowId)!)),
+        ...(prev[rowId] ?? getRowEditState(previewRows.find((item) => item.id === rowId)!, accounts, mappingForm.account_id)),
         ...patch,
       },
     }));
   }
 
   function getRowQuery(row: ImportPreviewRow) {
-    return rowQueries[row.id] ?? getInitialQueries(row, accounts, categories, importAccount?.name ?? '');
+    return rowQueries[row.id] ?? getInitialQueries(row, accounts, categories, counterparties, importAccount?.name ?? '', mappingForm.account_id);
   }
 
   function updateRowQuery(rowId: number, patch: Partial<RowQueries>) {
@@ -512,7 +944,7 @@ export function ImportWizard() {
     setRowQueries((prev) => ({
       ...prev,
       [rowId]: {
-        ...(prev[rowId] ?? getInitialQueries(baseRow, accounts, categories, importAccount?.name ?? '')),
+        ...(prev[rowId] ?? getInitialQueries(baseRow, accounts, categories, counterparties, importAccount?.name ?? '', mappingForm.account_id)),
         ...patch,
       },
     }));
@@ -580,52 +1012,32 @@ export function ImportWizard() {
       return;
     }
 
-    const form = getRowForm(row);
-    const resolved = resolveOperationFields(form);
-    const activeSplit = splitExpanded[row.id] && form.main_type === 'regular';
-    const splitPayload: ImportSplitItem[] | undefined = activeSplit
-      ? getSplitRowsForRow(row).map((item) => ({
-          category_id: Number(item.category_id),
-          amount: Number(String(item.amount).replace(',', '.')),
-          description: item.description || form.description || null,
-        }))
-      : [];
-
     rowMutation.mutate({
       rowId: row.id,
       payload: {
-        account_id: form.account_id ? Number(form.account_id) : null,
-        target_account_id: resolved.operation_type === 'transfer' ? (form.target_account_id ? Number(form.target_account_id) : null) : null,
-        category_id: resolved.operation_type === 'regular' || resolved.operation_type === 'refund' ? (splitPayload && splitPayload.length >= 2 ? null : form.category_id ? Number(form.category_id) : null) : null,
-        amount: form.amount ? Number(form.amount.replace(',', '.')) : null,
-        type: resolved.type,
-        operation_type: resolved.operation_type,
-        description: form.description,
-        transaction_date: form.transaction_date ? new Date(form.transaction_date).toISOString() : null,
-        currency: form.currency,
-        split_items: splitPayload,
+        ...buildRowUpdatePayload(row, getRowForm(row), splitExpanded, splitRows),
         action: 'confirm',
       },
     });
   }
 
-  function categoryItemsByKind(kind: CategoryKind): SearchSelectItem[] {
+  function categoryItemsByKind(kind?: CategoryKind): SearchSelectItem[] {
     return categories
-      .filter((category) => category.kind === kind)
+      .filter((category) => (kind ? category.kind === kind : true))
       .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
       .map((category) => ({
         value: String(category.id),
         label: category.name,
-        searchText: `${category.name} ${priorityLabels[category.priority]}`,
-        badge: priorityLabels[category.priority],
+        searchText: `${category.name} ${priorityLabels[category.priority]} ${transactionTypeLabels[category.kind]}`,
+        badge: `${transactionTypeLabels[category.kind]} · ${priorityLabels[category.priority]}`,
       }));
   }
 
-  if (accountsQuery.isLoading || categoriesQuery.isLoading) {
+  if (accountsQuery.isLoading || categoriesQuery.isLoading || counterpartiesQuery.isLoading) {
     return <LoadingState title="Подготавливаем импорт" description="Загружаем счета и категории для корректного сопоставления строк." />;
   }
 
-  if (accountsQuery.isError || categoriesQuery.isError) {
+  if (accountsQuery.isError || categoriesQuery.isError || counterpartiesQuery.isError) {
     return <ErrorState title="Не удалось загрузить справочники" description="Проверь доступность API и повтори попытку." />;
   }
 
@@ -634,8 +1046,8 @@ export function ImportWizard() {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {statCard('Источник', uploadResult ? 1 : 0, uploadResult ? 'success' : 'default')}
         {statCard('Preview готов', previewResult ? 1 : 0, previewResult ? 'success' : 'default')}
-        {statCard('Готово к импорту', previewResult?.summary.ready_rows ?? 0, 'success')}
-        {statCard('Требуют внимания', previewResult?.summary.warning_rows ?? 0, 'warning')}
+        {statCard('Готово к импорту', previewSummary?.ready_rows ?? 0, 'success')}
+        {statCard('Требуют внимания', previewSummary?.warning_rows ?? 0, 'warning')}
       </div>
 
       <Card className="rounded-3xl bg-white p-5 shadow-soft lg:p-6">
@@ -662,13 +1074,13 @@ export function ImportWizard() {
               widthClassName="w-full"
               query={rowQueries[0]?.import_account ?? importAccount?.name ?? ''}
               setQuery={(value) => {
-                setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', category_id: '', main_type: '', investment_direction: '', debt_direction: '', import_account: value } }));
+                setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', credit_account_id: '', category_id: '', counterparty_id: '', main_type: '', investment_direction: '', debt_direction: '', credit_operation_kind: '', import_account: value } }));
               }}
               items={accountItems}
               selectedValue={mappingForm.account_id}
               onSelect={(item) => {
                 const nextMapping = { ...mappingForm, account_id: item.value, currency: accounts.find((account) => String(account.id) === item.value)?.currency ?? mappingForm.currency };
-                setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', category_id: '', main_type: '', investment_direction: '', debt_direction: '', import_account: item.label } }));
+                setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', credit_account_id: '', category_id: '', counterparty_id: '', main_type: '', investment_direction: '', debt_direction: '', credit_operation_kind: '', import_account: item.label } }));
                 if (uploadResult) {
                   rebuildPreview(nextMapping);
                 } else {
@@ -681,7 +1093,7 @@ export function ImportWizard() {
                 label: 'Создать счёт',
                 onClick: () => {
                   setPendingFieldTarget({ rowId: null, field: 'import_account' });
-                  setPendingAccountDraft({ name: (rowQueries[0]?.import_account ?? '').trim(), currency: mappingForm.currency || 'RUB', balance: 0, is_active: true, is_credit: false });
+                  setPendingAccountDraft({ name: (rowQueries[0]?.import_account ?? '').trim(), currency: mappingForm.currency || 'RUB', balance: 0, is_active: true, account_type: 'regular', is_credit: false });
                   setAccountDialogOpen(true);
                 },
               }}
@@ -723,7 +1135,13 @@ export function ImportWizard() {
               <p className="mt-1 text-sm text-slate-500">Исправляй тип, счёт, категорию и разбивку прямо внутри каждой строки. Блок сопоставления убран из сценария.</p>
             </div>
             <div className="flex flex-wrap gap-3">
-              <Button onClick={() => commitMutation.mutate({ sessionId: previewResult.session_id, importReadyOnly: true })} disabled={commitMutation.isPending}>
+              <Button onClick={() => {
+                if (hasDirtyReadyRows) {
+                  toast.error('Есть изменённые строки со статусом «Готово». Нажми «Подтвердить» в каждой такой строке.');
+                  return;
+                }
+                commitMutation.mutate({ sessionId: previewResult.session_id, importReadyOnly: true });
+              }} disabled={commitMutation.isPending}>
                 <CheckCircle2 className="size-4" />
                 Импортировать готовые
               </Button>
@@ -731,11 +1149,11 @@ export function ImportWizard() {
           </div>
 
           <div className="mt-5 grid gap-4 md:grid-cols-5">
-            {statCard('Всего строк', previewResult.summary.total_rows)}
-            {statCard('Готово', previewResult.summary.ready_rows, 'success')}
-            {statCard('Требуют внимания', previewResult.summary.warning_rows, 'warning')}
-            {statCard('Ошибки', previewResult.summary.error_rows, 'danger')}
-            {statCard('Исключено / пропущено', previewResult.summary.skipped_rows, 'default')}
+            {statCard('Всего строк', previewSummary?.total_rows ?? 0)}
+            {statCard('Готово', previewSummary?.ready_rows ?? 0, 'success')}
+            {statCard('Требуют внимания', previewSummary?.warning_rows ?? 0, 'warning')}
+            {statCard('Ошибки', previewSummary?.error_rows ?? 0, 'danger')}
+            {statCard('Исключено / пропущено', previewSummary?.skipped_rows ?? 0, 'default')}
           </div>
 
           <div className="mt-6 space-y-4">
@@ -749,20 +1167,20 @@ export function ImportWizard() {
               const accountName = findAccountName(accounts, normalized.account_id);
               const targetAccountName = findAccountName(accounts, normalized.target_account_id);
               const categoryName = findCategoryName(categories, normalized.category_id);
-              const categoryKind: CategoryKind = form.main_type === 'refund' || form.type === 'income' ? 'income' : 'expense';
-              const categoryItems = categoryItemsByKind(categoryKind);
+              const categoryKind: CategoryKind = form.type === 'income' ? 'income' : 'expense';
+              const categoryItems = form.main_type === 'refund' ? categoryItemsByKind() : categoryItemsByKind(categoryKind);
 
               return (
                 <div key={row.id} className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 shadow-soft">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div className="min-w-0 flex-1 space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        <ImportStatusBadge status={row.status} />
+                        <ImportStatusBadge status={isRowDirty(row) && row.status === 'ready' ? 'warning' : row.status} />
                         <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-600">Строка {row.row_index}</span>
                         <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-600">{Math.round((row.confidence ?? 0) * 100)}%</span>
                       </div>
                       <div className="text-sm text-slate-700">
-                        <div className="font-medium text-slate-950">{String(normalized.description ?? 'Без описания')}</div>
+                        <div className="font-medium text-slate-950 break-words [overflow-wrap:anywhere]">{String(normalized.description ?? 'Без описания')}</div>
                         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-slate-500">
                           <span>Дата: {String(normalized.transaction_date ?? normalized.date ?? '—').slice(0, 10) || '—'}</span>
                           <span>Сумма: {String(normalized.amount ?? '—')} {String(normalized.currency ?? 'RUB')}</span>
@@ -822,7 +1240,7 @@ export function ImportWizard() {
                           label: 'Создать счёт',
                           onClick: () => {
                             setPendingFieldTarget({ rowId: row.id, field: 'account_id' });
-                            setPendingAccountDraft({ name: queries.account_id.trim(), currency: form.currency, balance: 0, is_active: true, is_credit: false });
+                            setPendingAccountDraft({ name: queries.account_id.trim(), currency: form.currency, balance: 0, is_active: true, account_type: 'regular', is_credit: false });
                             setAccountDialogOpen(true);
                           },
                         }}
@@ -842,37 +1260,71 @@ export function ImportWizard() {
                           const patch: Partial<RowEditState> = { main_type: nextMainType };
                           if (nextMainType === 'transfer') {
                             patch.target_account_id = form.target_account_id || mappingForm.account_id;
+                            patch.credit_account_id = '';
+                            patch.credit_principal_amount = '';
+                            patch.credit_interest_amount = '';
+                            patch.credit_operation_kind = '';
                             patch.category_id = '';
                             patch.type = 'expense';
                           }
                           if (nextMainType === 'regular') {
                             patch.investment_direction = '';
                             patch.debt_direction = '';
+                            patch.counterparty_id = '';
+                            patch.credit_account_id = '';
+                            patch.credit_principal_amount = '';
+                            patch.credit_interest_amount = '';
+                            patch.credit_operation_kind = '';
                           }
                           if (nextMainType === 'refund') {
                             patch.investment_direction = '';
                             patch.debt_direction = '';
+                            patch.counterparty_id = '';
+                            patch.credit_account_id = '';
+                            patch.credit_principal_amount = '';
+                            patch.credit_interest_amount = '';
+                            patch.credit_operation_kind = '';
                             patch.type = 'income';
                             patch.target_account_id = '';
                           }
                           if (nextMainType === 'investment') {
                             patch.investment_direction = form.investment_direction || 'buy';
                             patch.debt_direction = '';
+                            patch.counterparty_id = '';
+                            patch.credit_account_id = '';
+                            patch.credit_principal_amount = '';
+                            patch.credit_interest_amount = '';
+                            patch.credit_operation_kind = '';
                             patch.category_id = '';
                             patch.target_account_id = '';
                           }
                           if (nextMainType === 'debt') {
                             patch.debt_direction = form.debt_direction || 'lent';
+                            patch.counterparty_id = form.counterparty_id || '';
                             patch.investment_direction = '';
+                            patch.credit_account_id = '';
+                            patch.credit_principal_amount = '';
+                            patch.credit_interest_amount = '';
+                            patch.credit_operation_kind = '';
                             patch.category_id = '';
                             patch.target_account_id = '';
                           }
-                          if (nextMainType === 'credit_payment') {
+                          if (nextMainType === 'credit_operation') {
+                            const nextKind = form.credit_operation_kind || 'payment';
                             patch.investment_direction = '';
                             patch.debt_direction = '';
+                            patch.counterparty_id = '';
                             patch.category_id = '';
+                            patch.credit_operation_kind = nextKind;
+                            patch.type = nextKind === 'disbursement' ? 'income' : 'expense';
                             patch.target_account_id = '';
-                            patch.type = 'expense';
+                            if (nextKind === 'payment') {
+                              patch.credit_account_id = form.credit_account_id || form.target_account_id || '';
+                            } else {
+                              patch.credit_account_id = '';
+                              patch.credit_principal_amount = '';
+                              patch.credit_interest_amount = '';
+                            }
                           }
                           updateRowForm(row.id, patch);
                           updateRowQuery(row.id, { main_type: item.label });
@@ -897,21 +1349,54 @@ export function ImportWizard() {
                           showAllOnFocus
                         />
                       ) : form.main_type === 'debt' ? (
-                        <SearchSelect
-                          id={`row-debt-direction-${row.id}`}
-                          label="Направление долга"
-                          placeholder="Начни вводить..."
-                          widthClassName="w-full"
-                          query={queries.debt_direction}
-                          setQuery={(value) => updateRowQuery(row.id, { debt_direction: value })}
-                          items={debtDirectionItems}
-                          selectedValue={form.debt_direction}
-                          onSelect={(item) => {
-                            updateRowForm(row.id, { debt_direction: item.value as DebtDirection });
-                            updateRowQuery(row.id, { debt_direction: item.label });
-                          }}
-                          showAllOnFocus
-                        />
+                        <>
+                          <SearchSelect
+                            id={`row-debt-direction-${row.id}`}
+                            label="Направление долга"
+                            placeholder="Начни вводить..."
+                            widthClassName="w-full"
+                            query={queries.debt_direction}
+                            setQuery={(value) => updateRowQuery(row.id, { debt_direction: value })}
+                            items={debtDirectionItems}
+                            selectedValue={form.debt_direction}
+                            onSelect={(item) => {
+                              updateRowForm(row.id, { debt_direction: item.value as DebtDirection });
+                              updateRowQuery(row.id, { debt_direction: item.label });
+                            }}
+                            showAllOnFocus
+                          />
+
+                          <SearchSelect
+                            id={`row-counterparty-${row.id}`}
+                            label="Контрагент"
+                            placeholder="Начни вводить..."
+                            widthClassName="w-full"
+                            query={queries.counterparty_id}
+                            setQuery={(value) => updateRowQuery(row.id, { counterparty_id: value })}
+                            items={counterpartyItems}
+                            selectedValue={form.counterparty_id}
+                            onSelect={(item) => {
+                              updateRowForm(row.id, { counterparty_id: item.value });
+                              updateRowQuery(row.id, { counterparty_id: item.label });
+                            }}
+                            showAllOnFocus
+                            onDeleteItem={(item) => deleteCounterpartyMutation.mutate(Number(item.value))}
+                            deleteItemLabel="Удалить контрагента"
+                            createAction={{
+                              visible: Boolean((queries.counterparty_id ?? '').trim()) && !counterpartyItems.some((item) => normalize(item.label) === normalize(queries.counterparty_id ?? '')),
+                              label: 'Создать контрагента',
+                              onClick: () => {
+                                setPendingFieldTarget({ rowId: row.id, field: 'counterparty_id' });
+                                setPendingCounterpartyDraft({
+                                  name: (queries.counterparty_id ?? '').trim(),
+                                  opening_balance: 0,
+                                  opening_balance_kind: form.debt_direction === 'borrowed' || form.debt_direction === 'repaid' ? 'payable' : 'receivable',
+                                });
+                                setCounterpartyDialogOpen(true);
+                              },
+                            }}
+                          />
+                        </>
                       ) : form.main_type === 'transfer' ? (
                         <SearchSelect
                           id={`row-target-account-${row.id}`}
@@ -932,12 +1417,56 @@ export function ImportWizard() {
                             label: 'Создать счёт',
                             onClick: () => {
                               setPendingFieldTarget({ rowId: row.id, field: 'target_account_id' });
-                              setPendingAccountDraft({ name: queries.target_account_id.trim(), currency: form.currency, balance: 0, is_active: true, is_credit: false });
+                              setPendingAccountDraft({ name: queries.target_account_id.trim(), currency: form.currency, balance: 0, is_active: true, account_type: 'regular', is_credit: false });
                               setAccountDialogOpen(true);
                             },
                           }}
                         />
-                      ) : form.main_type !== 'credit_payment' ? (
+                      ) : form.main_type === 'credit_operation' ? (
+                        <>
+                          <SearchSelect
+                            id={`row-credit-kind-${row.id}`}
+                            label="Вид операции"
+                            placeholder="Выбери вид операции"
+                            widthClassName="w-full"
+                            query={queries.credit_operation_kind}
+                            setQuery={(value) => updateRowQuery(row.id, { credit_operation_kind: value })}
+                            items={creditOperationKindItems}
+                            selectedValue={form.credit_operation_kind}
+                            onSelect={(item) => {
+                              const nextKind = item.value as CreditOperationKind;
+                              updateRowForm(row.id, {
+                                credit_operation_kind: nextKind,
+                                type: nextKind === 'disbursement' ? 'income' : 'expense',
+                                category_id: '',
+                                target_account_id: '',
+                                credit_account_id: nextKind === 'payment' ? form.credit_account_id : '',
+                                credit_principal_amount: nextKind === 'payment' ? form.credit_principal_amount : '',
+                                credit_interest_amount: nextKind === 'payment' ? form.credit_interest_amount : '',
+                              });
+                              updateRowQuery(row.id, { credit_operation_kind: item.label });
+                            }}
+                            showAllOnFocus
+                          />
+                          {form.credit_operation_kind === 'payment' ? (
+                            <SearchSelect
+                              id={`row-credit-account-${row.id}`}
+                              label="Кредит"
+                              placeholder="Выбери кредитный счёт"
+                              widthClassName="w-full"
+                              query={queries.credit_account_id}
+                              setQuery={(value) => updateRowQuery(row.id, { credit_account_id: value })}
+                              items={creditAccountItems.filter((item) => item.value !== form.account_id)}
+                              selectedValue={form.credit_account_id}
+                              onSelect={(item) => {
+                                updateRowForm(row.id, { credit_account_id: item.value });
+                                updateRowQuery(row.id, { credit_account_id: item.label });
+                              }}
+                              showAllOnFocus
+                            />
+                          ) : null}
+                        </>
+                      ) : (
                         <SearchSelect
                           id={`row-category-${row.id}`}
                           label="Категория"
@@ -957,11 +1486,24 @@ export function ImportWizard() {
                             label: 'Создать категорию',
                             onClick: () => {
                               setPendingFieldTarget({ rowId: row.id, field: 'category_id' });
-                              setPendingCategoryDraft({ name: queries.category_id.trim(), kind: categoryKind, priority: defaultCategoryPriorityByKind[categoryKind], color: null });
+                              setPendingCategoryDraft({ name: queries.category_id.trim(), kind: categoryKind, priority: defaultCategoryPriorityByKind[categoryKind] });
                               setCategoryDialogOpen(true);
                             },
                           }}
                         />
+                      ) : null}
+
+                      {form.main_type === 'credit_operation' && form.credit_operation_kind === 'payment' ? (
+                        <>
+                          <div>
+                            <label className="mb-2 block text-sm font-medium text-slate-700">Основной долг</label>
+                            <Input value={form.credit_principal_amount} onChange={(event) => updateRowForm(row.id, { credit_principal_amount: event.target.value })} />
+                          </div>
+                          <div>
+                            <label className="mb-2 block text-sm font-medium text-slate-700">Проценты</label>
+                            <Input value={form.credit_interest_amount} onChange={(event) => updateRowForm(row.id, { credit_interest_amount: event.target.value })} />
+                          </div>
+                        </>
                       ) : null}
 
                       <div>
@@ -1015,7 +1557,7 @@ export function ImportWizard() {
                                     label: 'Создать категорию',
                                     onClick: () => {
                                       setPendingFieldTarget({ rowId: row.id, field: 'split_category_id', splitIndex: index });
-                                      setPendingCategoryDraft({ name: splitQuery.category_id.trim(), kind: 'expense', priority: defaultCategoryPriorityByKind.expense, color: null });
+                                      setPendingCategoryDraft({ name: splitQuery.category_id.trim(), kind: 'expense', priority: defaultCategoryPriorityByKind.expense });
                                       setCategoryDialogOpen(true);
                                     },
                                   }}
@@ -1066,6 +1608,18 @@ export function ImportWizard() {
           setPendingFieldTarget(null);
         }}
         onSubmit={(values) => createAccountMutation.mutate(values)}
+      />
+
+      <CounterpartyDialog
+        open={counterpartyDialogOpen}
+        draft={pendingCounterpartyDraft}
+        isSubmitting={createCounterpartyMutation.isPending}
+        onClose={() => {
+          setCounterpartyDialogOpen(false);
+          setPendingCounterpartyDraft(null);
+          setPendingFieldTarget(null);
+        }}
+        onSubmit={(values) => createCounterpartyMutation.mutate(values)}
       />
 
       <CategoryDialog

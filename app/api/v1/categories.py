@@ -47,7 +47,6 @@ def create_category(
             name=payload.name,
             kind=payload.kind.value,
             priority=payload.priority.value,
-            color=payload.color,
             is_system=payload.is_system,
         )
     except CategoryValidationError as exc:

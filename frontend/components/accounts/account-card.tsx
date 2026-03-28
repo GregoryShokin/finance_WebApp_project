@@ -1,6 +1,6 @@
 "use client";
 
-import { CreditCard, Pencil, Trash2, Wallet } from 'lucide-react';
+import { CreditCard, Pencil, RotateCcw, Trash2, Wallet } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { MoneyAmount } from '@/components/shared/money-amount';
@@ -11,11 +11,15 @@ export function AccountCard({
   account,
   onEdit,
   onDelete,
+  onCancelDelete,
+  isDeletePending,
   isDeleting,
 }: {
   account: Account;
   onEdit: (account: Account) => void;
   onDelete: (account: Account) => void;
+  onCancelDelete: (accountId: number) => void;
+  isDeletePending?: boolean;
   isDeleting?: boolean;
 }) {
   const numericBalance = Number(account.balance);
@@ -34,14 +38,14 @@ export function AccountCard({
                 <StatusBadge tone={account.is_active ? 'success' : 'neutral'}>
                   {account.is_active ? 'Активный' : 'Неактивный'}
                 </StatusBadge>
-                {account.is_credit ? <StatusBadge tone="warning">Кредитный</StatusBadge> : null}
+                {account.is_credit ? <StatusBadge tone="warning">Кредит</StatusBadge> : null}
               </div>
               <p className="mt-1 text-sm text-slate-500">Валюта счёта: {account.currency}</p>
             </div>
           </div>
 
           <div className="surface-muted mt-5 p-4">
-            <p className="text-sm text-slate-500">Текущий баланс</p>
+            <p className="text-sm text-slate-500">{account.is_credit ? 'Текущий долг' : 'Текущий баланс'}</p>
             <MoneyAmount
               value={numericBalance}
               currency={account.currency}
@@ -49,30 +53,54 @@ export function AccountCard({
               className="mt-1 block text-2xl lg:text-3xl"
             />
           </div>
+
+          {account.is_credit ? (
+            <div className="mt-4 grid gap-3 text-sm text-slate-600 sm:grid-cols-3">
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                <div className="text-xs text-slate-500">Изначальная сумма</div>
+                <div className="mt-1 font-medium text-slate-900">{Number(account.credit_limit_original ?? 0).toLocaleString('ru-RU')}</div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                <div className="text-xs text-slate-500">Ставка</div>
+                <div className="mt-1 font-medium text-slate-900">{Number(account.credit_interest_rate ?? 0).toLocaleString('ru-RU')}%</div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+                <div className="text-xs text-slate-500">Осталось</div>
+                <div className="mt-1 font-medium text-slate-900">{Number(account.credit_term_remaining ?? 0).toLocaleString('ru-RU')} мес.</div>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-          <Button
-            type="button"
-            variant="secondary"
-            size="icon"
-            onClick={() => onEdit(account)}
-            aria-label="Изменить счёт"
-            title="Изменить"
-          >
+          <Button type="button" variant="secondary" size="icon" onClick={() => onEdit(account)} aria-label="Изменить счёт" title="Изменить">
             <Pencil className="size-4" />
           </Button>
-          <Button
-            type="button"
-            variant="danger"
-            size="icon"
-            onClick={() => onDelete(account)}
-            disabled={isDeleting}
-            aria-label={isDeleting ? 'Удаляем счёт' : 'Удалить счёт'}
-            title={isDeleting ? 'Удаляем...' : 'Удалить'}
-          >
-            <Trash2 className="size-4" />
-          </Button>
+          {isDeletePending ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="icon"
+              onClick={() => onCancelDelete(account.id)}
+              disabled={isDeleting}
+              aria-label={isDeleting ? 'Счёт удаляется' : 'Отменить удаление счёта'}
+              title={isDeleting ? 'Удаляем...' : 'Отменить удаление'}
+            >
+              <RotateCcw className="size-4" />
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              variant="danger"
+              size="icon"
+              onClick={() => onDelete(account)}
+              disabled={isDeleting}
+              aria-label={isDeleting ? 'Удаляем счёт' : 'Удалить счёт'}
+              title={isDeleting ? 'Удаляем...' : 'Удалить'}
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          )}
         </div>
       </div>
     </Card>

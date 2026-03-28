@@ -14,6 +14,7 @@ export type Category = {
   kind: CategoryKind;
   priority: CategoryPriority;
   color: string | null;
+  icon_name: string;
   is_system: boolean;
   created_at: string;
   updated_at: string;
@@ -23,7 +24,6 @@ export type CreateCategoryPayload = {
   name: string;
   kind: CategoryKind;
   priority: CategoryPriority;
-  color?: string | null;
   is_system?: boolean;
 };
 
