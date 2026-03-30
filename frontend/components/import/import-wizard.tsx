@@ -2,13 +2,15 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, FileUp, Plus, ShieldOff, Sparkles, Split, Trash2, Undo2 } from 'lucide-react';
+import { CheckCircle2, FileUp, Info, Plus, ShieldOff, Sparkles, Split, Trash2, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { getAccounts, createAccount } from '@/lib/api/accounts';
+import { getCategoryRules } from '@/lib/api/category-rules';
 import { getCategories, createCategory } from '@/lib/api/categories';
 import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
 import { commitImport, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
+import { DescriptionAutocomplete } from '@/components/import/description-autocomplete';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -243,7 +245,7 @@ function mapOperationToUi(
 }
 
 function resolveOperationFields(form: RowEditState): Pick<RowEditState, 'operation_type' | 'type'> {
-  if (form.main_type === 'transfer') return { operation_type: 'transfer', type: 'expense' };
+  if (form.main_type === 'transfer') return { operation_type: 'transfer', type: form.type };
   if (form.main_type === 'refund') return { operation_type: 'refund', type: 'income' };
   if (form.main_type === 'investment') {
     return { operation_type: form.investment_direction === 'sell' ? 'investment_sell' : 'investment_buy', type: form.investment_direction === 'sell' ? 'income' : 'expense' };
@@ -257,28 +259,6 @@ function resolveOperationFields(form: RowEditState): Pick<RowEditState, 'operati
   return { operation_type: 'regular', type: form.type };
 }
 
-function getDirectionLabel(value: unknown) {
-  if (value === 'income') return transactionTypeLabels.income;
-  if (value === 'expense') return transactionTypeLabels.expense;
-  return '—';
-}
-
-function getOperationLabel(value: unknown) {
-  if (typeof value !== 'string') return '—';
-  return operationTypeLabels[value as keyof typeof operationTypeLabels] ?? value;
-}
-
-function findAccountName(accounts: Account[], value: unknown) {
-  const accountId = Number(value ?? 0);
-  if (!accountId) return null;
-  return accounts.find((item) => item.id === accountId)?.name ?? null;
-}
-
-function findCategoryName(categories: Category[], value: unknown) {
-  const categoryId = Number(value ?? 0);
-  if (!categoryId) return null;
-  return categories.find((item) => item.id === categoryId)?.name ?? null;
-}
 
 function getMainTypeLabel(value: MainOperationType) {
   if (value === 'regular') return 'Обычный';
@@ -438,6 +418,7 @@ export function ImportWizard() {
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'import-preview'], queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties', 'import-preview'], queryFn: getCounterparties });
+  const categoryRulesQuery = useQuery({ queryKey: ['category-rules'], queryFn: getCategoryRules });
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadForm, setUploadForm] = useState<UploadFormState>(defaultUploadForm);
@@ -469,6 +450,7 @@ export function ImportWizard() {
   const accounts = accountsQuery.data ?? [];
   const categories = categoriesQuery.data ?? [];
   const counterparties = counterpartiesQuery.data ?? [];
+  const categoryRules = categoryRulesQuery.data ?? [];
   const previewRows = previewResult?.rows ?? [];
 
   const isRowDirty = (row: ImportPreviewRow) => {
@@ -500,8 +482,6 @@ export function ImportWizard() {
       }
     );
   }, [previewResult, previewRows, rowForms, splitExpanded, splitRows, accounts, mappingForm.account_id]);
-
-  const hasDirtyReadyRows = previewRows.some((row) => isRowDirty(row) && row.status === 'ready');
 
   useEffect(() => {
     if (!previewRows.length) return;
@@ -681,6 +661,20 @@ export function ImportWizard() {
       setPreviewResult(null);
       setCommitResult(null);
       setMappingForm(nextMapping);
+
+      const hasDetectedFields = Object.values(data.detection.field_mapping).some(Boolean);
+      if (!hasDetectedFields) {
+        const extraction = data.extraction as Record<string, unknown>;
+        const isPdf = data.source_type === 'pdf';
+        const parsedCount = typeof extraction?.parsed_transaction_count === 'number' ? extraction.parsed_transaction_count : -1;
+        if (isPdf && parsedCount === 0) {
+          toast.error('Выписка не содержит транзакций — проверь период выгрузки в приложении банка');
+        } else {
+          toast.error('Формат файла не распознан — структура выписки не поддерживается');
+        }
+        return;
+      }
+
       toast.success('Источник загружен и распознан');
       if (!nextMapping.account_id) {
         toast.error('Сначала создай или выбери счёт для импорта');
@@ -916,6 +910,8 @@ export function ImportWizard() {
       toast.error('Выбери счёт для импорта');
       return;
     }
+    const hasDetectedFields = Object.values(uploadResult.detection.field_mapping).some(Boolean);
+    if (!hasDetectedFields) return;
     setMappingForm(nextForm);
     previewMutation.mutate({ sessionId: uploadResult.session_id, payload: toPreviewPayload(nextForm) });
   }
@@ -1136,10 +1132,6 @@ export function ImportWizard() {
             </div>
             <div className="flex flex-wrap gap-3">
               <Button onClick={() => {
-                if (hasDirtyReadyRows) {
-                  toast.error('Есть изменённые строки со статусом «Готово». Нажми «Подтвердить» в каждой такой строке.');
-                  return;
-                }
                 commitMutation.mutate({ sessionId: previewResult.session_id, importReadyOnly: true });
               }} disabled={commitMutation.isPending}>
                 <CheckCircle2 className="size-4" />
@@ -1164,9 +1156,6 @@ export function ImportWizard() {
               const splitOpen = Boolean(splitExpanded[row.id]);
               const currentSplitRows = getSplitRowsForRow(row);
               const currentSplitQueries = getSplitQueriesForRow(row);
-              const accountName = findAccountName(accounts, normalized.account_id);
-              const targetAccountName = findAccountName(accounts, normalized.target_account_id);
-              const categoryName = findCategoryName(categories, normalized.category_id);
               const categoryKind: CategoryKind = form.type === 'income' ? 'income' : 'expense';
               const categoryItems = form.main_type === 'refund' ? categoryItemsByKind() : categoryItemsByKind(categoryKind);
 
@@ -1176,20 +1165,14 @@ export function ImportWizard() {
                     <div className="min-w-0 flex-1 space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <ImportStatusBadge status={isRowDirty(row) && row.status === 'ready' ? 'warning' : row.status} />
-                        <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-600">Строка {row.row_index}</span>
-                        <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-600">{Math.round((row.confidence ?? 0) * 100)}%</span>
+                        {normalized.type === 'income' ? (
+                          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">Доход</span>
+                        ) : normalized.type === 'expense' ? (
+                          <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700">Расход</span>
+                        ) : null}
                       </div>
                       <div className="text-sm text-slate-700">
                         <div className="font-medium text-slate-950 break-words [overflow-wrap:anywhere]">{String(normalized.description ?? 'Без описания')}</div>
-                        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-slate-500">
-                          <span>Дата: {String(normalized.transaction_date ?? normalized.date ?? '—').slice(0, 10) || '—'}</span>
-                          <span>Сумма: {String(normalized.amount ?? '—')} {String(normalized.currency ?? 'RUB')}</span>
-                          <span>Направление: {getDirectionLabel(normalized.type)}</span>
-                          <span>Тип: {getOperationLabel(normalized.operation_type)}</span>
-                          <span>Счёт: {accountName ?? '—'}</span>
-                          {(normalized.operation_type === 'transfer' || normalized.target_account_id) ? <span>Счёт поступления: {targetAccountName ?? '—'}</span> : null}
-                          {normalized.operation_type !== 'transfer' ? <span>Категория: {categoryName ?? '—'}</span> : null}
-                        </div>
                       </div>
                     </div>
 
@@ -1219,11 +1202,41 @@ export function ImportWizard() {
                     </div>
                   </div>
 
+                  {row.status === 'duplicate' && normalized.transfer_pair_hint != null ? (
+                    (() => {
+                      const hint = normalized.transfer_pair_hint as { date?: string; source_account_name?: string | null };
+                      const hintDate = hint.date
+                        ? new Date(hint.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })
+                        : null;
+                      return (
+                        <div className="mt-3 flex items-start gap-3 rounded-xl border border-violet-200 bg-violet-50 px-4 py-3">
+                          <Info className="mt-0.5 size-4 shrink-0 text-violet-500" />
+                          <p className="flex-1 text-sm text-violet-800">
+                            Это поступление уже учтено как перевод
+                            {hintDate ? <> от <span className="font-medium">{hintDate}</span></> : null}
+                            {hint.source_account_name ? <> со счёта <span className="font-medium">{hint.source_account_name}</span></> : null}
+                          </p>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="shrink-0 text-violet-700 hover:bg-violet-100 hover:text-violet-900"
+                            onClick={() => submitRow(row, 'exclude')}
+                            disabled={rowMutation.isPending}
+                          >
+                            <ShieldOff className="size-3.5" />
+                            Исключить
+                          </Button>
+                        </div>
+                      );
+                    })()
+                  ) : null}
+
                   {row.status !== 'skipped' ? (
                     <div className="mt-4 grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 md:grid-cols-2 xl:grid-cols-4">
                       <SearchSelect
                         id={`row-account-${row.id}`}
-                        label={form.main_type === 'transfer' ? 'Счёт отправления' : 'Счёт'}
+                        label={form.main_type === 'transfer' ? 'Счёт (из выписки)' : 'Счёт'}
                         placeholder="Начни вводить..."
                         widthClassName="w-full"
                         query={queries.account_id}
@@ -1400,7 +1413,7 @@ export function ImportWizard() {
                       ) : form.main_type === 'transfer' ? (
                         <SearchSelect
                           id={`row-target-account-${row.id}`}
-                          label="Счёт поступления"
+                          label={form.type === 'income' ? 'Счёт отправления' : 'Счёт поступления'}
                           placeholder="Начни вводить..."
                           widthClassName="w-full"
                           query={queries.target_account_id}
@@ -1513,7 +1526,12 @@ export function ImportWizard() {
 
                       <div className="md:col-span-2 xl:col-span-2">
                         <label className="mb-2 block text-sm font-medium text-slate-700">Описание</label>
-                        <Input value={form.description} onChange={(event) => updateRowForm(row.id, { description: event.target.value })} />
+                        <DescriptionAutocomplete
+                          value={form.description}
+                          onChange={(value) => updateRowForm(row.id, { description: value })}
+                          rowNormalizedDescription={String(row.normalized_data.normalized_description ?? '')}
+                          rules={categoryRules}
+                        />
                       </div>
 
                       <div>

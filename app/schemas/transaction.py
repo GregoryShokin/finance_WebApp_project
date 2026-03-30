@@ -104,6 +104,7 @@ class TransactionResponse(BaseModel):
     account_id: int
     target_account_id: int | None
     credit_account_id: int | None
+    transfer_pair_id: int | None = None
     category_id: int | None
     counterparty_id: int | None
     category_priority: CategoryPriority | None = None

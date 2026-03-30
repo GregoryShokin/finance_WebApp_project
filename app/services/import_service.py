@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
+from app.models.transaction import Transaction as TransactionModel
 from app.repositories.account_repository import AccountRepository
 from app.repositories.import_repository import ImportRepository
+from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.imports import ImportMappingRequest, ImportPreviewSummary, ImportRowUpdateRequest
 from app.services.import_confidence import ImportConfidenceService
@@ -23,7 +25,7 @@ from app.services.transaction_enrichment_service import (
     ALLOWED_OPERATION_TYPES,
     TransactionEnrichmentService,
 )
-from app.services.transaction_service import TransactionService, TransactionValidationError
+from app.services.transaction_service import NON_ANALYTICS_OPERATION_TYPES, TransactionService, TransactionValidationError
 
 RAW_TYPE_TO_OPERATION_TYPE = {
     "purchase": "regular",
@@ -56,6 +58,7 @@ class ImportService:
         self.confidence = ImportConfidenceService()
         self.enrichment = TransactionEnrichmentService(db)
         self.transaction_service = TransactionService(db)
+        self.category_rule_repo = TransactionCategoryRuleRepository(db)
 
     def upload_source(
         self,
@@ -326,6 +329,7 @@ class ImportService:
         blocking_messages = {
             "Не указан счёт.",
             "Не указан счёт поступления.",
+            "Не указан счёт отправителя.",
             "Не выбран кредитный счёт.",
             "Не выбрана категория.",
             "Разбивка заполнена некорректно.",
@@ -361,11 +365,14 @@ class ImportService:
 
         if operation_type == "transfer":
             target_account_id = normalized.get("target_account_id")
+            tx_type = str(normalized.get("type") or "expense")
             normalized["credit_account_id"] = None
             normalized["credit_principal_amount"] = None
             normalized["credit_interest_amount"] = None
             if target_account_id in (None, "", 0):
-                local_issues.append("Не указан счёт поступления.")
+                # For income transfers, target = source account; for expense, target = destination.
+                missing_msg = "Не указан счёт отправителя." if tx_type == "income" else "Не указан счёт поступления."
+                local_issues.append(missing_msg)
                 status = "warning"
             elif str(target_account_id) == str(account_id):
                 local_issues.append("Счёт списания и счёт поступления не должны совпадать.")
@@ -604,18 +611,84 @@ class ImportService:
                     normalized_payload=normalized,
                 )
                 normalized.update(enrichment)
-                normalized["account_id"] = enrichment.get("suggested_account_id") or payload.account_id
-                normalized["target_account_id"] = enrichment.get("suggested_target_account_id")
-                normalized["category_id"] = enrichment.get("suggested_category_id")
+                normalized["import_original_description"] = normalized.get("description")
+
+                # Категория — только по точному правилу TransactionCategoryRule.
+                _norm_desc = enrichment.get("normalized_description") or ""
+                _cat_rule = (
+                    self.category_rule_repo.get_best_rule(user_id=user_id, normalized_description=_norm_desc)
+                    if _norm_desc
+                    else None
+                )
+                normalized["category_id"] = _cat_rule.category_id if _cat_rule else None
+
                 normalized["operation_type"] = enrichment.get("suggested_operation_type") or self._resolve_operation_type(normalized)
                 normalized["type"] = enrichment.get("suggested_type") or normalized.get("direction") or "expense"
+
+                if str(normalized["operation_type"]) == "transfer":
+                    # account_id always = session account ("Счёт из выписки"), regardless of direction.
+                    # target_account_id = the OTHER side of the transfer (source for income, dest for expense).
+                    # _create_transfer_pair uses normalized["type"] to determine which side is expense/income.
+                    normalized["account_id"] = payload.account_id
+                    if str(normalized["type"]) == "income":
+                        # Income transfer: session account received money.
+                        # target_account_id = source side (where money came from).
+                        suggested_source = enrichment.get("suggested_account_id")
+                        if suggested_source == payload.account_id:
+                            suggested_source = None
+                        normalized["target_account_id"] = suggested_source
+                    else:
+                        # Expense transfer: session account sent money.
+                        # target_account_id = destination side.
+                        normalized["target_account_id"] = enrichment.get("suggested_target_account_id")
+                else:
+                    normalized["account_id"] = enrichment.get("suggested_account_id") or payload.account_id
+                    normalized["target_account_id"] = enrichment.get("suggested_target_account_id")
 
                 amount_decimal = self._to_decimal(normalized.get("amount"))
                 transaction_dt = self._to_datetime(normalized.get("transaction_date") or normalized.get("date"))
 
-                duplicate = self._find_duplicate(
+                current_operation_type = str(normalized.get("operation_type") or "regular")
+                _raw_account_id = normalized.get("account_id")
+                if _raw_account_id in (None, "", 0):
+                    if current_operation_type == "transfer":
+                        issues.append("Не удалось определить счёт из выписки — укажи вручную.")
+                        status = "warning"
+                    current_account_id = 0
+                else:
+                    current_account_id = int(_raw_account_id)
+
+                # Transfer-specific deduplication: look for an existing transfer that already
+                # involves the session account on either side (same amount, date ±2 days).
+                # account_id is always the session account, so we always search by it.
+                if current_operation_type == "transfer":
+                    # account_id is always the session account (always known).
+                    # Search for an existing paired transfer whose other side is the session account.
+                    if current_account_id != 0:
+                        transfer_pair_tx = self._find_transfer_pair_duplicate(
+                            user_id=user_id,
+                            account_id=current_account_id,
+                            amount=amount_decimal,
+                            transaction_date=transaction_dt,
+                        )
+                        if transfer_pair_tx is not None:
+                            status = "duplicate"
+                            issues.append("Вторая сторона уже импортированного перевода.")
+                            # Determine the other side account for the hint.
+                            # The existing transaction record: account_id = its own account, target_account_id = other side.
+                            if transfer_pair_tx.account_id == current_account_id:
+                                other_account_id = transfer_pair_tx.target_account_id
+                            else:
+                                other_account_id = transfer_pair_tx.account_id
+                            other_account = self.account_repo.get_by_id_and_user(other_account_id, user_id) if other_account_id else None
+                            normalized["transfer_pair_hint"] = {
+                                "date": transfer_pair_tx.transaction_date.date().isoformat(),
+                                "source_account_name": other_account.name if other_account else None,
+                            }
+
+                duplicate = status != "duplicate" and self._find_duplicate(
                     user_id=user_id,
-                    account_id=int(normalized["account_id"]),
+                    account_id=current_account_id,
                     amount=amount_decimal,
                     transaction_date=transaction_dt,
                     description=normalized.get("description"),
@@ -629,6 +702,16 @@ class ImportService:
 
                 if enrichment.get("needs_manual_review") and status == "ready":
                     status = "warning"
+
+                # Если нет правила для этой операции — требуется ручное подтверждение категории.
+                _requires_category = (
+                    str(normalized.get("type") or "") == "expense"
+                    and str(normalized.get("operation_type") or "") not in NON_ANALYTICS_OPERATION_TYPES
+                )
+                if _requires_category and not normalized.get("category_id"):
+                    issues.append("Категория не определена — укажи вручную.")
+                    if status == "ready":
+                        status = "warning"
 
                 issues.extend(enrichment.get("review_reasons") or [])
                 issues.extend(enrichment.get("assignment_reasons") or [])
@@ -690,6 +773,44 @@ class ImportService:
             "summary": summary,
             "detection": merged_detection,
             "rows": response_rows,
+        }
+
+    def set_row_label(self, *, user_id: int, row_id: int, user_label: str) -> dict[str, Any]:
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+
+        _, row = session_row
+        normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
+
+        norm_desc = normalized.get("normalized_description")
+        orig_desc = normalized.get("import_original_description") or normalized.get("description")
+        category_id = normalized.get("category_id")
+        operation_type = normalized.get("operation_type") or "regular"
+
+        if not norm_desc:
+            raise ImportValidationError("Строка не содержит нормализованного описания для создания правила.")
+        if not category_id:
+            raise ImportValidationError("Строка не содержит категории для создания правила.")
+        if operation_type in NON_ANALYTICS_OPERATION_TYPES:
+            raise ImportValidationError("Для данного типа операции правило классификации не применяется.")
+
+        rule = self.category_rule_repo.upsert(
+            user_id=user_id,
+            normalized_description=norm_desc,
+            category_id=int(category_id),
+            original_description=orig_desc or None,
+            user_label=user_label,
+        )
+        self.db.commit()
+        self.db.refresh(rule)
+
+        return {
+            "rule_id": rule.id,
+            "normalized_description": rule.normalized_description,
+            "original_description": rule.original_description,
+            "user_label": rule.user_label,
+            "category_id": rule.category_id,
         }
 
     def commit_import(self, *, user_id: int, session_id: int, import_ready_only: bool = True) -> dict[str, Any]:
@@ -757,19 +878,41 @@ class ImportService:
 
             try:
                 last_transaction = None
-                for payload in payloads:
-                    last_transaction = self.transaction_service.create_transaction(
+                operation_type = str(normalized.get("operation_type") or "regular")
+                target_account_id = normalized.get("target_account_id")
+
+                if operation_type == "transfer" and target_account_id not in (None, "", 0):
+                    expense_tx, _income_tx = self._create_transfer_pair(
                         user_id=user_id,
-                        payload=payload,
+                        payload=payloads[0],
                     )
+                    last_transaction = expense_tx
                     imported_count += 1
+                else:
+                    for payload in payloads:
+                        last_transaction = self.transaction_service.create_transaction(
+                            user_id=user_id,
+                            payload=payload,
+                        )
+                        imported_count += 1
                 self.import_repo.update_row(
                     row,
                     status="committed",
                     created_transaction_id=last_transaction.id if last_transaction is not None else None,
                     review_required=False,
                 )
-            except TransactionValidationError as exc:
+                category_id = normalized.get("category_id")
+                norm_desc = normalized.get("normalized_description")
+                orig_desc = normalized.get("import_original_description") or normalized.get("description")
+                operation_type = normalized.get("operation_type") or "regular"
+                if category_id and norm_desc and operation_type not in NON_ANALYTICS_OPERATION_TYPES:
+                    self.category_rule_repo.upsert(
+                        user_id=user_id,
+                        normalized_description=norm_desc,
+                        category_id=int(category_id),
+                        original_description=orig_desc or None,
+                    )
+            except (TransactionValidationError, ImportValidationError) as exc:
                 row.status = "error"
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))
                 self.import_repo.update_row(row, status=row.status, errors=row.errors, review_required=True)
@@ -807,6 +950,88 @@ class ImportService:
             "error_count": error_count,
             "review_count": review_count,
         }
+
+    def _create_transfer_pair(
+        self, *, user_id: int, payload: dict[str, Any]
+    ) -> tuple[TransactionModel, TransactionModel]:
+        """Creates two linked Transfer transactions — one per account side — and applies balance effects."""
+        account_id = int(payload["account_id"])
+        target_account_id = int(payload["target_account_id"])
+        amount = ImportService._to_decimal(payload["amount"])
+        currency = str(payload.get("currency") or "RUB").upper()
+        description = (payload.get("description") or "")[:500]
+        transaction_date = ImportService._to_datetime(payload["transaction_date"])
+        needs_review = bool(payload.get("needs_review"))
+        normalized_description = self.enrichment.normalize_description(description)
+
+        # account_id is the SESSION account ("Счёт из выписки").
+        # target_account_id is the OTHER side of the transfer.
+        # The 'type' field on the import row determines direction:
+        #   type="income": session received money → session is income side, other is expense side.
+        #   type="expense": session sent money → session is expense side, other is income side.
+        tx_type = str(payload.get("type") or "expense")
+        if tx_type == "income":
+            expense_account_id = target_account_id
+            income_account_id = account_id
+        else:
+            expense_account_id = account_id
+            income_account_id = target_account_id
+
+        expense_account = self.account_repo.get_by_id_and_user_for_update(expense_account_id, user_id)
+        income_account = self.account_repo.get_by_id_and_user_for_update(income_account_id, user_id)
+
+        if expense_account is None:
+            raise ImportValidationError("Счёт списания не найден.")
+        if income_account is None:
+            raise ImportValidationError("Счёт поступления не найден.")
+
+        t_expense = TransactionModel(
+            user_id=user_id,
+            account_id=expense_account_id,
+            target_account_id=income_account_id,
+            amount=amount,
+            currency=currency,
+            type="expense",
+            operation_type="transfer",
+            description=description,
+            normalized_description=normalized_description,
+            transaction_date=transaction_date,
+            needs_review=needs_review,
+            affects_analytics=False,
+        )
+        self.db.add(t_expense)
+
+        t_income = TransactionModel(
+            user_id=user_id,
+            account_id=income_account_id,
+            target_account_id=expense_account_id,
+            amount=amount,
+            currency=currency,
+            type="income",
+            operation_type="transfer",
+            description=description,
+            normalized_description=normalized_description,
+            transaction_date=transaction_date,
+            needs_review=needs_review,
+            affects_analytics=False,
+        )
+        self.db.add(t_income)
+
+        self.db.flush()  # Assign IDs to both records
+
+        t_expense.transfer_pair_id = t_income.id
+        t_income.transfer_pair_id = t_expense.id
+
+        expense_account.balance -= amount
+        income_account.balance += amount
+        self.db.add(expense_account)
+        self.db.add(income_account)
+
+        self.db.commit()
+        self.db.refresh(t_expense)
+        self.db.refresh(t_income)
+
+        return t_expense, t_income
 
     @staticmethod
     def _prepare_transaction_payloads(normalized: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1004,6 +1229,23 @@ class ImportService:
             transaction_date=transaction_date,
         )
         return any((item.description or "").strip() == description for item in candidates)
+
+    def _find_transfer_pair_duplicate(
+        self,
+        *,
+        user_id: int,
+        account_id: int,
+        amount: Decimal,
+        transaction_date: datetime,
+    ) -> TransactionModel | None:
+        """Returns the matching Transfer transaction when an existing transfer already covers
+        this account as the receiving side, so the caller can build a UI hint."""
+        return self.transaction_repo.find_transfer_pair_candidate(
+            user_id=user_id,
+            account_id=account_id,
+            amount=amount,
+            transaction_date=transaction_date,
+        )
 
     @staticmethod
     def _resolve_operation_type(normalized: dict[str, Any]) -> str:

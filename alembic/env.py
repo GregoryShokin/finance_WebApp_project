@@ -11,6 +11,9 @@ from app.models.counterparty import Counterparty  # noqa: F401
 from app.models.import_session import ImportSession  # noqa: F401
 from app.models.import_row import ImportRow  # noqa: F401
 from app.models.transaction_category_rule import TransactionCategoryRule  # noqa: F401
+from app.models.budget import Budget  # noqa: F401
+from app.models.budget_alert import BudgetAlert  # noqa: F401
+from app.models.real_asset import RealAsset  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)

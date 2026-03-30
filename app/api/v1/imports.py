@@ -11,6 +11,8 @@ from app.schemas.imports import (
     ImportMappingRequest,
     ImportPreviewResponse,
     ImportReviewQueueResponse,
+    ImportRowLabelRequest,
+    ImportRowLabelResponse,
     ImportRowUpdateRequest,
     ImportRowUpdateResponse,
     ImportSessionResponse,
@@ -52,6 +54,24 @@ async def upload_import_file(
 
 
 
+
+
+@router.post("/rows/{row_id}/label", response_model=ImportRowLabelResponse)
+def set_import_row_label(
+    row_id: int,
+    payload: ImportRowLabelRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.set_row_label(user_id=current_user.id, row_id=row_id, user_label=payload.user_label)
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.patch("/rows/{row_id}", response_model=ImportRowUpdateResponse)

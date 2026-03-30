@@ -17,3 +17,6 @@ class User(Base):
     categories = relationship("Category", back_populates="user", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="user", cascade="all, delete-orphan")
     counterparties = relationship("Counterparty", back_populates="user", cascade="all, delete-orphan")
+    budgets = relationship("Budget", back_populates="user", cascade="all, delete-orphan")
+    budget_alerts = relationship("BudgetAlert", back_populates="user", cascade="all, delete-orphan")
+    real_assets = relationship("RealAsset", back_populates="user", cascade="all, delete-orphan")

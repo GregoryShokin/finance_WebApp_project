@@ -7,6 +7,32 @@ import { MoneyAmount } from '@/components/shared/money-amount';
 import { StatusBadge } from '@/components/shared/status-badge';
 import type { Account } from '@/types/account';
 
+function CreditCardLimitBar({ account }: { account: Account }) {
+  const limit = Number(account.credit_limit_original ?? 0);
+  if (limit <= 0) return null;
+
+  const balance = Number(account.balance);
+  const used = Math.max(0, limit - balance);
+  const pct = Math.min(100, (used / limit) * 100);
+
+  const barColor =
+    pct > 80 ? 'bg-rose-500' : pct > 50 ? 'bg-amber-400' : 'bg-emerald-500';
+
+  const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');
+
+  return (
+    <div className="mt-4">
+      <div className="mb-1 flex justify-between text-xs text-slate-500">
+        <span>Использовано лимита</span>
+        <span>{fmt(used)} из {fmt(limit)} ₽</span>
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+        <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export function AccountCard({
   account,
   onEdit,
@@ -23,6 +49,7 @@ export function AccountCard({
   isDeleting?: boolean;
 }) {
   const numericBalance = Number(account.balance);
+  const isCreditCard = account.account_type === 'credit_card';
 
   return (
     <Card className="p-5 lg:p-6">
@@ -30,7 +57,7 @@ export function AccountCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-start gap-4">
             <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
-              {account.is_credit ? <CreditCard className="size-5" /> : <Wallet className="size-5" />}
+              {account.is_credit || isCreditCard ? <CreditCard className="size-5" /> : <Wallet className="size-5" />}
             </div>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
@@ -38,23 +65,27 @@ export function AccountCard({
                 <StatusBadge tone={account.is_active ? 'success' : 'neutral'}>
                   {account.is_active ? 'Активный' : 'Неактивный'}
                 </StatusBadge>
-                {account.is_credit ? <StatusBadge tone="warning">Кредит</StatusBadge> : null}
+                {isCreditCard ? <StatusBadge tone="warning">Кредитная карта</StatusBadge> : null}
+                {account.is_credit && !isCreditCard ? <StatusBadge tone="warning">Кредит</StatusBadge> : null}
               </div>
               <p className="mt-1 text-sm text-slate-500">Валюта счёта: {account.currency}</p>
             </div>
           </div>
 
           <div className="surface-muted mt-5 p-4">
-            <p className="text-sm text-slate-500">{account.is_credit ? 'Текущий долг' : 'Текущий баланс'}</p>
+            <p className="text-sm text-slate-500">
+              {isCreditCard ? 'Доступный остаток' : account.is_credit ? 'Текущий долг' : 'Текущий баланс'}
+            </p>
             <MoneyAmount
               value={numericBalance}
               currency={account.currency}
               tone={numericBalance < 0 ? 'expense' : 'default'}
               className="mt-1 block text-2xl lg:text-3xl"
             />
+            {isCreditCard ? <CreditCardLimitBar account={account} /> : null}
           </div>
 
-          {account.is_credit ? (
+          {account.is_credit && !isCreditCard ? (
             <div className="mt-4 grid gap-3 text-sm text-slate-600 sm:grid-cols-3">
               <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
                 <div className="text-xs text-slate-500">Изначальная сумма</div>

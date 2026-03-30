@@ -182,6 +182,18 @@ class ImportReviewQueueResponse(BaseModel):
     total: int = 0
 
 
+class ImportRowLabelRequest(BaseModel):
+    user_label: str = Field(..., min_length=1, max_length=500)
+
+
+class ImportRowLabelResponse(BaseModel):
+    rule_id: int
+    normalized_description: str
+    original_description: str | None
+    user_label: str | None
+    category_id: int
+
+
 class ImportSessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

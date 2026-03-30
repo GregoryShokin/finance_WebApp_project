@@ -156,23 +156,15 @@ class TransactionEnrichmentService:
                     account_confidence = max(account_confidence, inferred_source_confidence)
                     account_reason = inferred_source_reason
 
-        category_id, category_confidence, category_reason = self._resolve_category(
-            categories=categories,
-            history=history,
-            normalized_description=normalized_description,
-            operation_type=operation_type,
-            transaction_type=transaction_type,
-            description=description,
-            counterparty=counterparty,
-        )
+        # Категория назначается только по точному совпадению с TransactionCategoryRule
+        # (выполняется в import_service после вызова enrich_import_row).
+        category_id = None
+        category_confidence = 0.0
+        category_reason = ""
 
         review_reasons: list[str] = []
         if account_id is None:
             review_reasons.append("Не удалось определить счёт операции")
-
-        requires_category = transaction_type == "expense" and operation_type != "transfer"
-        if requires_category and category_id is None:
-            review_reasons.append("Категория не определена автоматически")
 
         if operation_type == "transfer":
             if account_id is None:
@@ -237,15 +229,15 @@ class TransactionEnrichmentService:
         return "regular", 0.65, "Использован тип regular по умолчанию"
 
     def _resolve_transaction_type(self, *, direction: Any, operation_type: str, history: list[Transaction]) -> str:
+        direction_value = str(direction or "").strip().lower()
+        if direction_value in {"income", "expense"}:
+            return direction_value
         if history:
             type_counter = Counter(item.type for item in history)
             if type_counter:
                 resolved = type_counter.most_common(1)[0][0]
                 if resolved in {"income", "expense"}:
                     return resolved
-        direction_value = str(direction or "").strip().lower()
-        if direction_value in {"income", "expense"}:
-            return direction_value
         defaults = {
             "investment_buy": "expense",
             "investment_sell": "income",
@@ -487,7 +479,9 @@ class TransactionEnrichmentService:
                 continue
             last4 = self._extract_last4(account.name)
             normalized_name = self.normalize_description(account.name) or ""
-            if last4 and last4 in haystack:
+            # Use word-boundary check: last4 must appear as a standalone 4-digit number,
+            # not embedded inside a longer digit sequence (e.g. SBP reference А60782014520590).
+            if last4 and re.search(r"(?<!\d)" + last4 + r"(?!\d)", haystack):
                 return account
             if normalized_name and normalized_name in haystack:
                 return account

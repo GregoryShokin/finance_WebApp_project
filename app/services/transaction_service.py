@@ -218,14 +218,50 @@ class TransactionService:
         if not account:
             raise TransactionValidationError("Счет не найден")
 
-        target_account = None
-        if transaction.target_account_id is not None:
-            target_account = self.account_repo.get_by_id_and_user_for_update(transaction.target_account_id, user_id)
-            if target_account is None:
-                raise TransactionValidationError("Счет назначения не найден")
+        pair_id = getattr(transaction, "transfer_pair_id", None)
+        if pair_id is not None:
+            # Paired transfer: each record owns only its own side of the balance effect.
+            pair_tx = self.transaction_repo.get_by_id_for_update(transaction_id=pair_id, user_id=user_id)
+            pair_account = (
+                self.account_repo.get_by_id_and_user_for_update(pair_tx.account_id, user_id)
+                if pair_tx is not None
+                else None
+            )
 
-        self._revert_balance_effect(transaction=transaction, account=account, target_account=target_account)
-        self.transaction_repo.delete(transaction, auto_commit=False)
+            # Revert own balance side
+            if transaction.type == "expense":
+                account.balance += transaction.amount
+            else:
+                account.balance -= transaction.amount
+            self.db.add(account)
+
+            # Revert pair balance side
+            if pair_tx is not None and pair_account is not None:
+                if pair_tx.type == "expense":
+                    pair_account.balance += pair_tx.amount
+                else:
+                    pair_account.balance -= pair_tx.amount
+                self.db.add(pair_account)
+
+            # Null out cross-references before deleting to avoid FK conflicts
+            transaction.transfer_pair_id = None
+            if pair_tx is not None:
+                pair_tx.transfer_pair_id = None
+                self.db.add(pair_tx)
+            self.db.flush()
+
+            self.transaction_repo.delete(transaction, auto_commit=False)
+            if pair_tx is not None:
+                self.transaction_repo.delete(pair_tx, auto_commit=False)
+        else:
+            target_account = None
+            if transaction.target_account_id is not None:
+                target_account = self.account_repo.get_by_id_and_user_for_update(transaction.target_account_id, user_id)
+                if target_account is None:
+                    raise TransactionValidationError("Счет назначения не найден")
+            self._revert_balance_effect(transaction=transaction, account=account, target_account=target_account)
+            self.transaction_repo.delete(transaction, auto_commit=False)
+
         self.db.commit()
         return {"status": "success"}
 

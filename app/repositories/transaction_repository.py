@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import joinedload
 
 from app.models.transaction import Transaction
@@ -180,3 +182,42 @@ class TransactionRepository:
             query = query.filter(Transaction.description == description)
 
         return query.all()
+
+    def find_transfer_pair_candidate(
+        self,
+        *,
+        user_id: int,
+        account_id: int,
+        amount: Decimal,
+        transaction_date: datetime,
+        days_window: int = 2,
+    ) -> Transaction | None:
+        """Finds an existing transfer where this account is the receiving side.
+
+        Matches either:
+        - A single-record transfer whose target_account_id == account_id
+        - The income side of a paired transfer whose account_id == account_id
+        """
+        date_from = transaction_date - timedelta(days=days_window)
+        date_to = transaction_date + timedelta(days=days_window)
+
+        return (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.amount == amount,
+                Transaction.operation_type == "transfer",
+                Transaction.transaction_date >= date_from,
+                Transaction.transaction_date <= date_to,
+                or_(
+                    Transaction.target_account_id == account_id,
+                    and_(
+                        Transaction.account_id == account_id,
+                        Transaction.type == "income",
+                        Transaction.transfer_pair_id.isnot(None),
+                    ),
+                ),
+            )
+            .first()
+        )
+
