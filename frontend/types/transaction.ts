@@ -20,6 +20,7 @@ export type Transaction = {
   account_id: number;
   target_account_id: number | null;
   credit_account_id: number | null;
+  goal_id: number | null;
   category_id: number | null;
   counterparty_id: number | null;
   category_priority?: CategoryPriority | null;
@@ -44,6 +45,7 @@ export type CreateTransactionPayload = {
   account_id: number;
   target_account_id?: number | null;
   credit_account_id?: number | null;
+  goal_id?: number | null;
   category_id?: number | null;
   counterparty_id?: number | null;
   amount: number;

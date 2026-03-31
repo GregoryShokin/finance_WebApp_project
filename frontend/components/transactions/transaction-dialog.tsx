@@ -4,6 +4,8 @@ import { Dialog } from '@/components/ui/dialog';
 import { TransactionForm } from '@/components/transactions/transaction-form';
 import type { Account } from '@/types/account';
 import type { Category } from '@/types/category';
+import type { Counterparty } from '@/types/counterparty';
+import type { GoalWithProgress } from '@/types/goal';
 import type { CreateTransactionPayload, Transaction } from '@/types/transaction';
 
 export function TransactionDialog({
@@ -12,6 +14,8 @@ export function TransactionDialog({
   transaction,
   accounts,
   categories,
+  counterparties = [],
+  goals = [],
   isSubmitting,
   onClose,
   onSubmit,
@@ -21,6 +25,8 @@ export function TransactionDialog({
   transaction?: Transaction | null;
   accounts: Account[];
   categories: Category[];
+  counterparties?: Counterparty[];
+  goals?: GoalWithProgress[];
   isSubmitting?: boolean;
   onClose: () => void;
   onSubmit: (values: CreateTransactionPayload) => void;
@@ -41,6 +47,8 @@ export function TransactionDialog({
         initialData={transaction}
         accounts={accounts}
         categories={categories}
+        counterparties={counterparties}
+        goals={goals}
         isSubmitting={isSubmitting}
         onSubmit={onSubmit}
         onCancel={onClose}

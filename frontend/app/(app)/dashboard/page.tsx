@@ -31,6 +31,9 @@ import { getTransactions } from '@/lib/api/transactions';
 import { getCounterparties, deleteCounterparty } from '@/lib/api/counterparties';
 import { getFinancialHealth } from '@/lib/api/financial-health';
 import { getBudgetAlerts, getBudgetProgress, markAlertRead } from '@/lib/api/budget';
+import { getMetrics } from '@/lib/api/metrics';
+import { FinancialIndependenceWidget } from '@/components/planning/financial-independence-widget';
+import { SavingsRateWidget } from '@/components/planning/savings-rate-widget';
 import { MoneyAmount } from '@/components/shared/money-amount';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { formatDateTime, formatMoney } from '@/lib/utils/format';
@@ -51,6 +54,7 @@ function _toISO(d: Date) {
 }
 
 const THIS_MONTH_FROM = _toISO(_thisMonthStart);
+const THIS_MONTH_KEY = `${_today.getFullYear()}-${String(_today.getMonth() + 1).padStart(2, '0')}`;
 const THIS_MONTH_TO = _toISO(_today);
 const PREV_MONTH_FROM = _toISO(_prevMonthStart);
 const PREV_MONTH_TO = _toISO(_prevMonthEnd);
@@ -121,6 +125,11 @@ export default function DashboardPage() {
   const alertsQuery = useQuery({
     queryKey: ['budget-alerts'],
     queryFn: getBudgetAlerts,
+  });
+
+  const metricsQuery = useQuery({
+    queryKey: ['metrics', THIS_MONTH_KEY],
+    queryFn: () => getMetrics(THIS_MONTH_KEY),
   });
 
   const dismissAlertMutation = useMutation({
@@ -229,6 +238,25 @@ export default function DashboardPage() {
 
       {!isLoading && !isError ? (
         <>
+          {/* ── Metrics row ────────────────────────────────────────────────── */}
+          <div className="flex gap-4">
+            <div style={{ flex: '1 1 0' }}>
+              <FinancialIndependenceWidget
+                data={metricsQuery.data?.financial_independence}
+                isLoading={metricsQuery.isLoading}
+              />
+            </div>
+            <Card className="p-5" style={{ flex: '1 1 0' }}>
+              <p className="text-xs font-medium text-slate-500">Норма сбережений</p>
+              <div className="mt-2">
+                <SavingsRateWidget
+                  data={metricsQuery.data?.savings_rate}
+                  isLoading={metricsQuery.isLoading}
+                />
+              </div>
+            </Card>
+          </div>
+
           {/* ── KPI row ────────────────────────────────────────────────────── */}
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
 

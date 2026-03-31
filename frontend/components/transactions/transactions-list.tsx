@@ -5,12 +5,14 @@ import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
 import type { CreateTransactionPayload, Transaction } from '@/types/transaction';
 import type { Counterparty } from '@/types/counterparty';
+import type { GoalWithProgress } from '@/types/goal';
 
 export function TransactionsList({
   transactions,
   accounts,
   categories,
   counterparties,
+  goals = [],
   onEdit,
   onDelete,
   onCancelDelete,
@@ -29,6 +31,7 @@ export function TransactionsList({
   accounts: Account[];
   categories: Category[];
   counterparties?: Counterparty[];
+  goals?: GoalWithProgress[];
   onEdit: (transaction: Transaction) => void;
   onDelete?: (transaction: Transaction) => void;
   onCancelDelete?: (transactionId: number) => void;
@@ -80,6 +83,7 @@ export function TransactionsList({
                   accounts={accounts}
                   categories={categories}
                   counterparties={counterparties ?? []}
+                  goals={goals}
                   isSubmitting={isSubmittingEdit}
                   onCancel={onCancelEdit}
                   onSubmit={onSubmitEdit}

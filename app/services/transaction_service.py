@@ -15,6 +15,13 @@ from app.repositories.counterparty_repository import CounterpartyRepository
 from app.repositories.transaction_repository import TransactionRepository
 
 try:
+    from app.services.goal_service import GoalService, GoalValidationError as _GoalValidationError
+    _GOALS_AVAILABLE = True
+except Exception:
+    _GOALS_AVAILABLE = False
+    _GoalValidationError = Exception  # type: ignore
+
+try:
     from app.services.transaction_enrichment_service import TransactionEnrichmentService
 except Exception:
     class TransactionEnrichmentService:
@@ -105,6 +112,11 @@ class TransactionService:
         payload.pop("user_id", None)
         transaction = self.transaction_repo.create(auto_commit=False, user_id=user_id, **payload)
         self._apply_balance_effect_on_create(transaction=transaction, account=account, target_account=target_account)
+
+        # Check goal achievement after linking transaction to goal
+        if _GOALS_AVAILABLE and transaction.goal_id is not None:
+            GoalService(self.db).check_and_achieve(transaction.goal_id, user_id)
+
         self.db.commit()
         self.db.refresh(transaction)
         return self.transaction_repo.get_by_id(transaction_id=transaction.id, user_id=user_id) or transaction
@@ -150,6 +162,11 @@ class TransactionService:
         effective.pop("user_id", None)
         updated = self.transaction_repo.update(transaction, auto_commit=False, **effective)
         self._apply_balance_effect_on_create(transaction=updated, account=new_account, target_account=new_target_account)
+
+        # Check goal achievement after update
+        if _GOALS_AVAILABLE and updated.goal_id is not None:
+            GoalService(self.db).check_and_achieve(updated.goal_id, user_id)
+
         self.db.commit()
         self.db.refresh(updated)
         return self.transaction_repo.get_by_id(transaction_id=updated.id, user_id=user_id) or updated
@@ -197,6 +214,7 @@ class TransactionService:
             "credit_account_id": resolved_credit_account_id,
             "category_id": pick("category_id", transaction.category_id, allow_none=True),
             "counterparty_id": pick("counterparty_id", transaction.counterparty_id, allow_none=True),
+            "goal_id": pick("goal_id", getattr(transaction, "goal_id", None), allow_none=True),
             "amount": pick("amount", transaction.amount),
             "credit_principal_amount": pick("credit_principal_amount", transaction.credit_principal_amount, allow_none=True),
             "credit_interest_amount": pick("credit_interest_amount", transaction.credit_interest_amount, allow_none=True),
@@ -384,6 +402,14 @@ class TransactionService:
         counterparty_id = payload.get("counterparty_id")
         transaction_type = payload.get("type")
         debt_direction = payload.get("debt_direction")
+
+        # Validate goal_id if provided
+        goal_id = payload.get("goal_id")
+        if goal_id is not None and _GOALS_AVAILABLE:
+            try:
+                GoalService(self.db).validate_goal_for_transaction(int(goal_id), user_id)
+            except _GoalValidationError as exc:
+                raise TransactionValidationError(str(exc)) from exc
 
         allow_incomplete_transfer = bool(payload.get("needs_review"))
 

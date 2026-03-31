@@ -59,6 +59,7 @@ class Transaction(Base):
     affects_analytics: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true", index=True)
 
     transfer_pair_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True, index=True)
+    goal_id: Mapped[int | None] = mapped_column(ForeignKey("goals.id", ondelete="SET NULL"), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -69,6 +70,7 @@ class Transaction(Base):
     credit_account = relationship("Account", foreign_keys=[credit_account_id])
     category = relationship("Category", back_populates="transactions")
     counterparty = relationship("Counterparty", back_populates="transactions")
+    goal = relationship("Goal", back_populates="transactions", foreign_keys=[goal_id])
 
     @property
     def category_priority(self) -> str | None:

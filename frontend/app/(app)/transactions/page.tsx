@@ -15,6 +15,7 @@ import { getAccounts, createAccount } from '@/lib/api/accounts';
 import { getCategories, createCategory } from '@/lib/api/categories';
 import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
 import { createTransaction, deleteTransaction, deleteTransactionsByPeriod, getTransactions, updateTransaction } from '@/lib/api/transactions';
+import { getGoals } from '@/lib/api/goals';
 import { TransactionsList } from '@/components/transactions/transactions-list';
 import { TransactionFilters } from '@/components/transactions/transaction-filters';
 import { TransactionForm } from '@/components/transactions/transaction-form';
@@ -94,6 +95,7 @@ export default function TransactionsPage() {
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'all-for-transactions'], queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: getGoals });
   const transactionsQuery = useQuery({
     queryKey: ['transactions', filters],
     queryFn: () => getTransactions({
@@ -235,6 +237,7 @@ export default function TransactionsPage() {
             accounts={accountsQuery.data ?? []}
             categories={categoriesQuery.data ?? []}
             counterparties={counterpartiesQuery.data ?? []}
+            goals={goalsQuery.data ?? []}
             isSubmitting={createMutation.isPending || updateMutation.isPending}
             onCancel={closeCreateForm}
             onSubmit={handleCreateSubmit}
@@ -259,6 +262,7 @@ export default function TransactionsPage() {
           accounts={accountsQuery.data ?? []}
           categories={categoriesQuery.data ?? []}
           counterparties={counterpartiesQuery.data ?? []}
+          goals={goalsQuery.data ?? []}
           editingTransaction={editingTransaction}
           deletingId={deletingId}
           pendingDeleteIds={Object.keys(delayedDelete.pendingIds).map(Number)}

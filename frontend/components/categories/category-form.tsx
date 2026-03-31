@@ -3,6 +3,7 @@
 import { useEffect, useMemo } from 'react';
 import { useForm } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
@@ -12,18 +13,20 @@ type CategoryFormValues = {
   name: string;
   kind: CategoryKind;
   priority: CategoryPriority;
+  exclude_from_planning: boolean;
 };
 
 const defaultValues: CategoryFormValues = {
   name: '',
   kind: 'expense',
   priority: 'expense_essential',
+  exclude_from_planning: false,
 };
 
 const expenseOptions: { value: CategoryPriority; label: string }[] = [
   { value: 'expense_essential', label: 'Основной' },
   { value: 'expense_secondary', label: 'Второстепенный' },
-  { value: 'expense_target', label: 'Целевой' },
+  { value: 'expense_target', label: 'Имущество' },
 ];
 
 const incomeOptions: { value: CategoryPriority; label: string }[] = [
@@ -78,6 +81,7 @@ export function CategoryForm({
         name: initialData.name,
         kind: initialData.kind,
         priority: initialData.priority,
+        exclude_from_planning: initialData.exclude_from_planning ?? false,
       });
       return;
     }
@@ -89,19 +93,22 @@ export function CategoryForm({
       priority:
         initialValues?.priority ??
         (initialValues?.kind === 'income' ? 'income_active' : 'expense_essential'),
+      exclude_from_planning: initialValues?.exclude_from_planning ?? false,
     });
   }, [initialData, initialValues, reset]);
 
   return (
     <form
       className="space-y-4"
-      onSubmit={handleSubmit((values) =>
-        onSubmit({
+      onSubmit={handleSubmit((values) => {
+        const payload: CreateCategoryPayload = {
           name: values.name,
           kind: values.kind,
           priority: values.priority,
-        }),
-      )}
+          exclude_from_planning: values.exclude_from_planning,
+        };
+        onSubmit(payload);
+      })}
     >
       <div>
         <Label htmlFor="category-name">Название категории</Label>
@@ -137,6 +144,12 @@ export function CategoryForm({
         </div>
       </div>
 
+      <div className="flex items-center gap-2">
+        <Checkbox id="category-exclude" {...register('exclude_from_planning')} />
+        <Label htmlFor="category-exclude" className="cursor-pointer font-normal">
+          Исключить из планирования
+        </Label>
+      </div>
 
       <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
         <Button type="button" variant="secondary" onClick={onCancel}>

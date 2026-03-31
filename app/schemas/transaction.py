@@ -31,6 +31,7 @@ class TransactionCreateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    goal_id: int | None = None
     amount: Decimal = Field(gt=0)
     credit_principal_amount: Decimal | None = Field(default=None, ge=0)
     credit_interest_amount: Decimal | None = Field(default=None, ge=0)
@@ -62,6 +63,7 @@ class TransactionUpdateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    goal_id: int | None = None
     amount: Decimal | None = Field(default=None, gt=0)
     credit_principal_amount: Decimal | None = Field(default=None, ge=0)
     credit_interest_amount: Decimal | None = Field(default=None, ge=0)
@@ -105,6 +107,7 @@ class TransactionResponse(BaseModel):
     target_account_id: int | None
     credit_account_id: int | None
     transfer_pair_id: int | None = None
+    goal_id: int | None = None
     category_id: int | None
     counterparty_id: int | None
     category_priority: CategoryPriority | None = None

@@ -10,6 +10,7 @@ import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
 import type { CreateTransactionPayload, Transaction, TransactionKind, TransactionOperationType } from '@/types/transaction';
 import type { Counterparty } from '@/types/counterparty';
+import type { GoalWithProgress } from '@/types/goal';
 import { operationTypeLabels, transactionTypeLabels } from '@/components/transactions/constants';
 
 type TransactionFormValues = {
@@ -18,6 +19,7 @@ type TransactionFormValues = {
   category_id: string;
   counterparty_id: string;
   credit_account_id: string;
+  goal_id: string;
   amount: string;
   credit_principal_amount: string;
   credit_interest_amount: string;
@@ -38,6 +40,7 @@ const defaultValues: TransactionFormValues = {
   category_id: '',
   credit_account_id: '',
   counterparty_id: '',
+  goal_id: '',
   amount: '',
   credit_principal_amount: '',
   credit_interest_amount: '',
@@ -191,6 +194,7 @@ export function TransactionForm({
   accounts,
   categories,
   counterparties = [],
+  goals = [],
   isSubmitting,
   onSubmit,
   onCancel,
@@ -203,6 +207,7 @@ export function TransactionForm({
   accounts: Account[];
   categories: Category[];
   counterparties?: Counterparty[];
+  goals?: GoalWithProgress[];
   isSubmitting?: boolean;
   onSubmit: (values: CreateTransactionPayload) => void;
   onCancel: () => void;
@@ -328,6 +333,21 @@ export function TransactionForm({
     [],
   );
 
+  const goalItems = useMemo<SearchSelectItem[]>(
+    () => [
+      { value: '', label: 'Не привязывать', searchText: 'не привязывать без цели' },
+      ...goals
+        .filter((g) => g.status === 'active')
+        .map((g) => ({
+          value: String(g.id),
+          label: g.name,
+          searchText: g.name,
+          badge: `${g.percent.toFixed(0)}%`,
+        })),
+    ],
+    [goals],
+  );
+
   const selectedAccount = useMemo(
     () => accounts.find((account) => String(account.id) === selectedAccountId) ?? null,
     [accounts, selectedAccountId],
@@ -347,6 +367,9 @@ export function TransactionForm({
     () => accounts.find((account) => String(account.id) === selectedCreditAccountId) ?? null,
     [accounts, selectedCreditAccountId],
   );
+
+  const selectedGoalId = watch('goal_id');
+  const [goalQuery, setGoalQuery] = useState('');
 
   const selectedCounterparty = useMemo(
     () => counterparties.find((item) => String(item.id) === selectedCounterpartyId) ?? null,
@@ -426,6 +449,10 @@ export function TransactionForm({
   const showDebtDirection = mainType === 'debt';
   const showCounterparty = mainType === 'debt';
   const showCategory = mainType === 'regular' || mainType === 'refund';
+  const showGoalField =
+    goals.length > 0 &&
+    (mainType === 'investment' ||
+      (showCategory && selectedCategory?.priority === 'expense_target'));
   const hasValidInvestmentDirection = mainType !== 'investment' || Boolean(investmentDirection);
   const hasValidCreditOperationKind = mainType !== 'credit_operation' || Boolean(creditOperationKind);
   const hasValidDebtDirection = mainType !== 'debt' || Boolean(debtDirection);
@@ -542,6 +569,7 @@ export function TransactionForm({
         category_id: initialData.category_id ? String(initialData.category_id) : '',
         credit_account_id: initialData.credit_account_id ? String(initialData.credit_account_id) : '',
         counterparty_id: initialData.counterparty_id ? String(initialData.counterparty_id) : '',
+        goal_id: initialData.goal_id ? String(initialData.goal_id) : '',
         amount: String(initialData.amount),
         credit_principal_amount: initialData.credit_principal_amount != null ? String(initialData.credit_principal_amount) : '',
         credit_interest_amount: initialData.credit_interest_amount != null ? String(initialData.credit_interest_amount) : '',
@@ -580,6 +608,7 @@ export function TransactionForm({
     setAccountQuery('');
     setTargetAccountQuery('');
     setCategoryQuery('');
+    setGoalQuery('');
     setReviewQuery('Нет');
   }, [initialData, reset, accounts, categories, mainTypeItems]);
 
@@ -611,6 +640,7 @@ export function TransactionForm({
           credit_account_id: showCreditPaymentFields && values.credit_account_id ? Number(values.credit_account_id) : null,
           category_id: showCategory && values.category_id ? Number(values.category_id) : null,
           counterparty_id: showCounterparty && values.counterparty_id ? Number(values.counterparty_id) : null,
+          goal_id: showGoalField && values.goal_id ? Number(values.goal_id) : null,
           amount: Number(values.amount),
           credit_principal_amount: showCreditPaymentFields ? Number(values.credit_principal_amount) : null,
           credit_interest_amount: showCreditPaymentFields ? Number(values.credit_interest_amount) : null,
@@ -931,6 +961,27 @@ export function TransactionForm({
                     }
                   : undefined
               }
+            />
+          </div>
+        ) : null}
+
+        {showGoalField ? (
+          <div>
+            <input type="hidden" {...register('goal_id')} />
+            <SearchSelect
+              id="tx-goal"
+              label="Цель"
+              placeholder="Не привязывать"
+              widthClassName="w-full"
+              query={goalQuery}
+              setQuery={setGoalQuery}
+              items={goalItems}
+              selectedValue={selectedGoalId}
+              showAllOnFocus
+              onSelect={(item) => {
+                setValue('goal_id', item.value, { shouldValidate: true, shouldDirty: true });
+                setGoalQuery(item.label);
+              }}
             />
           </div>
         ) : null}
