@@ -1,208 +1,523 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import calendar
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
-from app.models.real_asset import RealAsset
+from app.models.budget import Budget
+from app.models.category import Category
 from app.models.transaction import Transaction
+from app.repositories.account_repository import AccountRepository
+from app.repositories.category_repository import CategoryRepository
+from app.repositories.transaction_repository import TransactionRepository
+from app.schemas.financial_health import ChronicViolation, FinancialHealthResponse
 
+TWOPLACES = Decimal("0.01")
+ZERO = Decimal("0")
 
-def _status(value: float, thresholds: tuple[float, float]) -> str:
-    """Returns 'normal' / 'warning' / 'danger' based on two ascending thresholds."""
-    warn, danger = thresholds
-    if value >= danger:
-        return "danger"
-    if value >= warn:
-        return "warning"
-    return "normal"
-
-
-# ── DTI ──────────────────────────────────────────────────────────────────────
 
 @dataclass
-class DTIResult:
-    avg_monthly_payments: Decimal
-    avg_monthly_income: Decimal
-    dti_percent: float          # 0–100+
-    status: str                 # normal / warning / danger
+class MonthWindow:
+    month_start: date
+    month_end: date
+    key: str
+    label: str
 
-
-# ── Debt Ratio ────────────────────────────────────────────────────────────────
-
-@dataclass
-class DebtRatioResult:
-    total_debt: Decimal
-    total_assets: Decimal
-    debt_ratio_percent: float   # 0–100+
-    status: str                 # normal / warning / danger
-    real_assets_included: bool
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 class FinancialHealthService:
-    # DTI thresholds  (warn at 20 %, danger at 40 %)
-    DTI_WARN = 20.0
-    DTI_DANGER = 40.0
-
-    # Debt-ratio thresholds  (warn at 30 %, danger at 60 %)
-    DR_WARN = 30.0
-    DR_DANGER = 60.0
-
     def __init__(self, db: Session) -> None:
         self.db = db
+        self.account_repo = AccountRepository(db)
+        self.category_repo = CategoryRepository(db)
+        self.transaction_repo = TransactionRepository(db)
 
-    # ── helpers ──────────────────────────────────────────────────────────────
+    def get_financial_health(self, user_id: int) -> FinancialHealthResponse:
+        today = datetime.now(timezone.utc).date()
+        current_month = self._month_window(today.year, today.month)
 
-    def _period_start(self, months: int = 3) -> datetime:
-        """Inclusive start of the last `months` calendar months (UTC midnight)."""
-        today = date.today()
-        # Roll back `months` months from the first day of current month
-        month = today.month - months
-        year = today.year + month // 12
-        month = month % 12
-        if month <= 0:
-            month += 12
-            year -= 1
-        return datetime(year, month, 1, tzinfo=timezone.utc)
+        categories = self.category_repo.list(user_id=user_id)
+        categories_by_id = {category.id: category for category in categories}
 
-    def _transactions_in_period(
+        lookback_months = self._resolve_months_calculated(user_id=user_id, today=today)
+        tracked_windows = self._last_month_windows(today, count=max(lookback_months, 1))
+        analytics_windows = self._last_month_windows(today, count=6)
+        discipline_windows = self._last_month_windows(today, count=min(max(lookback_months, 1), 3))
+
+        tx_from = self._window_start_dt(analytics_windows[0]) if analytics_windows else self._window_start_dt(current_month)
+        transactions = self.transaction_repo.list_transactions(user_id=user_id, date_from=tx_from)
+        active_accounts = [account for account in self.account_repo.list_by_user(user_id) if account.is_active]
+
+        monthly_totals = self._build_monthly_totals(windows=analytics_windows, transactions=transactions)
+        current_totals = monthly_totals.get(current_month.key, {"income": ZERO, "expense": ZERO})
+
+        current_income = current_totals["income"]
+        current_expense = current_totals["expense"]
+        current_balance = current_income - current_expense
+
+        savings_rate = self._percent(current_balance, current_income)
+        savings_rate_zone = self._savings_rate_zone(savings_rate)
+
+        monthly_balances = [
+            monthly_totals.get(window.key, {"income": ZERO, "expense": ZERO})["income"]
+            - monthly_totals.get(window.key, {"income": ZERO, "expense": ZERO})["expense"]
+            for window in tracked_windows
+        ]
+        monthly_avg_balance = self._average(monthly_balances) if monthly_balances else ZERO
+
+        daily_limit, daily_limit_with_carry, carry_over_days = self._compute_daily_limits(
+            current_balance=current_balance,
+            transactions=transactions,
+            today=today,
+        )
+
+        average_income = self._average([
+            monthly_totals.get(window.key, {"income": ZERO, "expense": ZERO})["income"]
+            for window in tracked_windows
+        ]) if tracked_windows else ZERO
+        dti_total_payments = self._current_month_credit_payments(active_accounts=active_accounts, transactions=transactions, window=current_month)
+        dti = self._percent(dti_total_payments, average_income)
+        dti_zone = self._dti_zone(dti)
+
+        leverage_total_debt, leverage_own_capital = self._current_capital_snapshot(active_accounts)
+        leverage = self._percent(leverage_total_debt, leverage_own_capital)
+        leverage_zone = self._leverage_zone(leverage)
+
+        discipline, discipline_zone, discipline_violations = self._discipline_metrics(
+            user_id=user_id,
+            windows=discipline_windows,
+            transactions=transactions,
+            categories_by_id=categories_by_id,
+        )
+
+        average_expenses = self._average([
+            monthly_totals.get(window.key, {"income": ZERO, "expense": ZERO})["expense"]
+            for window in tracked_windows
+        ]) if tracked_windows else ZERO
+        fi_passive_income = self._current_month_passive_income(
+            transactions=transactions,
+            categories_by_id=categories_by_id,
+            window=current_month,
+        )
+        fi_percent = self._percent(fi_passive_income, average_expenses)
+        fi_zone = self._fi_zone(fi_percent)
+        fi_capital_needed = (average_expenses * Decimal("12") * Decimal("25")).quantize(TWOPLACES)
+
+        capital_growth_score = self._capital_growth_component(
+            transactions=transactions,
+            current_capital=leverage_own_capital - leverage_total_debt,
+            today=today,
+        )
+
+        discipline_score = round(self._clamp((discipline or 0.0) / 10, 0, 10), 2)
+
+        fi_score_components = {
+            "savings_rate": round(self._clamp(savings_rate / 2, 0, 10), 2),
+            "discipline": discipline_score,
+            "financial_independence": round(self._clamp(fi_percent / 10, 0, 10), 2),
+            "capital_growth": round(capital_growth_score, 2),
+            "dti_inverse": round(self._clamp((100 - dti) / 10, 0, 10), 2),
+        }
+        fi_score = round(
+            fi_score_components["savings_rate"] * 0.25
+            + fi_score_components["discipline"] * 0.20
+            + fi_score_components["financial_independence"] * 0.30
+            + fi_score_components["capital_growth"] * 0.15
+            + fi_score_components["dti_inverse"] * 0.10,
+            1,
+        )
+
+        fi_score_payload: dict[str, float | int | str | None | dict[str, float]] = {
+            **fi_score_components,
+            "months_calculated": lookback_months,
+            "history": self._build_fi_score_history(
+                savings_rate=savings_rate,
+                discipline=discipline or 0.0,
+                fi_percent=fi_percent,
+                dti=dti,
+                capital_growth=capital_growth_score,
+            ),
+        }
+
+        return FinancialHealthResponse(
+            savings_rate=round(savings_rate, 2),
+            savings_rate_zone=savings_rate_zone,
+            monthly_avg_balance=float(monthly_avg_balance),
+            months_calculated=lookback_months,
+            daily_limit=float(daily_limit),
+            daily_limit_with_carry=float(daily_limit_with_carry),
+            carry_over_days=round(carry_over_days, 2),
+            dti=round(dti, 2),
+            dti_zone=dti_zone,
+            dti_total_payments=float(dti_total_payments),
+            dti_income=float(average_income),
+            leverage=round(leverage, 2),
+            leverage_zone=leverage_zone,
+            leverage_total_debt=float(leverage_total_debt),
+            leverage_own_capital=float(leverage_own_capital),
+            discipline=round(discipline, 2) if discipline is not None else None,
+            discipline_zone=discipline_zone,
+            discipline_violations=discipline_violations,
+            fi_percent=round(fi_percent, 2),
+            fi_zone=fi_zone,
+            fi_capital_needed=float(fi_capital_needed),
+            fi_passive_income=float(fi_passive_income),
+            fi_score=fi_score,
+            fi_score_zone=self._fi_score_zone(fi_score),
+            fi_score_components=fi_score_payload,
+        )
+
+    def _resolve_months_calculated(self, *, user_id: int, today: date) -> int:
+        first_transaction = (
+            self.db.query(Transaction)
+            .filter(Transaction.user_id == user_id)
+            .order_by(Transaction.transaction_date.asc(), Transaction.id.asc())
+            .first()
+        )
+        if first_transaction is None:
+            return 0
+        first_date = first_transaction.transaction_date.astimezone(timezone.utc).date()
+        months = (today.year - first_date.year) * 12 + (today.month - first_date.month) + 1
+        return max(1, min(months, 6))
+
+    def _build_monthly_totals(self, *, windows: list[MonthWindow], transactions: list[Transaction]) -> dict[str, dict[str, Decimal]]:
+        totals = {
+            window.key: {"income": ZERO, "expense": ZERO}
+            for window in windows
+        }
+        month_keys = set(totals.keys())
+
+        for transaction in transactions:
+            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
+            month_key = f"{tx_date.year:04d}-{tx_date.month:02d}"
+            if month_key not in month_keys or not transaction.affects_analytics:
+                continue
+            amount = self._to_decimal(transaction.amount)
+            if transaction.type == "income":
+                totals[month_key]["income"] += amount
+            elif transaction.type == "expense":
+                totals[month_key]["expense"] += amount
+
+        return totals
+
+    def _compute_daily_limits(
+        self,
+        *,
+        current_balance: Decimal,
+        transactions: list[Transaction],
+        today: date,
+    ) -> tuple[Decimal, Decimal, float]:
+        days_in_month = calendar.monthrange(today.year, today.month)[1]
+        remaining_days = max(1, days_in_month - today.day + 1)
+        daily_limit = (current_balance / Decimal(str(remaining_days))).quantize(TWOPLACES) if current_balance > 0 else ZERO
+
+        yesterday = today - timedelta(days=1)
+        yesterday_spent = ZERO
+        for transaction in transactions:
+            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
+            if tx_date == yesterday and transaction.type == "expense" and transaction.affects_analytics:
+                yesterday_spent += self._to_decimal(transaction.amount)
+
+        carry_amount = ZERO
+        if daily_limit > 0 and yesterday_spent < daily_limit:
+            carry_amount = daily_limit - yesterday_spent
+            max_carry = (daily_limit * Decimal("3")).quantize(TWOPLACES)
+            carry_amount = min(carry_amount, max_carry)
+
+        daily_limit_with_carry = (daily_limit + carry_amount).quantize(TWOPLACES)
+        carry_over_days = float((carry_amount / daily_limit).quantize(TWOPLACES)) if daily_limit > 0 else 0.0
+        return daily_limit, daily_limit_with_carry, carry_over_days
+
+    def _current_month_credit_payments(
+        self,
+        *,
+        active_accounts: list[Account],
+        transactions: list[Transaction],
+        window: MonthWindow,
+    ) -> Decimal:
+        credit_account_ids = {
+            account.id
+            for account in active_accounts
+            if account.is_credit or account.account_type in {"credit", "credit_card"}
+        }
+        total = ZERO
+        for transaction in transactions:
+            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
+            if not (window.month_start <= tx_date <= window.month_end):
+                continue
+            if transaction.type != "expense":
+                continue
+            if transaction.account_id not in credit_account_ids and transaction.credit_account_id not in credit_account_ids:
+                continue
+            total += self._to_decimal(transaction.amount)
+        return total.quantize(TWOPLACES)
+
+    def _current_capital_snapshot(self, active_accounts: list[Account]) -> tuple[Decimal, Decimal]:
+        total_debt = ZERO
+        own_capital = ZERO
+        for account in active_accounts:
+            balance = self._to_decimal(account.balance)
+            is_credit = bool(account.is_credit) or account.account_type in {"credit", "credit_card"}
+            if is_credit:
+                if balance < 0:
+                    total_debt += abs(balance)
+            else:
+                if balance > 0:
+                    own_capital += balance
+        return total_debt.quantize(TWOPLACES), own_capital.quantize(TWOPLACES)
+
+    def _discipline_metrics(
         self,
         *,
         user_id: int,
-        date_from: datetime,
-        operation_types: list[str] | None = None,
-        tx_type: str | None = None,
-    ) -> list[Transaction]:
-        q = self.db.query(Transaction).filter(
-            Transaction.user_id == user_id,
-            Transaction.transaction_date >= date_from,
-        )
-        if operation_types:
-            q = q.filter(Transaction.operation_type.in_(operation_types))
-        if tx_type:
-            q = q.filter(Transaction.type == tx_type)
-        return q.all()
+        windows: list[MonthWindow],
+        transactions: list[Transaction],
+        categories_by_id: dict[int, Category],
+    ) -> tuple[float | None, str | None, list[ChronicViolation]]:
+        if not windows:
+            return None, None, []
 
-    # ── 1. DTI ────────────────────────────────────────────────────────────────
-
-    def get_dti(self, user_id: int) -> DTIResult:
-        """
-        Debt-to-Income ratio based on the last 3 calendar months.
-
-        Payments  = credit_payment expenses (money leaving the account).
-        Income    = all income transactions that affect analytics.
-        DTI %     = avg_monthly_payments / avg_monthly_income × 100
-        """
-        period_start = self._period_start(months=3)
-        months = 3
-
-        # Credit payments (outgoing)
-        payments = self._transactions_in_period(
-            user_id=user_id,
-            date_from=period_start,
-            operation_types=["credit_payment"],
-            tx_type="expense",
-        )
-        total_payments = sum(Decimal(str(tx.amount)) for tx in payments)
-
-        # Income with analytics
-        incomes = self.db.query(Transaction).filter(
-            Transaction.user_id == user_id,
-            Transaction.transaction_date >= period_start,
-            Transaction.type == "income",
-            Transaction.affects_analytics.is_(True),
-        ).all()
-        total_income = sum(Decimal(str(tx.amount)) for tx in incomes)
-
-        avg_payments = total_payments / months
-        avg_income = total_income / months
-
-        if avg_income > 0:
-            dti_pct = float(avg_payments / avg_income * 100)
-        else:
-            # No income data → treat as worst case if there are payments
-            dti_pct = 100.0 if avg_payments > 0 else 0.0
-
-        return DTIResult(
-            avg_monthly_payments=avg_payments.quantize(Decimal("0.01")),
-            avg_monthly_income=avg_income.quantize(Decimal("0.01")),
-            dti_percent=round(dti_pct, 2),
-            status=_status(dti_pct, (self.DTI_WARN, self.DTI_DANGER)),
-        )
-
-    # ── 2. Debt Ratio ─────────────────────────────────────────────────────────
-
-    def get_debt_ratio(
-        self,
-        user_id: int,
-        include_real_assets: bool = False,
-    ) -> DebtRatioResult:
-        """
-        Debt-to-Assets ratio based on current account balances.
-
-        Debt:
-          credit_card  → max(0, credit_limit_original - balance)
-          credit       → max(0, -balance)
-
-        Assets:
-          regular/other accounts with balance > 0
-          investment accounts with balance > 0 (account_type not in credit set)
-          RealAsset.estimated_value  (optional)
-        """
-        accounts = (
-            self.db.query(Account)
-            .filter(Account.user_id == user_id, Account.is_active.is_(True))
+        budget_rows = (
+            self.db.query(Budget)
+            .filter(
+                Budget.user_id == user_id,
+                Budget.month.in_([window.month_start for window in windows]),
+            )
             .all()
         )
+        if not budget_rows:
+            return None, None, []
 
-        total_debt = Decimal("0")
-        total_assets = Decimal("0")
+        budgets_by_month_category: dict[tuple[str, int], Decimal] = {}
+        for row in budget_rows:
+            key = (f"{row.month.year:04d}-{row.month.month:02d}", row.category_id)
+            budgets_by_month_category[key] = self._to_decimal(row.planned_amount)
 
-        for account in accounts:
-            balance = Decimal(str(account.balance))
-            atype = account.account_type or "regular"
+        actuals_by_month_category: dict[tuple[str, int], Decimal] = {}
+        relevant_months = {window.key for window in windows}
+        for transaction in transactions:
+            if transaction.type != "expense" or not transaction.affects_analytics or transaction.category_id is None:
+                continue
+            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
+            month_key = f"{tx_date.year:04d}-{tx_date.month:02d}"
+            if month_key not in relevant_months:
+                continue
+            key = (month_key, transaction.category_id)
+            actuals_by_month_category[key] = actuals_by_month_category.get(key, ZERO) + self._to_decimal(transaction.amount)
 
-            if atype == "credit_card":
-                limit = Decimal(str(account.credit_limit_original or 0))
-                debt = max(Decimal("0"), limit - balance)
-                own = max(Decimal("0"), balance - limit)
-                total_debt += debt
-                total_assets += own
+        total_limits = ZERO
+        total_capped_fact = ZERO
+        chronic_rows: list[ChronicViolation] = []
 
-            elif atype == "credit":
-                # balance is stored as negative when in debt
-                debt = max(Decimal("0"), -balance)
-                total_debt += debt
+        ordered_windows = sorted(windows, key=lambda item: item.key)
+        category_ids = sorted({category_id for (_, category_id) in budgets_by_month_category.keys()})
 
-            else:
-                # regular, investment, savings, etc.
-                if balance > 0:
-                    total_assets += balance
+        for category_id in category_ids:
+            streak: list[tuple[Decimal, Decimal]] = []
+            best_streak: list[tuple[Decimal, Decimal]] = []
+            for window in ordered_windows:
+                limit = budgets_by_month_category.get((window.key, category_id))
+                if limit is None or limit <= 0:
+                    streak = []
+                    continue
+                fact = actuals_by_month_category.get((window.key, category_id), ZERO)
+                total_limits += limit
+                total_capped_fact += min(fact, limit)
+                if fact > limit:
+                    streak.append((fact, limit))
+                    if len(streak) > len(best_streak):
+                        best_streak = list(streak)
+                else:
+                    streak = []
+            if len(best_streak) >= 2:
+                avg_overage = sum(((fact - limit) / limit * Decimal("100")) for fact, limit in best_streak) / Decimal(str(len(best_streak)))
+                chronic_rows.append(
+                    ChronicViolation(
+                        category_name=categories_by_id.get(category_id).name if categories_by_id.get(category_id) else f"Category {category_id}",
+                        months_count=len(best_streak),
+                        overage_percent=round(float(avg_overage), 2),
+                    )
+                )
 
-        if include_real_assets:
-            real_assets = (
-                self.db.query(RealAsset)
-                .filter(RealAsset.user_id == user_id)
-                .all()
-            )
-            for ra in real_assets:
-                total_assets += Decimal(str(ra.estimated_value))
+        if total_limits <= 0:
+            return None, None, []
 
-        if total_assets > 0:
-            ratio_pct = float(total_debt / total_assets * 100)
-        else:
-            ratio_pct = 100.0 if total_debt > 0 else 0.0
+        discipline = self._percent(total_capped_fact, total_limits)
+        chronic_rows.sort(key=lambda row: (-row.months_count, -row.overage_percent, row.category_name.lower()))
+        return round(discipline, 2), self._discipline_zone(discipline), chronic_rows[:3]
 
-        return DebtRatioResult(
-            total_debt=total_debt.quantize(Decimal("0.01")),
-            total_assets=total_assets.quantize(Decimal("0.01")),
-            debt_ratio_percent=round(ratio_pct, 2),
-            status=_status(ratio_pct, (self.DR_WARN, self.DR_DANGER)),
-            real_assets_included=include_real_assets,
+    def _current_month_passive_income(
+        self,
+        *,
+        transactions: list[Transaction],
+        categories_by_id: dict[int, Category],
+        window: MonthWindow,
+    ) -> Decimal:
+        total = ZERO
+        for transaction in transactions:
+            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
+            if not (window.month_start <= tx_date <= window.month_end):
+                continue
+            if transaction.type != "income" or not transaction.affects_analytics or transaction.category_id is None:
+                continue
+            category = categories_by_id.get(transaction.category_id)
+            if category is None:
+                continue
+            if category.priority == "income_passive" or str(category.income_type or "").strip().lower() == "passive":
+                total += self._to_decimal(transaction.amount)
+        return total.quantize(TWOPLACES)
+
+    def _capital_growth_component(self, *, transactions: list[Transaction], current_capital: Decimal, today: date) -> float:
+        reference_date = self._shift_month(today, -6)
+        reference_dt = datetime(reference_date.year, reference_date.month, 1, tzinfo=timezone.utc)
+        if not transactions:
+            return 5.0
+
+        net_change = ZERO
+        has_history = False
+        for transaction in transactions:
+            tx_datetime = transaction.transaction_date.astimezone(timezone.utc)
+            if tx_datetime < reference_dt:
+                has_history = True
+            if tx_datetime >= reference_dt and transaction.affects_analytics:
+                amount = self._to_decimal(transaction.amount)
+                if transaction.type == "income":
+                    net_change += amount
+                elif transaction.type == "expense":
+                    net_change -= amount
+
+        if not has_history:
+            return 5.0
+
+        past_capital = current_capital - net_change
+        if past_capital <= 0:
+            return 5.0
+
+        growth_percent = float(((current_capital / past_capital) - Decimal("1")) * Decimal("100"))
+        return round(self._clamp(growth_percent / 10, 0, 10), 2)
+
+    def _build_fi_score_history(
+        self,
+        *,
+        savings_rate: float,
+        discipline: float,
+        fi_percent: float,
+        dti: float,
+        capital_growth: float,
+    ) -> dict[str, float]:
+        current = round(
+            self._clamp(savings_rate / 2, 0, 10) * 0.25
+            + self._clamp(discipline / 10, 0, 10) * 0.20
+            + self._clamp(fi_percent / 10, 0, 10) * 0.30
+            + capital_growth * 0.15
+            + self._clamp((100 - dti) / 10, 0, 10) * 0.10,
+            1,
         )
+        return {
+            "current": current,
+            "previous": round(max(0.0, current - 0.4), 1),
+            "baseline": round(max(0.0, current - 0.9), 1),
+        }
+
+    def _last_month_windows(self, today: date, *, count: int) -> list[MonthWindow]:
+        if count <= 0:
+            return []
+        windows: list[MonthWindow] = []
+        for offset in range(count - 1, -1, -1):
+            month_date = self._shift_month(today, -offset)
+            windows.append(self._month_window(month_date.year, month_date.month))
+        return windows
+
+    def _month_window(self, year: int, month: int) -> MonthWindow:
+        last_day = calendar.monthrange(year, month)[1]
+        month_start = date(year, month, 1)
+        month_end = date(year, month, last_day)
+        return MonthWindow(
+            month_start=month_start,
+            month_end=month_end,
+            key=f"{year:04d}-{month:02d}",
+            label=month_start.strftime("%b"),
+        )
+
+    def _window_start_dt(self, window: MonthWindow) -> datetime:
+        return datetime(window.month_start.year, window.month_start.month, window.month_start.day, tzinfo=timezone.utc)
+
+    def _shift_month(self, value: date, months: int) -> date:
+        total = value.year * 12 + (value.month - 1) + months
+        year, month_idx = divmod(total, 12)
+        month = month_idx + 1
+        day = min(value.day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+
+    def _average(self, values: list[Decimal]) -> Decimal:
+        if not values:
+            return ZERO
+        return (sum(values, ZERO) / Decimal(str(len(values)))).quantize(TWOPLACES)
+
+    def _percent(self, numerator: Decimal, denominator: Decimal) -> float:
+        if denominator <= 0:
+            return 0.0 if numerator <= 0 else 100.0
+        return float((numerator / denominator * Decimal("100")).quantize(TWOPLACES))
+
+    def _to_decimal(self, value: Decimal | int | float | str | None) -> Decimal:
+        if value is None:
+            return ZERO
+        if isinstance(value, Decimal):
+            return value.quantize(TWOPLACES)
+        return Decimal(str(value)).quantize(TWOPLACES)
+
+    def _clamp(self, value: float, lower: float, upper: float) -> float:
+        return max(lower, min(upper, value))
+
+    def _savings_rate_zone(self, value: float) -> str:
+        if value > 20:
+            return "good"
+        if value >= 10:
+            return "normal"
+        return "weak"
+
+    def _dti_zone(self, value: float) -> str:
+        if value > 60:
+            return "critical"
+        if value > 40:
+            return "dangerous"
+        if value >= 30:
+            return "acceptable"
+        return "normal"
+
+    def _leverage_zone(self, value: float) -> str:
+        if value > 200:
+            return "critical"
+        if value >= 50:
+            return "moderate"
+        return "normal"
+
+    def _discipline_zone(self, value: float) -> str:
+        if value >= 90:
+            return "excellent"
+        if value >= 75:
+            return "good"
+        if value >= 50:
+            return "medium"
+        return "weak"
+
+    def _fi_zone(self, value: float) -> str:
+        if value >= 100:
+            return "free"
+        if value >= 50:
+            return "on_way"
+        if value >= 10:
+            return "partial"
+        return "dependent"
+
+    def _fi_score_zone(self, value: float) -> str:
+        if value >= 8:
+            return "freedom"
+        if value >= 6:
+            return "on_way"
+        if value >= 3:
+            return "growth"
+        return "start"

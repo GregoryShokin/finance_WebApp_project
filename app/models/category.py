@@ -55,6 +55,13 @@ class Category(Base):
         default=False,
         server_default="false",
     )
+    exclude_from_planning: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    income_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

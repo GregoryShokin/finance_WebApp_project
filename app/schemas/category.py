@@ -1,6 +1,7 @@
 
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +24,8 @@ class CategoryCreateRequest(BaseModel):
     kind: CategoryKind
     priority: CategoryPriority
     is_system: bool = False
+    exclude_from_planning: bool = False
+    income_type: Literal["active", "passive"] | None = None
 
 
 class CategoryUpdateRequest(BaseModel):
@@ -30,6 +33,8 @@ class CategoryUpdateRequest(BaseModel):
     kind: CategoryKind | None = None
     priority: CategoryPriority | None = None
     is_system: bool | None = None
+    exclude_from_planning: bool | None = None
+    income_type: Literal["active", "passive"] | None = None
 
 
 class CategoryResponse(BaseModel):
@@ -43,5 +48,7 @@ class CategoryResponse(BaseModel):
     color: str | None
     icon_name: str
     is_system: bool
+    exclude_from_planning: bool
+    income_type: Literal["active", "passive"] | None
     created_at: datetime
     updated_at: datetime

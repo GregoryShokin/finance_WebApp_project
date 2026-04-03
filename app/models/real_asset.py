@@ -17,6 +17,10 @@ class RealAsset(Base):
     asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     estimated_value: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False)
+    linked_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

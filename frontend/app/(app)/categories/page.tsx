@@ -20,7 +20,7 @@ import { useDelayedDelete } from '@/hooks/use-delayed-delete';
 const allTypeOptions: { value: CategoryPriority; label: string }[] = [
   { value: 'expense_essential', label: 'Основной' },
   { value: 'expense_secondary', label: 'Второстепенный' },
-  { value: 'expense_target', label: 'Целевой' },
+  { value: 'expense_target', label: 'Имущество' },
   { value: 'income_active', label: 'Активный' },
   { value: 'income_passive', label: 'Пассивный' },
 ];

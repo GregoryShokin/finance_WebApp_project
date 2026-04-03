@@ -1,8 +1,8 @@
 import { apiClient } from '@/lib/api/client';
 import type { FinancialHealth, RealAsset, RealAssetPayload } from '@/types/financial-health';
 
-export function getFinancialHealth() {
-  return apiClient<FinancialHealth>('/financial-health');
+export function getFinancialHealth(userId: number) {
+  return apiClient<FinancialHealth>(`/financial-health/${userId}`);
 }
 
 export function getRealAssets() {

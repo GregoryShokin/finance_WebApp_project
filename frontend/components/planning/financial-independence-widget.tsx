@@ -1,221 +1,200 @@
-'use client';
+﻿'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Info, XCircle } from 'lucide-react';
+import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
-import type { FinancialIndependenceMetric } from '@/types/metrics';
+import type { FinancialHealth } from '@/types/financial-health';
 
-// ── Level config ──────────────────────────────────────────────────────────────
-
-type Level = {
-  label: string;
-  text: string;
-  bar: string;
-  badge: string;
-};
-
-function getLevel(percent: number): Level {
-  if (percent >= 100) return { label: 'Финансовая независимость достигнута', text: 'text-emerald-600', bar: 'bg-emerald-500', badge: 'bg-emerald-100 text-emerald-700' };
-  if (percent >= 75)  return { label: 'На пороге независимости',             text: 'text-emerald-500', bar: 'bg-emerald-400', badge: 'bg-emerald-50 text-emerald-600'  };
-  if (percent >= 50)  return { label: 'Финансовая устойчивость',             text: 'text-teal-600',    bar: 'bg-teal-500',    badge: 'bg-teal-100 text-teal-700'       };
-  if (percent >= 25)  return { label: 'Уверенный рост',                      text: 'text-amber-600',   bar: 'bg-amber-400',   badge: 'bg-amber-100 text-amber-700'     };
-  if (percent >= 10)  return { label: 'Формирование базы',                   text: 'text-orange-500',  bar: 'bg-orange-400',  badge: 'bg-orange-50 text-orange-600'    };
-  return                     { label: 'Начальный уровень',                   text: 'text-slate-500',   bar: 'bg-slate-300',   badge: 'bg-slate-100 text-slate-600'     };
-}
-
-const SCALE = 2.4;
-
-// ── Types ─────────────────────────────────────────────────────────────────────
+const SCALE = 1.8;
 
 type Props = {
-  data: FinancialIndependenceMetric | null | undefined;
+  data: FinancialHealth | null | undefined;
   isLoading?: boolean;
 };
 
-// ── Component ─────────────────────────────────────────────────────────────────
+function getFiZone(percent: number) {
+  if (percent >= 100) {
+    return { color: '#0F6E56', label: 'Свобода', badgeClass: 'bg-teal-100 text-teal-700' };
+  }
+  if (percent >= 50) {
+    return { color: '#1D9E75', label: 'На пути', badgeClass: 'bg-emerald-100 text-emerald-700' };
+  }
+  if (percent >= 10) {
+    return { color: '#EF9F27', label: 'Частичная', badgeClass: 'bg-amber-100 text-amber-700' };
+  }
+  return { color: '#E24B4A', label: 'Зависимость', badgeClass: 'bg-rose-100 text-rose-700' };
+}
 
-export function FinancialIndependenceWidget({ data, isLoading }: Props) {
+export function FinancialIndependenceWidget({ data, isLoading = false }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [cardSize, setCardSize] = useState({ width: 0, height: 0 });
+  const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
 
-  const wrapperRef     = useRef<HTMLDivElement>(null);
-  const placeholderRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
 
-  // Measure placeholder size, update on resize
   useEffect(() => {
-    const observer = new ResizeObserver((entries) => {
-      const { width, height } = entries[0].contentRect;
-      setCardSize({ width, height });
-    });
-    if (placeholderRef.current) observer.observe(placeholderRef.current);
-    return () => observer.disconnect();
-  }, []);
+    if (cardRef.current && !isExpanded) {
+      setCollapsedHeight(cardRef.current.offsetHeight);
+    }
+  }, [isExpanded]);
 
-  // Close on outside click
   useEffect(() => {
     if (!isExpanded) return;
-    function handleClick(e: MouseEvent) {
-      if (!wrapperRef.current?.contains(e.target as Node)) {
+
+    function handleClick(event: MouseEvent) {
+      if (!wrapperRef.current?.contains(event.target as Node)) {
         setIsExpanded(false);
       }
     }
+
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [isExpanded]);
 
-  const level = data ? getLevel(data.percent) : null;
-
-  // ── Shared card content ───────────────────────────────────────────────────
+  const percent = data?.fi_percent ?? 0;
+  const zone = getFiZone(percent);
+  const avgMonthlyExpenses = data?.avg_monthly_expenses ?? ((data?.fi_capital_needed ?? 0) / 300);
 
   function renderContent() {
+    if (isLoading) {
+      return (
+        <>
+          <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Финансовая независимость</p>
+          <div className="mt-3 space-y-2">
+            <div className="h-9 w-24 animate-pulse rounded bg-slate-100" />
+            <div className="h-5 w-24 animate-pulse rounded-full bg-slate-100" />
+            <div className="h-1.5 w-full animate-pulse rounded-full bg-slate-100" />
+          </div>
+        </>
+      );
+    }
+
+    if (!data) {
+      return (
+        <>
+          <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Финансовая независимость</p>
+          <div className="mt-3">
+            <p className="text-3xl font-medium text-slate-300">-</p>
+            <p className="mt-2 text-sm text-slate-400">Недостаточно данных</p>
+          </div>
+        </>
+      );
+    }
+
     return (
       <>
-        {/* Title + button */}
-        <div className="flex items-start justify-between gap-1">
-          <p className="text-xs font-medium text-slate-500">Финансовая независимость</p>
-          {data && (
-            <button
-              type="button"
-              aria-label={isExpanded ? 'Закрыть' : 'Подробнее'}
-              aria-expanded={isExpanded}
-              onClick={() => setIsExpanded((v) => !v)}
-              className="ml-1 flex size-5 shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
-            >
-              {isExpanded
-                ? <XCircle className="size-3.5" />
-                : <Info className="size-3.5" />
-              }
-            </button>
-          )}
+        <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Финансовая независимость</p>
+
+        <button
+          type="button"
+          onClick={() => setIsExpanded((value) => !value)}
+          className="absolute right-3 top-3 flex size-[22px] items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
+          aria-label="Подробнее"
+          aria-expanded={isExpanded}
+        >
+          i
+        </button>
+
+        <p className="mt-2 text-3xl font-medium" style={{ color: zone.color }}>
+          {percent.toFixed(1)}
+          <span className="ml-1 text-base font-normal text-slate-400">%</span>
+        </p>
+
+        <span className={cn('mt-1.5 inline-block rounded-full px-2.5 py-0.5 text-xs font-medium', zone.badgeClass)}>
+          {zone.label}
+        </span>
+
+        <div className="mt-3">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full rounded-full transition-all duration-700 ease-out"
+              style={{ width: `${Math.min(percent, 100)}%`, backgroundColor: zone.color }}
+            />
+          </div>
+          <div className="mt-1 flex justify-between text-[10px] text-slate-300">
+            <span>0%</span>
+            <span>100% (свобода)</span>
+          </div>
         </div>
 
-        {/* Body */}
-        {isLoading ? (
-          <div className="mt-2 space-y-2">
-            <div className="h-7 w-16 animate-pulse rounded bg-slate-100" />
-            <div className="h-1.5 w-full animate-pulse rounded-full bg-slate-100" />
-            <div className="h-5 w-28 animate-pulse rounded-full bg-slate-100" />
-          </div>
-        ) : !data ? (
-          <div className="mt-2 space-y-1">
-            <p className="text-xl font-semibold text-slate-400">—</p>
-            <p className="text-xs text-slate-400">Недостаточно данных</p>
-          </div>
-        ) : (
+        {isExpanded ? (
           <>
-            {/* Summary — always visible */}
-            <div className="mt-1 space-y-1.5">
-              <p className={cn('text-2xl font-bold tabular-nums', level!.text)}>
-                {data.percent.toFixed(0)}%
-              </p>
+            <hr className="my-3 border-slate-100" />
 
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                <div
-                  className={cn('h-full rounded-full transition-all duration-500', level!.bar)}
-                  style={{ width: `${Math.min(data.percent, 100)}%` }}
-                />
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-sm text-slate-500">Пассивный доход</span>
+                <span className="text-sm font-medium text-slate-900">
+                  {formatMoney(data.fi_passive_income)} / мес
+                </span>
               </div>
 
-              <p className={cn('inline-block rounded-full px-2 py-0.5 text-xs font-medium', level!.badge)}>
-                {level!.label}
-              </p>
-
-              {/* Progress bar — collapsed state only */}
-              {!isExpanded && (
-                <div className="mt-2 h-1 w-full overflow-hidden rounded-sm bg-gray-200">
-                  <div
-                    className="h-full rounded-sm bg-green-500 transition-all duration-500"
-                    style={{ width: `${Math.min(data.percent, 100)}%` }}
-                  />
-                </div>
-              )}
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-sm text-slate-500">Среднемес. расходы</span>
+                <span className="text-sm font-medium text-slate-900">
+                  {formatMoney(avgMonthlyExpenses)} / мес
+                </span>
+              </div>
             </div>
 
-            {/* Details — visible only when expanded */}
-            {isExpanded && (
-              <div className="mt-3">
-                <div className="h-px bg-slate-100" />
-                <div className="mt-2 space-y-1.5">
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {[
+                { label: '<10% - зависимость', bg: 'bg-rose-100', text: 'text-rose-700' },
+                { label: '10-50% - частичная', bg: 'bg-amber-100', text: 'text-amber-700' },
+                { label: '50-100% - на пути', bg: 'bg-emerald-100', text: 'text-emerald-700' },
+                { label: '>=100% - свобода', bg: 'bg-teal-100', text: 'text-teal-700' },
+              ].map((zoneItem) => (
+                <span key={zoneItem.label} className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${zoneItem.bg} ${zoneItem.text}`}>
+                  {zoneItem.label}
+                </span>
+              ))}
+            </div>
 
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="whitespace-nowrap text-xs text-slate-500">Пассивный доход сейчас</span>
-                    <span className="whitespace-nowrap text-xs font-medium text-slate-700">
-                      {formatMoney(data.passive_income)}/мес
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="whitespace-nowrap text-xs text-slate-500">
-                      Средние расходы (за {data.months_of_data} мес)
-                    </span>
-                    <span className="whitespace-nowrap text-xs font-medium text-slate-700">
-                      {formatMoney(data.avg_expenses)}/мес
-                    </span>
-                  </div>
-
-                  {data.gap > 0 && (
-                    <div className="flex items-center justify-between gap-4">
-                      <span className="whitespace-nowrap text-xs text-slate-500">До 100% не хватает</span>
-                      <span className="whitespace-nowrap text-xs font-medium text-rose-500">
-                        {formatMoney(data.gap)}/мес
-                      </span>
-                    </div>
-                  )}
-
-                  {data.months_of_data < 3 && (
-                    <p className="rounded-lg bg-slate-50 px-3 py-2 text-center text-xs text-slate-500">
-                      Данных {data.months_of_data} из 3 месяцев — метрика уточнится
-                    </p>
-                  )}
-
-                </div>
+            {percent < 10 ? (
+              <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                Добавь источники пассивного дохода - отметь категории транзакций как «пассивный доход»
               </div>
-            )}
+            ) : null}
           </>
-        )}
+        ) : null}
       </>
     );
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
-
   return (
-    <div ref={wrapperRef} className="relative h-full">
+    <div
+      ref={wrapperRef}
+      className="relative h-full overflow-visible"
+      style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
+    >
+      {isExpanded ? (
+        <button
+          type="button"
+          aria-label="Закрыть"
+          onClick={() => setIsExpanded(false)}
+          className="fixed inset-0 z-40 bg-black/10"
+        />
+      ) : null}
 
-      {/* Placeholder: holds layout space, invisible but present in flow */}
-      <div
-        ref={placeholderRef}
-        className="surface-panel p-5 h-full"
-        style={{ visibility: 'hidden' }}
-        aria-hidden="true"
-      >
-        {renderContent()}
-      </div>
-
-      {/* Real card: absolute, centered over placeholder, scales from center */}
-      {cardSize.width > 0 && (
-        <div
-          className="surface-panel p-5"
+      <div ref={cardRef}>
+        <Card
+          className="relative overflow-visible p-5"
           style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            width: cardSize.width,
-            height: cardSize.height,
-            transform: isExpanded
-              ? `translate(-50%, -50%) scale(${SCALE})`
-              : 'translate(-50%, -50%) scale(1)',
+            position: isExpanded ? 'absolute' : 'relative',
+            top: 0,
+            left: 0,
+            right: 0,
+            transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
             transformOrigin: 'center center',
             transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
-            zIndex: isExpanded ? 20 : 1,
+            zIndex: isExpanded ? 50 : 1,
             overflow: 'visible',
           }}
         >
           {renderContent()}
-        </div>
-      )}
-
+        </Card>
+      </div>
     </div>
   );
 }

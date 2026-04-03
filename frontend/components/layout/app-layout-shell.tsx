@@ -1,13 +1,22 @@
 "use client";
 
-import { ReactNode } from 'react';
+import { ReactNode, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Sidebar } from './sidebar';
 import { Header } from './header';
 import { useAuth } from '@/hooks/use-auth';
 import { ErrorState, LoadingState } from '@/components/states/page-state';
 
 export function AppLayoutShell({ children }: { children: ReactNode }) {
+  const router = useRouter();
   const { user, isLoading, token, error, mounted } = useAuth();
+
+  // Redirect to login when token expires or becomes invalid
+  useEffect(() => {
+    if (mounted && !token) {
+      router.replace('/login');
+    }
+  }, [mounted, token, router]);
 
   if (!mounted) {
     return (

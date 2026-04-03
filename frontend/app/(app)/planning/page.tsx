@@ -778,13 +778,9 @@ export default function PlanningPage() {
     ny < _today.getFullYear() ||
     (ny === _today.getFullYear() && nm <= _today.getMonth() + 2);
 
-  // Visible expense items: skip rows where plan=0 AND fact=0
-  const visibleExpenseItems = expenseItems.filter(
-    i => Number(i.planned_amount) > 0 || Number(i.spent_amount) > 0,
-  );
-  const essentialItems = visibleExpenseItems.filter(i => i.category_priority === 'expense_essential');
-  const secondaryItems = visibleExpenseItems.filter(i => i.category_priority === 'expense_secondary');
-  const otherExpItems  = visibleExpenseItems.filter(i => i.category_priority !== 'expense_essential' && i.category_priority !== 'expense_secondary');
+  const essentialItems = expenseItems.filter(i => i.category_priority === 'expense_essential');
+  const secondaryItems = expenseItems.filter(i => i.category_priority === 'expense_secondary');
+  const otherExpItems  = expenseItems.filter(i => i.category_priority !== 'expense_essential' && i.category_priority !== 'expense_secondary');
 
   return (
     <PageShell

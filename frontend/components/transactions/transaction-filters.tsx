@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils/cn';
 const categoryPriorityLabels: Record<CategoryPriority, string> = {
   expense_essential: 'Обязательные расходы',
   expense_secondary: 'Второстепенные расходы',
-  expense_target: 'Целевые расходы',
+  expense_target: 'Имущество',
   income_active: 'Активный доход',
   income_passive: 'Пассивный доход',
 };

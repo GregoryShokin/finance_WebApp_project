@@ -13,6 +13,7 @@ from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
 from app.repositories.counterparty_repository import CounterpartyRepository
 from app.repositories.transaction_repository import TransactionRepository
+from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
 
 try:
     from app.services.goal_service import GoalService, GoalValidationError as _GoalValidationError
@@ -30,6 +31,10 @@ except Exception:
 
         @classmethod
         def normalize_description(cls, value):
+            return value
+
+        @classmethod
+        def normalize_for_rule(cls, value):
             return value
 
 
@@ -63,6 +68,7 @@ class TransactionService:
         self.category_repo = CategoryRepository(db)
         self.counterparty_repo = CounterpartyRepository(db)
         self.enrichment_service = TransactionEnrichmentService(db)
+        self.category_rule_repo = TransactionCategoryRuleRepository(db)
 
     def list_transactions(
         self,
@@ -117,6 +123,7 @@ class TransactionService:
         if _GOALS_AVAILABLE and transaction.goal_id is not None:
             GoalService(self.db).check_and_achieve(transaction.goal_id, user_id)
 
+        self._upsert_category_rule_from_payload(user_id=user_id, payload=payload)
         self.db.commit()
         self.db.refresh(transaction)
         return self.transaction_repo.get_by_id(transaction_id=transaction.id, user_id=user_id) or transaction
@@ -167,9 +174,29 @@ class TransactionService:
         if _GOALS_AVAILABLE and updated.goal_id is not None:
             GoalService(self.db).check_and_achieve(updated.goal_id, user_id)
 
+        self._upsert_category_rule_from_payload(user_id=user_id, payload=effective)
         self.db.commit()
         self.db.refresh(updated)
         return self.transaction_repo.get_by_id(transaction_id=updated.id, user_id=user_id) or updated
+
+
+    def _upsert_category_rule_from_payload(self, *, user_id: int, payload: dict[str, Any]) -> None:
+        category_id = payload.get("category_id")
+        operation_type = payload.get("operation_type")
+        normalized_description = payload.get("normalized_description") or self.enrichment_service.normalize_for_rule(payload.get("description"))
+        original_description = payload.get("description")
+
+        if not category_id or not normalized_description:
+            return
+        if operation_type in NON_ANALYTICS_OPERATION_TYPES:
+            return
+
+        self.category_rule_repo.upsert(
+            user_id=user_id,
+            normalized_description=str(normalized_description),
+            category_id=int(category_id),
+            original_description=(str(original_description) if original_description is not None else None),
+        )
 
     def _build_effective_update_payload(self, *, transaction: Transaction, updates: dict[str, Any]) -> dict[str, Any]:
         """Собирает итоговый payload для update без затирания обязательных полей в None.
@@ -392,7 +419,7 @@ class TransactionService:
             if counterparty is not None and not str(description or "").strip():
                 prepared["description"] = counterparty.name
                 description = counterparty.name
-        prepared["normalized_description"] = self.enrichment_service.normalize_description(description)
+        prepared["normalized_description"] = self.enrichment_service.normalize_for_rule(description)
         return prepared
 
     def _validate_payload(self, *, user_id: int, payload: dict[str, Any]) -> None:

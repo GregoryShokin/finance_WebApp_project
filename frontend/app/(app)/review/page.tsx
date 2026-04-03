@@ -38,7 +38,7 @@ import { useDelayedDelete } from '@/hooks/use-delayed-delete';
 const priorityLabels: Record<CategoryPriority, string> = {
   expense_essential: 'Обязательный',
   expense_secondary: 'Второстепенный',
-  expense_target: 'Целевой',
+  expense_target: 'Имущество',
   income_active: 'Активный доход',
   income_passive: 'Пассивный доход',
 };

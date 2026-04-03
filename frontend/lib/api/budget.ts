@@ -1,5 +1,5 @@
 import { apiClient } from '@/lib/api/client';
-import type { BudgetAlert, BudgetProgress } from '@/types/budget';
+import type { BudgetAlert, BudgetProgress, FinancialIndependence } from '@/types/budget';
 
 export function getBudgetProgress(month: string) {
   return apiClient<BudgetProgress[]>(`/budget/${month}`);
@@ -18,4 +18,8 @@ export function updateBudget(month: string, categoryId: number, plannedAmount: n
     method: 'PUT',
     body: JSON.stringify({ planned_amount: plannedAmount }),
   });
+}
+
+export function getFinancialIndependence(month: string) {
+  return apiClient<FinancialIndependence>(`/budget/financial-independence/${month}`);
 }

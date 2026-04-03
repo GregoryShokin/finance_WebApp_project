@@ -1,4 +1,4 @@
-export type AccountType = 'regular' | 'credit' | 'credit_card';
+export type AccountType = 'regular' | 'credit' | 'credit_card' | 'cash' | 'broker';
 
 export type Account = {
   id: number;
@@ -9,6 +9,7 @@ export type Account = {
   is_active: boolean;
   account_type: AccountType;
   is_credit: boolean;
+  credit_limit?: string | number | null;
   credit_limit_original?: string | number | null;
   credit_current_amount?: string | number | null;
   credit_interest_rate?: string | number | null;

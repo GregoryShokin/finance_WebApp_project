@@ -15,7 +15,7 @@ const kindMap = {
 const priorityMap = {
   expense_essential: 'Основной',
   expense_secondary: 'Второстепенный',
-  expense_target: 'Целевой',
+  expense_target: 'Имущество',
   income_active: 'Активный',
   income_passive: 'Пассивный',
 } as const;

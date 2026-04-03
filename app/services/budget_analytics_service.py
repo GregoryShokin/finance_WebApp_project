@@ -19,7 +19,12 @@ from app.models.transaction import Transaction
 class BudgetProgressItem:
     category_id: int
     category_name: str
+    category_kind: str           # income / expense
+    category_priority: str       # expense_essential / expense_secondary / expense_target / income_active / income_passive
+    income_type: str | None      # active / passive / None
+    exclude_from_planning: bool  # True → one-time outflow, no plan
     planned_amount: Decimal
+    suggested_amount: Decimal  # avg of last 3 months, computed at generation time
     spent_amount: Decimal
     remaining: Decimal
     percent_used: float  # 0–100+
@@ -30,6 +35,15 @@ class AlertCreated:
     alert_type: str
     category_id: int | None
     message: str
+
+
+@dataclass
+class FinancialIndependenceResult:
+    passive_income: Decimal
+    active_income: Decimal
+    total_expenses: Decimal
+    percent: float   # passive_income / total_expenses × 100
+    status: str      # starting / growing / independent
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -64,6 +78,28 @@ def _round2(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _adaptive_avg(values: list[Decimal]) -> Decimal:
+    """
+    Average over the 'available period':
+    divisor = position of the furthest-back month that has non-zero data (1-indexed).
+    Example: values=[590, 0, 0]  → divisor=1 → avg=590
+             values=[400, 200, 0] → divisor=2 → avg=300
+             values=[300, 400, 200] → divisor=3 → avg=300
+             values=[0, 0, 600]  → divisor=3 → avg=200
+    Returns 0 if all values are zero.
+    """
+    last_nonzero_idx = -1
+    for i in range(len(values) - 1, -1, -1):
+        if values[i] > 0:
+            last_nonzero_idx = i
+            break
+    if last_nonzero_idx == -1:
+        return Decimal("0")
+    divisor = last_nonzero_idx + 1
+    total = sum(values[:divisor], Decimal("0"))
+    return _round2(total / divisor)
+
+
 # ── Service ───────────────────────────────────────────────────────────────────
 
 class BudgetAnalyticsService:
@@ -75,9 +111,76 @@ class BudgetAnalyticsService:
     def _expense_categories(self, user_id: int) -> list[Category]:
         return (
             self.db.query(Category)
-            .filter(Category.user_id == user_id, Category.kind == "expense")
+            .filter(
+                Category.user_id == user_id,
+                Category.kind == "expense",
+                Category.exclude_from_planning.is_(False),
+            )
             .all()
         )
+
+    def _income_categories_by_type(
+        self, user_id: int, income_type: str
+    ) -> list[Category]:
+        return (
+            self.db.query(Category)
+            .filter(
+                Category.user_id == user_id,
+                Category.kind == "income",
+                Category.income_type == income_type,
+            )
+            .all()
+        )
+
+    def _income_categories_for_planning(self, user_id: int) -> list[Category]:
+        return (
+            self.db.query(Category)
+            .filter(
+                Category.user_id == user_id,
+                Category.kind == "income",
+                Category.exclude_from_planning.is_(False),
+            )
+            .all()
+        )
+
+    def _income_earned_by_category(
+        self,
+        user_id: int,
+        category_id: int,
+        date_from: datetime,
+        date_to: datetime,
+    ) -> Decimal:
+        rows = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.category_id == category_id,
+                Transaction.type == "income",
+                Transaction.affects_analytics.is_(True),
+                Transaction.transaction_date >= date_from,
+                Transaction.transaction_date <= date_to,
+            )
+            .all()
+        )
+        return sum((Decimal(str(tx.amount)) for tx in rows), Decimal("0"))
+
+    def _avg_monthly_income(
+        self, user_id: int, category_id: int, base_month: date, months: int = 3
+    ) -> Decimal:
+        """
+        Average monthly income over up to `months` prior months.
+        Divisor = index of the last (furthest back) month that has non-zero income,
+        so new categories with 1-2 months of history aren't penalised by empty months.
+        """
+        values: list[Decimal] = []
+        for i in range(1, months + 1):
+            m = _shift_months(base_month, -i)
+            values.append(
+                self._income_earned_by_category(
+                    user_id, category_id, _month_start_dt(m), _month_end_dt(m)
+                )
+            )
+        return _adaptive_avg(values)
 
     def _spent_by_category(
         self,
@@ -103,14 +206,20 @@ class BudgetAnalyticsService:
     def _avg_monthly_expense(
         self, user_id: int, category_id: int, base_month: date, months: int = 3
     ) -> Decimal:
-        """Average monthly spending for `months` full months before `base_month`."""
-        total = Decimal("0")
+        """
+        Average monthly spending over up to `months` prior months.
+        Divisor = index of the last (furthest back) month that has non-zero spending,
+        so new categories with 1-2 months of history aren't penalised by empty months.
+        """
+        values: list[Decimal] = []
         for i in range(1, months + 1):
             m = _shift_months(base_month, -i)
-            total += self._spent_by_category(
-                user_id, category_id, _month_start_dt(m), _month_end_dt(m)
+            values.append(
+                self._spent_by_category(
+                    user_id, category_id, _month_start_dt(m), _month_end_dt(m)
+                )
             )
-        return _round2(total / months)
+        return _adaptive_avg(values)
 
     def _existing_budget(
         self, user_id: int, category_id: int, month: date
@@ -167,25 +276,37 @@ class BudgetAnalyticsService:
 
     def generate_budget_for_month(self, user_id: int, month: date) -> list[Budget]:
         """
-        Creates auto-generated Budget records for all expense categories.
+        Idempotent: creates Budget records for all plannable categories
+        (expense with exclude_from_planning=False, income with exclude_from_planning=False).
         Skips categories that already have a Budget record for this month.
-        planned_amount = average spending over the previous 3 months.
-        If there is no history, planned_amount = 0 (still creates the record).
+        planned_amount = suggested_amount = adaptive avg of up to last 3 months.
+        Categories with no transaction history still get a record with planned_amount=0,
+        so they can be planned manually.
         """
         first, _ = _month_bounds(month)
-        categories = self._expense_categories(user_id)
         created: list[Budget] = []
 
-        for cat in categories:
-            if self._existing_budget(user_id, cat.id, first):
+        all_cats = self._expense_categories(user_id) + self._income_categories_for_planning(user_id)
+        for cat in all_cats:
+            if cat.kind == "income":
+                avg = self._avg_monthly_income(user_id, cat.id, first, months=3)
+            else:
+                avg = self._avg_monthly_expense(user_id, cat.id, first, months=3)
+
+            existing = self._existing_budget(user_id, cat.id, first)
+            if existing:
+                # Backfill suggested_amount for records created before migration 0021
+                # (those rows have suggested_amount=0 from server_default)
+                if existing.suggested_amount == Decimal("0") and avg > 0:
+                    existing.suggested_amount = avg
                 continue
 
-            avg = self._avg_monthly_expense(user_id, cat.id, first, months=3)
             budget = Budget(
                 user_id=user_id,
                 category_id=cat.id,
                 month=first,
                 planned_amount=avg,
+                suggested_amount=avg,
                 auto_generated=True,
             )
             self.db.add(budget)
@@ -211,30 +332,80 @@ class BudgetAnalyticsService:
             .all()
         )
 
-        result: list[BudgetProgressItem] = []
+        date_from = _month_start_dt(first)
+        date_to = _month_end_dt(first)
+
+        planned_result: list[BudgetProgressItem] = []
         for b in budgets:
             cat = self.db.get(Category, b.category_id)
+            if cat and cat.exclude_from_planning:
+                continue
             cat_name = cat.name if cat else f"Категория {b.category_id}"
+            cat_kind = cat.kind if cat else "expense"
+            cat_priority = cat.priority if cat else "expense_essential"
+            cat_income_type = cat.income_type if cat else None
 
-            spent = self._spent_by_category(
-                user_id, b.category_id, _month_start_dt(first), _month_end_dt(first)
-            )
+            if cat_kind == "income":
+                spent = self._income_earned_by_category(user_id, b.category_id, date_from, date_to)
+            else:
+                spent = self._spent_by_category(user_id, b.category_id, date_from, date_to)
+
             planned = Decimal(str(b.planned_amount))
             remaining = _round2(planned - spent)
             pct = float(spent / planned * 100) if planned > 0 else (100.0 if spent > 0 else 0.0)
 
-            result.append(
+            suggested = _round2(Decimal(str(b.suggested_amount))) if b.suggested_amount is not None else _round2(planned)
+
+            planned_result.append(
                 BudgetProgressItem(
                     category_id=b.category_id,
                     category_name=cat_name,
+                    category_kind=cat_kind,
+                    category_priority=cat_priority,
+                    income_type=cat_income_type,
+                    exclude_from_planning=False,
                     planned_amount=_round2(planned),
+                    suggested_amount=suggested,
                     spent_amount=_round2(spent),
                     remaining=remaining,
                     percent_used=round(pct, 2),
                 )
             )
 
-        return sorted(result, key=lambda x: x.percent_used, reverse=True)
+        # Excluded expense categories — show actual spending only (one-time outflows)
+        excluded_cats = (
+            self.db.query(Category)
+            .filter(
+                Category.user_id == user_id,
+                Category.kind == "expense",
+                Category.exclude_from_planning.is_(True),
+            )
+            .all()
+        )
+        excluded_result: list[BudgetProgressItem] = []
+        for cat in excluded_cats:
+            spent = self._spent_by_category(user_id, cat.id, date_from, date_to)
+            if spent == Decimal("0"):
+                continue
+            excluded_result.append(
+                BudgetProgressItem(
+                    category_id=cat.id,
+                    category_name=cat.name,
+                    category_kind="expense",
+                    category_priority=cat.priority,
+                    income_type=None,
+                    exclude_from_planning=True,
+                    planned_amount=Decimal("0"),
+                    suggested_amount=Decimal("0"),
+                    spent_amount=_round2(spent),
+                    remaining=Decimal("0"),
+                    percent_used=0.0,
+                )
+            )
+
+        sorted_planned = sorted(planned_result, key=lambda x: x.percent_used, reverse=True)
+        sorted_excluded = sorted(excluded_result, key=lambda x: x.spent_amount, reverse=True)
+        return sorted_planned + sorted_excluded
 
     # ── 3. check_and_create_alerts ────────────────────────────────────────────
 
@@ -255,8 +426,11 @@ class BudgetAnalyticsService:
 
         created: list[AlertCreated] = []
 
-        # ── A & B: per-category checks ────────────────────────────────────────
-        progress = self.get_budget_progress(user_id, today)
+        # ── A & B: per-category checks (expense only) ─────────────────────────
+        progress = [
+            item for item in self.get_budget_progress(user_id, today)
+            if item.category_kind == "expense"
+        ]
 
         for item in progress:
             # A) Budget 80%
@@ -333,3 +507,99 @@ class BudgetAnalyticsService:
 
         self.db.commit()
         return created
+
+    # ── 4. get_financial_independence ─────────────────────────────────────────
+
+    def get_financial_independence(
+        self, user_id: int, month: date
+    ) -> FinancialIndependenceResult:
+        """
+        Financial independence ratio = passive income / total expenses × 100.
+
+        Passive income  — transactions in income categories with income_type="passive".
+        Active income   — transactions in income categories with income_type="active".
+        Total expenses  — expense transactions excluding exclude_from_planning categories.
+
+        Status:
+          starting    < 25 %
+          growing    25–75 %
+          independent > 75 %
+        """
+        date_from = _month_start_dt(month)
+        date_to = _month_end_dt(month)
+
+        # Category ID sets by income type
+        passive_ids = {
+            c.id for c in self._income_categories_by_type(user_id, "passive")
+        }
+        active_ids = {
+            c.id for c in self._income_categories_by_type(user_id, "active")
+        }
+        excluded_expense_ids = {
+            c.id
+            for c in self.db.query(Category).filter(
+                Category.user_id == user_id,
+                Category.exclude_from_planning.is_(True),
+            ).all()
+        }
+
+        # All analytics income + expense transactions for the month
+        income_rows = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.type == "income",
+                Transaction.affects_analytics.is_(True),
+                Transaction.transaction_date >= date_from,
+                Transaction.transaction_date <= date_to,
+            )
+            .all()
+        )
+        expense_rows = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.type == "expense",
+                Transaction.affects_analytics.is_(True),
+                Transaction.transaction_date >= date_from,
+                Transaction.transaction_date <= date_to,
+            )
+            .all()
+        )
+
+        passive_income = sum(
+            (Decimal(str(tx.amount)) for tx in income_rows if tx.category_id in passive_ids),
+            Decimal("0"),
+        )
+        active_income = sum(
+            (Decimal(str(tx.amount)) for tx in income_rows if tx.category_id in active_ids),
+            Decimal("0"),
+        )
+        total_expenses = sum(
+            (
+                Decimal(str(tx.amount))
+                for tx in expense_rows
+                if tx.category_id not in excluded_expense_ids
+            ),
+            Decimal("0"),
+        )
+
+        if total_expenses > 0:
+            pct = float(passive_income / total_expenses * 100)
+        else:
+            pct = 100.0 if passive_income > 0 else 0.0
+
+        if pct >= 75:
+            fi_status = "independent"
+        elif pct >= 25:
+            fi_status = "growing"
+        else:
+            fi_status = "starting"
+
+        return FinancialIndependenceResult(
+            passive_income=_round2(passive_income),
+            active_income=_round2(active_income),
+            total_expenses=_round2(total_expenses),
+            percent=round(pct, 2),
+            status=fi_status,
+        )

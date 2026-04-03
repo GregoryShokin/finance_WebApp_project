@@ -10,7 +10,12 @@ from app.core.db import get_db
 from app.models.budget import Budget
 from app.models.budget_alert import BudgetAlert
 from app.models.user import User
-from app.schemas.budget import BudgetAlertResponse, BudgetProgressResponse, BudgetUpdateRequest
+from app.schemas.budget import (
+    BudgetAlertResponse,
+    BudgetProgressResponse,
+    BudgetUpdateRequest,
+    FinancialIndependenceResponse,
+)
 from app.services.budget_analytics_service import BudgetAnalyticsService
 
 router = APIRouter(prefix="/budget", tags=["Budget"])
@@ -56,6 +61,30 @@ def mark_alert_read(
     return alert
 
 
+# ── GET /budget/financial-independence/{month} ───────────────────────────────
+
+@router.get("/financial-independence/{month}", response_model=FinancialIndependenceResponse)
+def get_financial_independence(
+    month: date,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns the financial independence ratio for the given month:
+    passive income / total expenses × 100 %.
+    Status: starting (<25%), growing (25–75%), independent (>75%).
+    """
+    svc = BudgetAnalyticsService(db)
+    result = svc.get_financial_independence(current_user.id, month.replace(day=1))
+    return FinancialIndependenceResponse(
+        passive_income=result.passive_income,
+        active_income=result.active_income,
+        total_expenses=result.total_expenses,
+        percent=result.percent,
+        status=result.status,
+    )
+
+
 # ── GET /budget/{month} ───────────────────────────────────────────────────────
 
 @router.get("/{month}", response_model=list[BudgetProgressResponse])
@@ -71,20 +100,20 @@ def get_budget_progress(
     svc = BudgetAnalyticsService(db)
     first = month.replace(day=1)
 
-    # Auto-generate if no budgets for this month yet
-    existing = db.query(Budget).filter(
-        Budget.user_id == current_user.id,
-        Budget.month == first,
-    ).first()
-    if not existing:
-        svc.generate_budget_for_month(current_user.id, first)
+    # Always run generation — it skips existing records and picks up new categories
+    svc.generate_budget_for_month(current_user.id, first)
 
     items = svc.get_budget_progress(current_user.id, first)
     return [
         BudgetProgressResponse(
             category_id=i.category_id,
             category_name=i.category_name,
+            category_kind=i.category_kind,
+            category_priority=i.category_priority,
+            income_type=i.income_type,
+            exclude_from_planning=i.exclude_from_planning,
             planned_amount=i.planned_amount,
+            suggested_amount=i.suggested_amount,
             spent_amount=i.spent_amount,
             remaining=i.remaining,
             percent_used=i.percent_used,
@@ -127,7 +156,12 @@ def update_budget(
             return BudgetProgressResponse(
                 category_id=item.category_id,
                 category_name=item.category_name,
+                category_kind=item.category_kind,
+                category_priority=item.category_priority,
+                income_type=item.income_type,
+                exclude_from_planning=item.exclude_from_planning,
                 planned_amount=item.planned_amount,
+                suggested_amount=item.suggested_amount,
                 spent_amount=item.spent_amount,
                 remaining=item.remaining,
                 percent_used=item.percent_used,

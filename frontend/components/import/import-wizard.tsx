@@ -455,7 +455,8 @@ export function ImportWizard() {
 
   const isRowDirty = (row: ImportPreviewRow) => {
     const currentPayload = buildRowUpdatePayload(row, getRowForm(row), splitExpanded, splitRows);
-    const savedPayload = buildRowUpdatePayload(row, getRowEditState(row, accounts, mappingForm.account_id), {}, {});
+    const savedSplitRows = splitExpanded[row.id] ? { [row.id]: getSplitState(row) } : {};
+    const savedPayload = buildRowUpdatePayload(row, getRowEditState(row, accounts, mappingForm.account_id), splitExpanded, savedSplitRows);
     return !arePayloadsEqual(currentPayload, savedPayload);
   };
 

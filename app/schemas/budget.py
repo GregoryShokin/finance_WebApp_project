@@ -9,7 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field
 class BudgetProgressResponse(BaseModel):
     category_id: int
     category_name: str
+    category_kind: str
+    category_priority: str
+    income_type: str | None
+    exclude_from_planning: bool
     planned_amount: Decimal
+    suggested_amount: Decimal
     spent_amount: Decimal
     remaining: Decimal
     percent_used: float
@@ -17,6 +22,14 @@ class BudgetProgressResponse(BaseModel):
 
 class BudgetUpdateRequest(BaseModel):
     planned_amount: Decimal = Field(ge=0)
+
+
+class FinancialIndependenceResponse(BaseModel):
+    passive_income: Decimal
+    active_income: Decimal
+    total_expenses: Decimal
+    percent: float
+    status: str  # starting / growing / independent
 
 
 class BudgetAlertResponse(BaseModel):

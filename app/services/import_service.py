@@ -89,7 +89,7 @@ class ImportService:
         extension = self._detect_extension(filename)
         extractor = self.extractors.get(extension)
         if extractor is None:
-            raise ImportValidationError(f"Формат .{extension} не поддерживается для импорта.")
+            raise ImportValidationError(f"Р¤РѕСЂРјР°С‚ .{extension} РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ РґР»СЏ РёРјРїРѕСЂС‚Р°.")
 
         try:
             extraction = extractor.extract(
@@ -98,10 +98,10 @@ class ImportService:
                 options={"delimiter": delimiter, "has_header": has_header},
             )
         except Exception as exc:
-            raise ImportValidationError(f"Не удалось обработать файл {filename}: {exc}") from exc
+            raise ImportValidationError(f"РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ С„Р°Р№Р» {filename}: {exc}") from exc
 
         if not extraction.tables:
-            raise ImportValidationError("Не удалось извлечь данные из файла.")
+            raise ImportValidationError("РќРµ СѓРґР°Р»РѕСЃСЊ РёР·РІР»РµС‡СЊ РґР°РЅРЅС‹Рµ РёР· С„Р°Р№Р»Р°.")
 
         primary_table = self._pick_primary_table(extraction)
         detection = self.recognition_service.recognize(table=primary_table)
@@ -155,27 +155,27 @@ class ImportService:
     def get_session(self, *, user_id: int, session_id: int) -> ImportSession:
         session = self.import_repo.get_session(session_id=session_id, user_id=user_id)
         if session is None:
-            raise ImportNotFoundError("Сессия импорта не найдена.")
+            raise ImportNotFoundError("РЎРµСЃСЃРёСЏ РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
         return session
 
 
     def send_row_to_review(self, *, user_id: int, row_id: int) -> dict[str, Any]:
         session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
         if session_row is None:
-            raise ImportNotFoundError("Строка импорта не найдена.")
+            raise ImportNotFoundError("РЎС‚СЂРѕРєР° РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
 
         session, row = session_row
         row_status = str(row.status or "").strip().lower()
         if row.created_transaction_id is not None or row_status == "committed":
-            raise ImportValidationError("Строка уже импортирована и не может быть отправлена на проверку.")
+            raise ImportValidationError("РЎС‚СЂРѕРєР° СѓР¶Рµ РёРјРїРѕСЂС‚РёСЂРѕРІР°РЅР° Рё РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РѕС‚РїСЂР°РІР»РµРЅР° РЅР° РїСЂРѕРІРµСЂРєСѓ.")
         if row_status == "duplicate":
-            raise ImportValidationError("Дубликат нельзя отправить на проверку вручную.")
+            raise ImportValidationError("Р”СѓР±Р»РёРєР°С‚ РЅРµР»СЊР·СЏ РѕС‚РїСЂР°РІРёС‚СЊ РЅР° РїСЂРѕРІРµСЂРєСѓ РІСЂСѓС‡РЅСѓСЋ.")
         if row_status == "error":
-            raise ImportValidationError("Строка уже содержит ошибку и будет доступна в проверке автоматически.")
+            raise ImportValidationError("РЎС‚СЂРѕРєР° СѓР¶Рµ СЃРѕРґРµСЂР¶РёС‚ РѕС€РёР±РєСѓ Рё Р±СѓРґРµС‚ РґРѕСЃС‚СѓРїРЅР° РІ РїСЂРѕРІРµСЂРєРµ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё.")
         if row_status != "ready":
-            raise ImportValidationError("На проверку можно отправить только строки со статусом 'Готово'.")
+            raise ImportValidationError("РќР° РїСЂРѕРІРµСЂРєСѓ РјРѕР¶РЅРѕ РѕС‚РїСЂР°РІРёС‚СЊ С‚РѕР»СЊРєРѕ СЃС‚СЂРѕРєРё СЃРѕ СЃС‚Р°С‚СѓСЃРѕРј 'Р“РѕС‚РѕРІРѕ'.")
 
-        issues = list(dict.fromkeys([*(getattr(row, "errors", None) or []), "Отправлено на проверку вручную."]))
+        issues = list(dict.fromkeys([*(getattr(row, "errors", None) or []), "РћС‚РїСЂР°РІР»РµРЅРѕ РЅР° РїСЂРѕРІРµСЂРєСѓ РІСЂСѓС‡РЅСѓСЋ."]))
         row = self.import_repo.update_row(
             row,
             status="warning",
@@ -246,12 +246,12 @@ class ImportService:
     def update_row(self, *, user_id: int, row_id: int, payload: ImportRowUpdateRequest) -> dict[str, Any]:
         session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
         if session_row is None:
-            raise ImportNotFoundError("Строка импорта не найдена.")
+            raise ImportNotFoundError("РЎС‚СЂРѕРєР° РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
 
         session, row = session_row
         row_status = str(row.status or "").strip().lower()
         if row.created_transaction_id is not None or row_status == "committed":
-            raise ImportValidationError("Импортированную строку нельзя изменить.")
+            raise ImportValidationError("РРјРїРѕСЂС‚РёСЂРѕРІР°РЅРЅСѓСЋ СЃС‚СЂРѕРєСѓ РЅРµР»СЊР·СЏ РёР·РјРµРЅРёС‚СЊ.")
 
         normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
 
@@ -275,13 +275,13 @@ class ImportService:
             normalized["date"] = payload.transaction_date.isoformat()
 
         action = (payload.action or "").strip().lower()
-        issues = [item for item in (getattr(row, "errors", None) or []) if item and item != "Исключено пользователем."]
+        issues = [item for item in (getattr(row, "errors", None) or []) if item and item != "РСЃРєР»СЋС‡РµРЅРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј."]
         status = row_status if row_status not in {"committed", "duplicate"} else row_status
         allow_ready_status = action == "confirm"
 
         if action == "exclude":
             status = "skipped"
-            issues = list(dict.fromkeys([*issues, "Исключено пользователем."]))
+            issues = list(dict.fromkeys([*issues, "РСЃРєР»СЋС‡РµРЅРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј."]))
         else:
             if action == "restore" and row_status == "skipped":
                 status = "warning"
@@ -327,23 +327,23 @@ class ImportService:
             return status, list(dict.fromkeys(local_issues))
 
         blocking_messages = {
-            "Не указан счёт.",
-            "Не указан счёт поступления.",
-            "Не указан счёт отправителя.",
-            "Не выбран кредитный счёт.",
-            "Не выбрана категория.",
-            "Разбивка заполнена некорректно.",
-            "Сумма разбивки должна совпадать с суммой транзакции.",
-            "В разбивке каждая часть должна быть больше нуля.",
-            "В разбивке для каждой части нужна категория.",
-            "Для платежа по кредиту нужно указать основной долг.",
-            "Для платежа по кредиту нужно указать проценты.",
-            "Сумма основного долга и процентов должна совпадать с общей суммой платежа.",
-            "Основной долг и проценты не могут быть отрицательными.",
-            "Пустое описание операции.",
-            "Не указана дата операции.",
-            "Некорректная сумма.",
-            "Счёт списания и счёт поступления не должны совпадать.",
+            "РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚.",
+            "РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ.",
+            "РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РѕС‚РїСЂР°РІРёС‚РµР»СЏ.",
+            "РќРµ РІС‹Р±СЂР°РЅ РєСЂРµРґРёС‚РЅС‹Р№ СЃС‡С‘С‚.",
+            "РќРµ РІС‹Р±СЂР°РЅР° РєР°С‚РµРіРѕСЂРёСЏ.",
+            "Р Р°Р·Р±РёРІРєР° Р·Р°РїРѕР»РЅРµРЅР° РЅРµРєРѕСЂСЂРµРєС‚РЅРѕ.",
+            "РЎСѓРјРјР° СЂР°Р·Р±РёРІРєРё РґРѕР»Р¶РЅР° СЃРѕРІРїР°РґР°С‚СЊ СЃ СЃСѓРјРјРѕР№ С‚СЂР°РЅР·Р°РєС†РёРё.",
+            "Р’ СЂР°Р·Р±РёРІРєРµ РєР°Р¶РґР°СЏ С‡Р°СЃС‚СЊ РґРѕР»Р¶РЅР° Р±С‹С‚СЊ Р±РѕР»СЊС€Рµ РЅСѓР»СЏ.",
+            "Р’ СЂР°Р·Р±РёРІРєРµ РґР»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё РЅСѓР¶РЅР° РєР°С‚РµРіРѕСЂРёСЏ.",
+            "Р”Р»СЏ РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РѕСЃРЅРѕРІРЅРѕР№ РґРѕР»Рі.",
+            "Р”Р»СЏ РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РїСЂРѕС†РµРЅС‚С‹.",
+            "РЎСѓРјРјР° РѕСЃРЅРѕРІРЅРѕРіРѕ РґРѕР»РіР° Рё РїСЂРѕС†РµРЅС‚РѕРІ РґРѕР»Р¶РЅР° СЃРѕРІРїР°РґР°С‚СЊ СЃ РѕР±С‰РµР№ СЃСѓРјРјРѕР№ РїР»Р°С‚РµР¶Р°.",
+            "РћСЃРЅРѕРІРЅРѕР№ РґРѕР»Рі Рё РїСЂРѕС†РµРЅС‚С‹ РЅРµ РјРѕРіСѓС‚ Р±С‹С‚СЊ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹РјРё.",
+            "РџСѓСЃС‚РѕРµ РѕРїРёСЃР°РЅРёРµ РѕРїРµСЂР°С†РёРё.",
+            "РќРµ СѓРєР°Р·Р°РЅР° РґР°С‚Р° РѕРїРµСЂР°С†РёРё.",
+            "РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЃСѓРјРјР°.",
+            "РЎС‡С‘С‚ СЃРїРёСЃР°РЅРёСЏ Рё СЃС‡С‘С‚ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ РЅРµ РґРѕР»Р¶РЅС‹ СЃРѕРІРїР°РґР°С‚СЊ.",
         }
         local_issues = [item for item in local_issues if item not in blocking_messages]
 
@@ -352,7 +352,7 @@ class ImportService:
         amount = normalized.get("amount")
 
         if account_id in (None, "", 0):
-            local_issues.append("Не указан счёт.")
+            local_issues.append("РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚.")
             status = "warning"
 
         amount_decimal = None
@@ -360,7 +360,7 @@ class ImportService:
             if amount not in (None, ""):
                 amount_decimal = self._to_decimal(amount)
         except (ValueError, TypeError, InvalidOperation):
-            local_issues.append("Некорректная сумма.")
+            local_issues.append("РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЃСѓРјРјР°.")
             status = "error"
 
         if operation_type == "transfer":
@@ -371,11 +371,11 @@ class ImportService:
             normalized["credit_interest_amount"] = None
             if target_account_id in (None, "", 0):
                 # For income transfers, target = source account; for expense, target = destination.
-                missing_msg = "Не указан счёт отправителя." if tx_type == "income" else "Не указан счёт поступления."
+                missing_msg = "РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РѕС‚РїСЂР°РІРёС‚РµР»СЏ." if tx_type == "income" else "РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ."
                 local_issues.append(missing_msg)
                 status = "warning"
             elif str(target_account_id) == str(account_id):
-                local_issues.append("Счёт списания и счёт поступления не должны совпадать.")
+                local_issues.append("РЎС‡С‘С‚ СЃРїРёСЃР°РЅРёСЏ Рё СЃС‡С‘С‚ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ РЅРµ РґРѕР»Р¶РЅС‹ СЃРѕРІРїР°РґР°С‚СЊ.")
                 status = "error"
             normalized["category_id"] = None
             normalized["split_items"] = []
@@ -393,7 +393,7 @@ class ImportService:
             normalized["target_account_id"] = credit_account_id
             normalized["credit_account_id"] = credit_account_id
             if credit_account_id in (None, "", 0):
-                local_issues.append("Не выбран кредитный счёт.")
+                local_issues.append("РќРµ РІС‹Р±СЂР°РЅ РєСЂРµРґРёС‚РЅС‹Р№ СЃС‡С‘С‚.")
                 status = "warning"
 
             principal_raw = normalized.get("credit_principal_amount")
@@ -402,31 +402,31 @@ class ImportService:
             interest_amount = None
 
             if principal_raw in (None, ""):
-                local_issues.append("Для платежа по кредиту нужно указать основной долг.")
+                local_issues.append("Р”Р»СЏ РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РѕСЃРЅРѕРІРЅРѕР№ РґРѕР»Рі.")
                 status = "warning"
             else:
                 try:
                     principal_amount = self._to_decimal(principal_raw)
                 except (ValueError, TypeError, InvalidOperation):
-                    local_issues.append("Некорректная сумма.")
+                    local_issues.append("РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЃСѓРјРјР°.")
                     status = "error"
 
             if interest_raw in (None, ""):
-                local_issues.append("Для платежа по кредиту нужно указать проценты.")
+                local_issues.append("Р”Р»СЏ РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РїСЂРѕС†РµРЅС‚С‹.")
                 status = "warning"
             else:
                 try:
                     interest_amount = self._to_decimal(interest_raw)
                 except (ValueError, TypeError, InvalidOperation):
-                    local_issues.append("Некорректная сумма.")
+                    local_issues.append("РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЃСѓРјРјР°.")
                     status = "error"
 
             if principal_amount is not None and interest_amount is not None:
                 if principal_amount < 0 or interest_amount < 0:
-                    local_issues.append("Основной долг и проценты не могут быть отрицательными.")
+                    local_issues.append("РћСЃРЅРѕРІРЅРѕР№ РґРѕР»Рі Рё РїСЂРѕС†РµРЅС‚С‹ РЅРµ РјРѕРіСѓС‚ Р±С‹С‚СЊ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹РјРё.")
                     status = "error"
                 elif amount_decimal is not None and principal_amount + interest_amount != amount_decimal:
-                    local_issues.append("Сумма основного долга и процентов должна совпадать с общей суммой платежа.")
+                    local_issues.append("РЎСѓРјРјР° РѕСЃРЅРѕРІРЅРѕРіРѕ РґРѕР»РіР° Рё РїСЂРѕС†РµРЅС‚РѕРІ РґРѕР»Р¶РЅР° СЃРѕРІРїР°РґР°С‚СЊ СЃ РѕР±С‰РµР№ СЃСѓРјРјРѕР№ РїР»Р°С‚РµР¶Р°.")
                     status = "error"
                 normalized["credit_principal_amount"] = str(principal_amount)
                 normalized["credit_interest_amount"] = str(interest_amount)
@@ -443,17 +443,17 @@ class ImportService:
                     description = item.get("description") if isinstance(item, dict) else None
                     if category_id in (None, "", 0):
                         valid_split = False
-                        local_issues.append("В разбивке для каждой части нужна категория.")
+                        local_issues.append("Р’ СЂР°Р·Р±РёРІРєРµ РґР»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё РЅСѓР¶РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
                         break
                     try:
                         split_amount = self._to_decimal(raw_amount)
                     except (ValueError, TypeError, InvalidOperation):
                         valid_split = False
-                        local_issues.append("Разбивка заполнена некорректно.")
+                        local_issues.append("Р Р°Р·Р±РёРІРєР° Р·Р°РїРѕР»РЅРµРЅР° РЅРµРєРѕСЂСЂРµРєС‚РЅРѕ.")
                         break
                     if split_amount <= 0:
                         valid_split = False
-                        local_issues.append("В разбивке каждая часть должна быть больше нуля.")
+                        local_issues.append("Р’ СЂР°Р·Р±РёРІРєРµ РєР°Р¶РґР°СЏ С‡Р°СЃС‚СЊ РґРѕР»Р¶РЅР° Р±С‹С‚СЊ Р±РѕР»СЊС€Рµ РЅСѓР»СЏ.")
                         break
                     split_total += split_amount
                     cleaned_split_items.append({
@@ -464,7 +464,7 @@ class ImportService:
 
                 if valid_split and amount_decimal is not None and split_total != amount_decimal:
                     valid_split = False
-                    local_issues.append("Сумма разбивки должна совпадать с суммой транзакции.")
+                    local_issues.append("РЎСѓРјРјР° СЂР°Р·Р±РёРІРєРё РґРѕР»Р¶РЅР° СЃРѕРІРїР°РґР°С‚СЊ СЃ СЃСѓРјРјРѕР№ С‚СЂР°РЅР·Р°РєС†РёРё.")
 
                 if valid_split and len(cleaned_split_items) >= 2:
                     normalized["split_items"] = cleaned_split_items
@@ -474,13 +474,13 @@ class ImportService:
             else:
                 normalized["split_items"] = []
                 if normalized.get("category_id") in (None, "", 0):
-                    local_issues.append("Не выбрана категория.")
+                    local_issues.append("РќРµ РІС‹Р±СЂР°РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
                     status = "warning"
         elif operation_type == "refund":
             normalized["target_account_id"] = None
             normalized["split_items"] = []
             if normalized.get("category_id") in (None, "", 0):
-                local_issues.append("Не выбрана категория.")
+                local_issues.append("РќРµ РІС‹Р±СЂР°РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
                 status = "warning"
         else:
             normalized["target_account_id"] = None
@@ -488,11 +488,11 @@ class ImportService:
             normalized["split_items"] = []
 
         if not normalized.get("description"):
-            local_issues.append("Пустое описание операции.")
+            local_issues.append("РџСѓСЃС‚РѕРµ РѕРїРёСЃР°РЅРёРµ РѕРїРµСЂР°С†РёРё.")
             status = "warning"
 
         if not normalized.get("transaction_date") and not normalized.get("date"):
-            local_issues.append("Не указана дата операции.")
+            local_issues.append("РќРµ СѓРєР°Р·Р°РЅР° РґР°С‚Р° РѕРїРµСЂР°С†РёРё.")
             status = "error"
 
         unique_issues = list(dict.fromkeys(local_issues))
@@ -556,22 +556,22 @@ class ImportService:
         session = self.get_session(user_id=user_id, session_id=session_id)
         account = self.account_repo.get_by_id_and_user(payload.account_id, user_id)
         if account is None:
-            raise ImportValidationError("Выбранный счёт не найден.")
+            raise ImportValidationError("Р’С‹Р±СЂР°РЅРЅС‹Р№ СЃС‡С‘С‚ РЅРµ РЅР°Р№РґРµРЅ.")
 
         tables = self._load_tables_from_session(session)
         if not tables:
-            raise ImportValidationError("Не удалось восстановить данные сессии импорта.")
+            raise ImportValidationError("РќРµ СѓРґР°Р»РѕСЃСЊ РІРѕСЃСЃС‚Р°РЅРѕРІРёС‚СЊ РґР°РЅРЅС‹Рµ СЃРµСЃСЃРёРё РёРјРїРѕСЂС‚Р°.")
 
         current_mapping = session.mapping_json or {}
         table_name = payload.table_name or current_mapping.get("selected_table") or tables[0].name
         table = next((item for item in tables if item.name == table_name), None)
         if table is None:
-            raise ImportValidationError("Выбранная таблица не найдена в источнике.")
+            raise ImportValidationError("Р’С‹Р±СЂР°РЅРЅР°СЏ С‚Р°Р±Р»РёС†Р° РЅРµ РЅР°Р№РґРµРЅР° РІ РёСЃС‚РѕС‡РЅРёРєРµ.")
         if not table.rows:
-            raise ImportValidationError("В выбранной таблице нет строк для импорта.")
+            raise ImportValidationError("Р’ РІС‹Р±СЂР°РЅРЅРѕР№ С‚Р°Р±Р»РёС†Рµ РЅРµС‚ СЃС‚СЂРѕРє РґР»СЏ РёРјРїРѕСЂС‚Р°.")
         if table.meta.get("schema") == "diagnostics":
             raise ImportValidationError(
-                "Структура этого PDF не распознана автоматически. Проверь диагностическую таблицу в результате извлечения и пришли файл для расширения шаблонов."
+                "РЎС‚СЂСѓРєС‚СѓСЂР° СЌС‚РѕРіРѕ PDF РЅРµ СЂР°СЃРїРѕР·РЅР°РЅР° Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё. РџСЂРѕРІРµСЂСЊ РґРёР°РіРЅРѕСЃС‚РёС‡РµСЃРєСѓСЋ С‚Р°Р±Р»РёС†Сѓ РІ СЂРµР·СѓР»СЊС‚Р°С‚Рµ РёР·РІР»РµС‡РµРЅРёСЏ Рё РїСЂРёС€Р»Рё С„Р°Р№Р» РґР»СЏ СЂР°СЃС€РёСЂРµРЅРёСЏ С€Р°Р±Р»РѕРЅРѕРІ."
             )
 
         detection = self.recognition_service.recognize(table=table)
@@ -613,20 +613,21 @@ class ImportService:
                 normalized.update(enrichment)
                 normalized["import_original_description"] = normalized.get("description")
 
-                # Категория — только по точному правилу TransactionCategoryRule.
+                # Сначала пытаемся взять точное правило TransactionCategoryRule,
+                # затем падаем назад на history/fuzzy suggestion из enrichment.
                 _norm_desc = enrichment.get("normalized_description") or ""
                 _cat_rule = (
                     self.category_rule_repo.get_best_rule(user_id=user_id, normalized_description=_norm_desc)
                     if _norm_desc
                     else None
                 )
-                normalized["category_id"] = _cat_rule.category_id if _cat_rule else None
+                normalized["category_id"] = _cat_rule.category_id if _cat_rule else enrichment.get("suggested_category_id")
 
                 normalized["operation_type"] = enrichment.get("suggested_operation_type") or self._resolve_operation_type(normalized)
                 normalized["type"] = enrichment.get("suggested_type") or normalized.get("direction") or "expense"
 
                 if str(normalized["operation_type"]) == "transfer":
-                    # account_id always = session account ("Счёт из выписки"), regardless of direction.
+                    # account_id always = session account ("РЎС‡С‘С‚ РёР· РІС‹РїРёСЃРєРё"), regardless of direction.
                     # target_account_id = the OTHER side of the transfer (source for income, dest for expense).
                     # _create_transfer_pair uses normalized["type"] to determine which side is expense/income.
                     normalized["account_id"] = payload.account_id
@@ -652,14 +653,14 @@ class ImportService:
                 _raw_account_id = normalized.get("account_id")
                 if _raw_account_id in (None, "", 0):
                     if current_operation_type == "transfer":
-                        issues.append("Не удалось определить счёт из выписки — укажи вручную.")
+                        issues.append("РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ СЃС‡С‘С‚ РёР· РІС‹РїРёСЃРєРё вЂ” СѓРєР°Р¶Рё РІСЂСѓС‡РЅСѓСЋ.")
                         status = "warning"
                     current_account_id = 0
                 else:
                     current_account_id = int(_raw_account_id)
 
                 # Transfer-specific deduplication: look for an existing transfer that already
-                # involves the session account on either side (same amount, date ±2 days).
+                # involves the session account on either side (same amount, date В±2 days).
                 # account_id is always the session account, so we always search by it.
                 if current_operation_type == "transfer":
                     # account_id is always the session account (always known).
@@ -673,7 +674,7 @@ class ImportService:
                         )
                         if transfer_pair_tx is not None:
                             status = "duplicate"
-                            issues.append("Вторая сторона уже импортированного перевода.")
+                            issues.append("Р’С‚РѕСЂР°СЏ СЃС‚РѕСЂРѕРЅР° СѓР¶Рµ РёРјРїРѕСЂС‚РёСЂРѕРІР°РЅРЅРѕРіРѕ РїРµСЂРµРІРѕРґР°.")
                             # Determine the other side account for the hint.
                             # The existing transaction record: account_id = its own account, target_account_id = other side.
                             if transfer_pair_tx.account_id == current_account_id:
@@ -691,25 +692,25 @@ class ImportService:
                     account_id=current_account_id,
                     amount=amount_decimal,
                     transaction_date=transaction_dt,
-                    description=normalized.get("description"),
+                    normalized_description=normalized.get("normalized_description"),
                 )
                 if duplicate and payload.skip_duplicates:
                     status = "duplicate"
-                    issues.append("Похоже на уже существующую транзакцию.")
+                    issues.append("РџРѕС…РѕР¶Рµ РЅР° СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓСЋС‰СѓСЋ С‚СЂР°РЅР·Р°РєС†РёСЋ.")
                 elif duplicate:
                     status = "warning"
-                    issues.append("Возможный дубликат, проверь перед импортом.")
+                    issues.append("Р’РѕР·РјРѕР¶РЅС‹Р№ РґСѓР±Р»РёРєР°С‚, РїСЂРѕРІРµСЂСЊ РїРµСЂРµРґ РёРјРїРѕСЂС‚РѕРј.")
 
                 if enrichment.get("needs_manual_review") and status == "ready":
                     status = "warning"
 
-                # Если нет правила для этой операции — требуется ручное подтверждение категории.
+                # Р•СЃР»Рё РЅРµС‚ РїСЂР°РІРёР»Р° РґР»СЏ СЌС‚РѕР№ РѕРїРµСЂР°С†РёРё вЂ” С‚СЂРµР±СѓРµС‚СЃСЏ СЂСѓС‡РЅРѕРµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РєР°С‚РµРіРѕСЂРёРё.
                 _requires_category = (
                     str(normalized.get("type") or "") == "expense"
                     and str(normalized.get("operation_type") or "") not in NON_ANALYTICS_OPERATION_TYPES
                 )
                 if _requires_category and not normalized.get("category_id"):
-                    issues.append("Категория не определена — укажи вручную.")
+                    issues.append("РљР°С‚РµРіРѕСЂРёСЏ РЅРµ РѕРїСЂРµРґРµР»РµРЅР° вЂ” СѓРєР°Р¶Рё РІСЂСѓС‡РЅСѓСЋ.")
                     if status == "ready":
                         status = "warning"
 
@@ -778,7 +779,7 @@ class ImportService:
     def set_row_label(self, *, user_id: int, row_id: int, user_label: str) -> dict[str, Any]:
         session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
         if session_row is None:
-            raise ImportNotFoundError("Строка импорта не найдена.")
+            raise ImportNotFoundError("РЎС‚СЂРѕРєР° РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
 
         _, row = session_row
         normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
@@ -789,11 +790,11 @@ class ImportService:
         operation_type = normalized.get("operation_type") or "regular"
 
         if not norm_desc:
-            raise ImportValidationError("Строка не содержит нормализованного описания для создания правила.")
+            raise ImportValidationError("РЎС‚СЂРѕРєР° РЅРµ СЃРѕРґРµСЂР¶РёС‚ РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅРѕРіРѕ РѕРїРёСЃР°РЅРёСЏ РґР»СЏ СЃРѕР·РґР°РЅРёСЏ РїСЂР°РІРёР»Р°.")
         if not category_id:
-            raise ImportValidationError("Строка не содержит категории для создания правила.")
+            raise ImportValidationError("РЎС‚СЂРѕРєР° РЅРµ СЃРѕРґРµСЂР¶РёС‚ РєР°С‚РµРіРѕСЂРёРё РґР»СЏ СЃРѕР·РґР°РЅРёСЏ РїСЂР°РІРёР»Р°.")
         if operation_type in NON_ANALYTICS_OPERATION_TYPES:
-            raise ImportValidationError("Для данного типа операции правило классификации не применяется.")
+            raise ImportValidationError("Р”Р»СЏ РґР°РЅРЅРѕРіРѕ С‚РёРїР° РѕРїРµСЂР°С†РёРё РїСЂР°РІРёР»Рѕ РєР»Р°СЃСЃРёС„РёРєР°С†РёРё РЅРµ РїСЂРёРјРµРЅСЏРµС‚СЃСЏ.")
 
         rule = self.category_rule_repo.upsert(
             user_id=user_id,
@@ -818,7 +819,7 @@ class ImportService:
         import_rows = self.import_repo.get_rows(session_id=session.id)
 
         if not import_rows:
-            raise ImportValidationError("Нет подготовленных строк для импорта.")
+            raise ImportValidationError("РќРµС‚ РїРѕРґРіРѕС‚РѕРІР»РµРЅРЅС‹С… СЃС‚СЂРѕРє РґР»СЏ РёРјРїРѕСЂС‚Р°.")
 
         imported_count = 0
         skipped_count = 0
@@ -870,7 +871,7 @@ class ImportService:
                 row.status = "error"
                 row.errors = list(
                     dict.fromkeys(
-                        [*(row.errors or []), "Строка не содержит корректных данных для создания транзакции."]
+                        [*(row.errors or []), "РЎС‚СЂРѕРєР° РЅРµ СЃРѕРґРµСЂР¶РёС‚ РєРѕСЂСЂРµРєС‚РЅС‹С… РґР°РЅРЅС‹С… РґР»СЏ СЃРѕР·РґР°РЅРёСЏ С‚СЂР°РЅР·Р°РєС†РёРё."]
                     )
                 )
                 self.import_repo.update_row(row, status=row.status, errors=row.errors, review_required=True)
@@ -954,7 +955,7 @@ class ImportService:
     def _create_transfer_pair(
         self, *, user_id: int, payload: dict[str, Any]
     ) -> tuple[TransactionModel, TransactionModel]:
-        """Creates two linked Transfer transactions — one per account side — and applies balance effects."""
+        """Creates two linked Transfer transactions вЂ” one per account side вЂ” and applies balance effects."""
         account_id = int(payload["account_id"])
         target_account_id = int(payload["target_account_id"])
         amount = ImportService._to_decimal(payload["amount"])
@@ -964,11 +965,11 @@ class ImportService:
         needs_review = bool(payload.get("needs_review"))
         normalized_description = self.enrichment.normalize_description(description)
 
-        # account_id is the SESSION account ("Счёт из выписки").
+        # account_id is the SESSION account ("РЎС‡С‘С‚ РёР· РІС‹РїРёСЃРєРё").
         # target_account_id is the OTHER side of the transfer.
         # The 'type' field on the import row determines direction:
-        #   type="income": session received money → session is income side, other is expense side.
-        #   type="expense": session sent money → session is expense side, other is income side.
+        #   type="income": session received money в†’ session is income side, other is expense side.
+        #   type="expense": session sent money в†’ session is expense side, other is income side.
         tx_type = str(payload.get("type") or "expense")
         if tx_type == "income":
             expense_account_id = target_account_id
@@ -981,9 +982,9 @@ class ImportService:
         income_account = self.account_repo.get_by_id_and_user_for_update(income_account_id, user_id)
 
         if expense_account is None:
-            raise ImportValidationError("Счёт списания не найден.")
+            raise ImportValidationError("РЎС‡С‘С‚ СЃРїРёСЃР°РЅРёСЏ РЅРµ РЅР°Р№РґРµРЅ.")
         if income_account is None:
-            raise ImportValidationError("Счёт поступления не найден.")
+            raise ImportValidationError("РЎС‡С‘С‚ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ РЅРµ РЅР°Р№РґРµРЅ.")
 
         t_expense = TransactionModel(
             user_id=user_id,
@@ -1049,15 +1050,15 @@ class ImportService:
         operation_type = normalized.get("operation_type")
 
         if account_id in (None, "", 0):
-            raise ValueError("Не указан счёт для транзакции.")
+            raise ValueError("РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РґР»СЏ С‚СЂР°РЅР·Р°РєС†РёРё.")
         if amount in (None, ""):
-            raise ValueError("Не указана сумма транзакции.")
+            raise ValueError("РќРµ СѓРєР°Р·Р°РЅР° СЃСѓРјРјР° С‚СЂР°РЅР·Р°РєС†РёРё.")
         if not currency:
-            raise ValueError("Не указана валюта транзакции.")
+            raise ValueError("РќРµ СѓРєР°Р·Р°РЅР° РІР°Р»СЋС‚Р° С‚СЂР°РЅР·Р°РєС†РёРё.")
         if not tx_type:
-            raise ValueError("Не указан тип транзакции.")
+            raise ValueError("РќРµ СѓРєР°Р·Р°РЅ С‚РёРї С‚СЂР°РЅР·Р°РєС†РёРё.")
         if not operation_type:
-            raise ValueError("Не указан operation_type транзакции.")
+            raise ValueError("РќРµ СѓРєР°Р·Р°РЅ operation_type С‚СЂР°РЅР·Р°РєС†РёРё.")
 
         base_payload: dict[str, Any] = {
             "account_id": int(account_id),
@@ -1118,10 +1119,10 @@ class ImportService:
             payloads: list[dict[str, Any]] = []
             for item in split_items:
                 if not isinstance(item, dict):
-                    raise ValueError("Разбивка заполнена некорректно.")
+                    raise ValueError("Р Р°Р·Р±РёРІРєР° Р·Р°РїРѕР»РЅРµРЅР° РЅРµРєРѕСЂСЂРµРєС‚РЅРѕ.")
                 category_id = item.get("category_id")
                 if category_id in (None, "", 0):
-                    raise ValueError("В разбивке для каждой части нужна категория.")
+                    raise ValueError("Р’ СЂР°Р·Р±РёРІРєРµ РґР»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё РЅСѓР¶РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
                 split_amount = ImportService._to_decimal(item.get("amount"))
                 description = (item.get("description") or base_payload["description"] or "")[:1000]
                 payloads.append({
@@ -1143,9 +1144,9 @@ class ImportService:
         if isinstance(value, str):
             cleaned = value.strip().replace(" ", "").replace(",", ".")
             if not cleaned:
-                raise ValueError("Пустое значение суммы.")
+                raise ValueError("РџСѓСЃС‚РѕРµ Р·РЅР°С‡РµРЅРёРµ СЃСѓРјРјС‹.")
             return Decimal(cleaned)
-        raise TypeError("Некорректный формат суммы.")
+        raise TypeError("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ С„РѕСЂРјР°С‚ СЃСѓРјРјС‹.")
 
     @staticmethod
     def _to_datetime(value: Any) -> datetime:
@@ -1153,7 +1154,7 @@ class ImportService:
             return value
         if isinstance(value, str):
             return datetime.fromisoformat(value)
-        raise TypeError("Некорректный формат даты транзакции.")
+        raise TypeError("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ С„РѕСЂРјР°С‚ РґР°С‚С‹ С‚СЂР°РЅР·Р°РєС†РёРё.")
 
     @staticmethod
     def _detect_extension(filename: str) -> str:
@@ -1219,16 +1220,39 @@ class ImportService:
         account_id: int,
         amount: Decimal,
         transaction_date: datetime,
-        description: str | None,
+        normalized_description: str | None,
     ) -> bool:
-        description = (description or "").strip()
-        candidates = self.transaction_repo.find_nearby_duplicates(
+        # РЈСЂРѕРІРµРЅСЊ 1: СЃС‚СЂРѕРіРѕРµ СЃРѕРІРїР°РґРµРЅРёРµ вЂ” (СЃС‡С‘С‚ + СЃСѓРјРјР° + РґР°С‚Р° В±1 РґРµРЅСЊ).
+        # Р‘Р°РЅРєРѕРІСЃРєРёРµ РґР°С‚С‹ РјРѕРіСѓС‚ СЃРґРІРёРіР°С‚СЊСЃСЏ РЅР° СЃСѓС‚РєРё РёР·-Р·Р° TZ. Р•СЃР»Рё С‚СЂРѕР№РєР° СЃРѕРІРїР°Р»Р°,
+        # СЃС‡РёС‚Р°РµРј РґСѓР±Р»РµРј Р‘Р•Р— РїСЂРѕРІРµСЂРєРё РѕРїРёСЃР°РЅРёСЏ: РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕРі РїРµСЂРµРёРјРµРЅРѕРІР°С‚СЊ
+        # С‚СЂР°РЅР·Р°РєС†РёСЋ РїРѕСЃР»Рµ РїРµСЂРІРѕРіРѕ РёРјРїРѕСЂС‚Р°, РёР·-Р·Р° С‡РµРіРѕ description РёР·РјРµРЅРёР»СЃСЏ.
+        exact_candidates = self.transaction_repo.find_nearby_duplicates(
             user_id=user_id,
             account_id=account_id,
             amount=amount,
             transaction_date=transaction_date,
+            days_window=1,
         )
-        return any((item.description or "").strip() == description for item in candidates)
+        if exact_candidates:
+            return True
+
+        # РЈСЂРѕРІРµРЅСЊ 2: СЂР°СЃС€РёСЂРµРЅРЅС‹Р№ РґРёР°РїР°Р·РѕРЅ В±3 РґРЅСЏ вЂ” С‚РѕР»СЊРєРѕ РµСЃР»Рё СЃРѕРІРїР°РґР°РµС‚
+        # normalized_description. РќСѓР¶РµРЅ РґР»СЏ СЂРµРґРєРёС… СЃР»СѓС‡Р°РµРІ Р·Р°РґРµСЂР¶РєРё РїСЂРѕРІРµРґРµРЅРёСЏ РїР»Р°С‚РµР¶Р°.
+        incoming_norm = (normalized_description or "").strip().lower()
+        if not incoming_norm:
+            return False
+
+        wide_candidates = self.transaction_repo.find_nearby_duplicates(
+            user_id=user_id,
+            account_id=account_id,
+            amount=amount,
+            transaction_date=transaction_date,
+            days_window=3,
+        )
+        return any(
+            (item.normalized_description or "").strip().lower() == incoming_norm
+            for item in wide_candidates
+        )
 
     def _find_transfer_pair_duplicate(
         self,
