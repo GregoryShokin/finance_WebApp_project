@@ -27,6 +27,8 @@ class GoalResponse(BaseModel):
     target_amount: Decimal
     deadline: date | None
     status: str
+    is_system: bool
+    system_key: str | None
     created_at: datetime
     updated_at: datetime
 

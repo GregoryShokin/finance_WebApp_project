@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -14,6 +14,10 @@ class GoalStatus(str, Enum):
     active = "active"
     achieved = "achieved"
     archived = "archived"
+
+
+class GoalSystemKey(str, Enum):
+    safety_buffer = "safety_buffer"
 
 
 class Goal(Base):
@@ -32,6 +36,13 @@ class Goal(Base):
         default=GoalStatus.active.value,
         server_default=GoalStatus.active.value,
     )
+    is_system: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default='0',
+    )
+    system_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

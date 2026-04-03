@@ -1,4 +1,5 @@
 export type GoalStatus = 'active' | 'achieved' | 'archived';
+export type GoalSystemKey = 'safety_buffer';
 
 export type Goal = {
   id: number;
@@ -7,6 +8,8 @@ export type Goal = {
   target_amount: number;
   deadline: string | null;
   status: GoalStatus;
+  is_system: boolean;
+  system_key: GoalSystemKey | null;
   created_at: string;
   updated_at: string;
 };

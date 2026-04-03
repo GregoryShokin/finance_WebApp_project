@@ -3,31 +3,28 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
 from app.models.user import User
-from app.schemas.goal import (
-    GoalCreateRequest,
-    GoalUpdateRequest,
-    GoalWithProgressResponse,
-    GoalResponse,
-)
+from app.schemas.goal import GoalCreateRequest, GoalUpdateRequest, GoalWithProgressResponse, GoalResponse
 from app.services.goal_service import GoalNotFoundError, GoalService, GoalValidationError
 
 router = APIRouter(prefix="/goals", tags=["Goals"])
 
 
-def _to_progress_response(p) -> GoalWithProgressResponse:
+def _to_progress_response(progress) -> GoalWithProgressResponse:
     return GoalWithProgressResponse(
-        id=p.goal.id,
-        user_id=p.goal.user_id,
-        name=p.goal.name,
-        target_amount=p.goal.target_amount,
-        deadline=p.goal.deadline,
-        status=p.goal.status,
-        created_at=p.goal.created_at,
-        updated_at=p.goal.updated_at,
-        saved=p.saved,
-        percent=p.percent,
-        remaining=p.remaining,
-        monthly_needed=p.monthly_needed,
+        id=progress.goal.id,
+        user_id=progress.goal.user_id,
+        name=progress.goal.name,
+        target_amount=progress.goal.target_amount,
+        deadline=progress.goal.deadline,
+        status=progress.goal.status,
+        is_system=progress.goal.is_system,
+        system_key=progress.goal.system_key,
+        created_at=progress.goal.created_at,
+        updated_at=progress.goal.updated_at,
+        saved=progress.saved,
+        percent=progress.percent,
+        remaining=progress.remaining,
+        monthly_needed=progress.monthly_needed,
     )
 
 
@@ -53,7 +50,7 @@ def list_goals(
     current_user: User = Depends(get_current_user),
 ):
     service = GoalService(db)
-    return [_to_progress_response(p) for p in service.get_goals(current_user.id)]
+    return [_to_progress_response(progress) for progress in service.get_goals(current_user.id)]
 
 
 @router.get("/{goal_id}", response_model=GoalWithProgressResponse)
@@ -79,6 +76,7 @@ def update_goal(
     service = GoalService(db)
     data = payload.model_dump(exclude_unset=True)
     from app.services.goal_service import _UNSET
+
     try:
         goal = service.update_goal(
             goal_id=goal_id,
@@ -105,3 +103,5 @@ def archive_goal(
         return service.archive_goal(goal_id, current_user.id)
     except GoalNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except GoalValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
