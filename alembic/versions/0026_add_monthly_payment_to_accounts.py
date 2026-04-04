@@ -1,7 +1,7 @@
 """add monthly payment to accounts
 
-Revision ID: 0026_add_monthly_payment_to_accounts
-Revises: 0025_add_credit_early_repayment_operation_type
+Revision ID: 0026_monthly_payment
+Revises: 0025_credit_early_repayment
 Create Date: 2026-04-04 00:00:00.000000
 """
 
@@ -11,8 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0026_add_monthly_payment_to_accounts"
-down_revision = "0025_add_credit_early_repayment_operation_type"
+revision = "0026_monthly_payment"
+down_revision = "0025_credit_early_repayment"
 branch_labels = None
 depends_on = None
 
