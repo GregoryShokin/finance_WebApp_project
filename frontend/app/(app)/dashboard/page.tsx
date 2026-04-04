@@ -187,8 +187,9 @@ export default function DashboardPage() {
               />
               <CreditsWidget
                 accounts={accountsQuery.data ?? []}
+                transactions={transactionsQuery.data ?? []}
                 health={health}
-                isLoading={accountsQuery.isLoading}
+                isLoading={accountsQuery.isLoading || transactionsQuery.isLoading}
               />
             </div>
           </section>

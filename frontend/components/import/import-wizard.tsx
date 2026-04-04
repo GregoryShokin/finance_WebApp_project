@@ -67,7 +67,7 @@ type MappingState = {
 type MainOperationType = 'regular' | 'investment' | 'debt' | 'refund' | 'transfer' | 'credit_operation';
 type InvestmentDirection = '' | 'buy' | 'sell';
 type DebtDirection = '' | 'lent' | 'borrowed' | 'repaid' | 'collected';
-type CreditOperationKind = '' | 'disbursement' | 'payment';
+type CreditOperationKind = '' | 'disbursement' | 'payment' | 'early_repayment';
 
 type RowEditState = {
   account_id: string;
@@ -159,7 +159,7 @@ function normalize(value: string) {
 }
 
 function isLoanAccount(account: Account) {
-  return account.account_type === 'credit' || account.is_credit;
+  return account.account_type === 'credit' || account.account_type === 'credit_card' || account.is_credit;
 }
 
 function isSelectableTransactionAccount(account: Account) {
@@ -241,6 +241,9 @@ function mapOperationToUi(
   if (operationType === 'credit_payment') {
     return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'payment' };
   }
+  if (operationType === 'credit_early_repayment') {
+    return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'early_repayment' };
+  }
   return { mainType: 'regular', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
 }
 
@@ -254,7 +257,15 @@ function resolveOperationFields(form: RowEditState): Pick<RowEditState, 'operati
     return { operation_type: 'debt', type: form.debt_direction === 'borrowed' || form.debt_direction === 'collected' ? 'income' : 'expense' };
   }
   if (form.main_type === 'credit_operation') {
-    return { operation_type: form.credit_operation_kind === 'disbursement' ? 'credit_disbursement' : 'credit_payment', type: form.credit_operation_kind === 'disbursement' ? 'income' : 'expense' };
+    return {
+      operation_type:
+        form.credit_operation_kind === 'disbursement'
+          ? 'credit_disbursement'
+          : form.credit_operation_kind === 'early_repayment'
+            ? 'credit_early_repayment'
+            : 'credit_payment',
+      type: form.credit_operation_kind === 'disbursement' ? 'income' : 'expense',
+    };
   }
   return { operation_type: 'regular', type: form.type };
 }
@@ -378,10 +389,13 @@ function buildRowUpdatePayload(
     account_id: form.account_id ? Number(form.account_id) : null,
     target_account_id: resolved.operation_type === 'transfer'
       ? (form.target_account_id ? Number(form.target_account_id) : null)
-      : resolved.operation_type === 'credit_payment'
+      : resolved.operation_type === 'credit_payment' || resolved.operation_type === 'credit_early_repayment'
         ? (form.credit_account_id ? Number(form.credit_account_id) : null)
         : null,
-    credit_account_id: resolved.operation_type === 'credit_payment' ? (form.credit_account_id ? Number(form.credit_account_id) : null) : null,
+    credit_account_id:
+      resolved.operation_type === 'credit_payment' || resolved.operation_type === 'credit_early_repayment'
+        ? (form.credit_account_id ? Number(form.credit_account_id) : null)
+        : null,
     category_id: resolved.operation_type === 'regular' || resolved.operation_type === 'refund' ? (splitPayload && splitPayload.length >= 2 ? null : form.category_id ? Number(form.category_id) : null) : null,
     counterparty_id: resolved.operation_type === 'debt' ? (form.counterparty_id ? Number(form.counterparty_id) : null) : null,
     amount: toNumericValue(form.amount),
@@ -391,8 +405,16 @@ function buildRowUpdatePayload(
     description: form.description,
     transaction_date: form.transaction_date ? new Date(form.transaction_date).toISOString() : null,
     currency: form.currency,
-    credit_principal_amount: resolved.operation_type === 'credit_payment' ? toNumericValue(form.credit_principal_amount) : null,
-    credit_interest_amount: resolved.operation_type === 'credit_payment' ? toNumericValue(form.credit_interest_amount) : null,
+    credit_principal_amount:
+      resolved.operation_type === 'credit_payment' || resolved.operation_type === 'credit_early_repayment'
+        ? toNumericValue(form.credit_principal_amount)
+        : null,
+    credit_interest_amount:
+      resolved.operation_type === 'credit_payment'
+        ? toNumericValue(form.credit_interest_amount)
+        : resolved.operation_type === 'credit_early_repayment'
+          ? 0
+          : null,
     split_items: splitPayload,
   };
 }
@@ -495,7 +517,7 @@ export function ImportWizard() {
         const nextTargetAccountId = form.main_type === 'transfer'
           ? resolveTransactionAccountId(accounts, form.target_account_id, '')
           : '';
-        const nextCreditAccountId = form.main_type === 'credit_operation' && form.credit_operation_kind === 'payment'
+        const nextCreditAccountId = form.main_type === 'credit_operation' && (form.credit_operation_kind === 'payment' || form.credit_operation_kind === 'early_repayment')
           ? resolveCreditAccountId(accounts, form.credit_account_id)
           : '';
 
@@ -1454,15 +1476,15 @@ export function ImportWizard() {
                                 type: nextKind === 'disbursement' ? 'income' : 'expense',
                                 category_id: '',
                                 target_account_id: '',
-                                credit_account_id: nextKind === 'payment' ? form.credit_account_id : '',
-                                credit_principal_amount: nextKind === 'payment' ? form.credit_principal_amount : '',
-                                credit_interest_amount: nextKind === 'payment' ? form.credit_interest_amount : '',
+                                credit_account_id: nextKind === 'payment' || nextKind === 'early_repayment' ? form.credit_account_id : '',
+                                credit_principal_amount: nextKind === 'payment' || nextKind === 'early_repayment' ? form.credit_principal_amount : '',
+                                credit_interest_amount: nextKind === 'payment' ? form.credit_interest_amount : nextKind === 'early_repayment' ? '0' : '',
                               });
                               updateRowQuery(row.id, { credit_operation_kind: item.label });
                             }}
                             showAllOnFocus
                           />
-                          {form.credit_operation_kind === 'payment' ? (
+                          {form.credit_operation_kind === 'payment' || form.credit_operation_kind === 'early_repayment' ? (
                             <SearchSelect
                               id={`row-credit-account-${row.id}`}
                               label="Кредит"
@@ -1507,16 +1529,18 @@ export function ImportWizard() {
                         />
                       )}
 
-                      {form.main_type === 'credit_operation' && form.credit_operation_kind === 'payment' ? (
+                      {form.main_type === 'credit_operation' && (form.credit_operation_kind === 'payment' || form.credit_operation_kind === 'early_repayment') ? (
                         <>
                           <div>
-                            <label className="mb-2 block text-sm font-medium text-slate-700">Основной долг</label>
+                            <label className="mb-2 block text-sm font-medium text-slate-700">???????? ????</label>
                             <Input value={form.credit_principal_amount} onChange={(event) => updateRowForm(row.id, { credit_principal_amount: event.target.value })} />
                           </div>
-                          <div>
-                            <label className="mb-2 block text-sm font-medium text-slate-700">Проценты</label>
-                            <Input value={form.credit_interest_amount} onChange={(event) => updateRowForm(row.id, { credit_interest_amount: event.target.value })} />
-                          </div>
+                          {form.credit_operation_kind === 'payment' ? (
+                            <div>
+                              <label className="mb-2 block text-sm font-medium text-slate-700">????????</label>
+                              <Input value={form.credit_interest_amount} onChange={(event) => updateRowForm(row.id, { credit_interest_amount: event.target.value })} />
+                            </div>
+                          ) : null}
                         </>
                       ) : null}
 

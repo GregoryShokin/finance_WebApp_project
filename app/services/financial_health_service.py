@@ -80,7 +80,10 @@ class FinancialHealthService:
             monthly_totals.get(window.key, {"income": ZERO, "expense": ZERO})["income"]
             for window in tracked_windows
         ]) if tracked_windows else ZERO
-        dti_total_payments = self._current_month_credit_payments(active_accounts=active_accounts, transactions=transactions, window=current_month)
+        dti_total_payments = self._calc_dti_payments(
+            active_accounts=active_accounts,
+            transactions=transactions,
+        )
         dti = self._percent(dti_total_payments, average_income)
         dti_zone = self._dti_zone(dti)
 
@@ -238,28 +241,53 @@ class FinancialHealthService:
         carry_over_days = float((carry_amount / daily_limit).quantize(TWOPLACES)) if daily_limit > 0 else 0.0
         return daily_limit, daily_limit_with_carry, carry_over_days
 
-    def _current_month_credit_payments(
+    def _calc_dti_payments(
         self,
         *,
         active_accounts: list[Account],
         transactions: list[Transaction],
-        window: MonthWindow,
     ) -> Decimal:
-        credit_account_ids = {
-            account.id
-            for account in active_accounts
-            if account.is_credit or account.account_type in {"credit", "credit_card"}
-        }
-        total = ZERO
+        """
+        Суммарный ежемесячный платёж по кредитам для DTI.
+
+        Для каждого кредитного счёта:
+        1. Последний фактический credit_payment из транзакций
+        2. Если его нет — monthly_payment в карточке счёта
+        3. Если нет и его — 0
+        """
+        last_payment_by_account: dict[int, Decimal] = {}
+        last_payment_date_by_account: dict[int, datetime] = {}
+
         for transaction in transactions:
-            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
-            if not (window.month_start <= tx_date <= window.month_end):
+            if transaction.operation_type != "credit_payment":
                 continue
-            if transaction.type != "expense":
+            account_id = transaction.credit_account_id or transaction.target_account_id
+            if account_id is None:
                 continue
-            if transaction.account_id not in credit_account_ids and transaction.credit_account_id not in credit_account_ids:
+            tx_date = transaction.transaction_date
+            existing_date = last_payment_date_by_account.get(account_id)
+            if existing_date is None or tx_date > existing_date:
+                last_payment_by_account[account_id] = self._to_decimal(transaction.amount)
+                last_payment_date_by_account[account_id] = tx_date
+
+        total = ZERO
+        for account in active_accounts:
+            is_credit_account = (
+                account.account_type in {"credit", "credit_card"}
+                or bool(account.is_credit)
+            )
+            if not is_credit_account:
                 continue
-            total += self._to_decimal(transaction.amount)
+
+            payment = last_payment_by_account.get(account.id)
+            if payment is None or payment == ZERO:
+                fallback = getattr(account, "monthly_payment", None)
+                if fallback is not None:
+                    payment = self._to_decimal(fallback)
+
+            if payment and payment > ZERO:
+                total += payment
+
         return total.quantize(TWOPLACES)
 
     def _current_capital_snapshot(

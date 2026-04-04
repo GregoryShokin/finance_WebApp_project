@@ -22,6 +22,7 @@ class TransactionOperationType(str, Enum):
     investment_sell = "investment_sell"
     credit_disbursement = "credit_disbursement"
     credit_payment = "credit_payment"
+    credit_early_repayment = "credit_early_repayment"
     credit_interest = "credit_interest"
     debt = "debt"
     refund = "refund"

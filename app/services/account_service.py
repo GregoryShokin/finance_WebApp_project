@@ -42,6 +42,7 @@ class AccountService:
             data["credit_interest_rate"] = None
             data["credit_term_remaining"] = None
             data["credit_limit_original"] = None
+            data["monthly_payment"] = None
 
         return data
 

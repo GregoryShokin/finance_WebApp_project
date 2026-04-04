@@ -19,6 +19,7 @@ class Account(Base):
     credit_current_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     credit_interest_rate: Mapped[Decimal | None] = mapped_column(Numeric(8, 3), nullable=True)
     credit_term_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    monthly_payment: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

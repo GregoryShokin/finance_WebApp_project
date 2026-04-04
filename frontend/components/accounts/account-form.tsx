@@ -23,6 +23,7 @@ const defaultValues: AccountFormValues = {
   credit_current_amount: null,
   credit_interest_rate: null,
   credit_term_remaining: null,
+  monthly_payment: null,
 };
 
 export function AccountForm({
@@ -75,6 +76,7 @@ export function AccountForm({
         credit_current_amount: initialData.credit_current_amount != null ? Number(initialData.credit_current_amount) : null,
         credit_interest_rate: initialData.credit_interest_rate != null ? Number(initialData.credit_interest_rate) : null,
         credit_term_remaining: initialData.credit_term_remaining ?? null,
+        monthly_payment: initialData.monthly_payment != null ? Number(initialData.monthly_payment) : null,
       });
       return;
     }
@@ -91,6 +93,7 @@ export function AccountForm({
       credit_current_amount: initialValues?.credit_current_amount ?? null,
       credit_interest_rate: initialValues?.credit_interest_rate ?? null,
       credit_term_remaining: initialValues?.credit_term_remaining ?? null,
+      monthly_payment: initialValues?.monthly_payment ?? null,
     });
   }, [accountTypeItems, initialData, initialValues, reset]);
 
@@ -110,6 +113,7 @@ export function AccountForm({
           credit_current_amount: isCredit ? Number(values.credit_current_amount) : null,
           credit_interest_rate: isCredit ? Number(values.credit_interest_rate) : null,
           credit_term_remaining: isCredit ? Number(values.credit_term_remaining) : null,
+          monthly_payment: isCredit || isCreditCard ? (values.monthly_payment || null) : null,
         };
         onSubmit(payload);
       })}
@@ -222,6 +226,22 @@ export function AccountForm({
             <Input id="credit-card-balance" type="number" step="0.01" placeholder="0" {...register('balance', { required: 'Укажи текущий баланс', valueAsNumber: true, validate: (value) => Number.isFinite(value) || 'Введите корректное число' })} />
             {errors.balance ? <p className="mt-1 text-sm text-danger">{errors.balance.message}</p> : null}
           </div>
+        </div>
+      ) : null}
+
+      {isCredit || isCreditCard ? (
+        <div>
+          <Label htmlFor="monthly-payment">Ежемесячный платёж</Label>
+          <Input
+            id="monthly-payment"
+            type="number"
+            step="0.01"
+            placeholder="Укажи размер платежа из договора"
+            {...register('monthly_payment', { valueAsNumber: true })}
+          />
+          <p className="mt-1 text-xs text-slate-400">
+            Необязательно · используется до первого внесённого платежа
+          </p>
         </div>
       ) : null}
 

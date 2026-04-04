@@ -55,7 +55,7 @@ NON_ANALYTICS_OPERATION_TYPES = {
     "investment_buy",
     "investment_sell",
     "credit_disbursement",
-    "credit_payment",
+    "credit_early_repayment",
     "debt",
 }
 
@@ -102,7 +102,7 @@ class TransactionService:
     def create_transaction(self, *, user_id: int, payload: dict[str, Any]) -> Transaction:
         account_id = payload.get("account_id")
         if account_id is None:
-            raise TransactionValidationError("Не указан счет списания/зачисления.")
+            raise TransactionValidationError("РќРµ СѓРєР°Р·Р°РЅ СЃС‡РµС‚ СЃРїРёСЃР°РЅРёСЏ/Р·Р°С‡РёСЃР»РµРЅРёСЏ.")
 
         payload["user_id"] = user_id
         payload = self._prepare_payload(payload)
@@ -110,7 +110,7 @@ class TransactionService:
 
         account = self.account_repo.get_by_id_and_user_for_update(account_id, user_id)
         if not account:
-            raise TransactionValidationError("Счет не найден.")
+            raise TransactionValidationError("РЎС‡РµС‚ РЅРµ РЅР°Р№РґРµРЅ.")
 
         target_account = self._get_target_account_for_create(user_id=user_id, payload=payload, source_account=account)
 
@@ -131,11 +131,11 @@ class TransactionService:
     def update_transaction(self, *, user_id: int, transaction_id: int, updates: dict[str, Any]) -> Transaction:
         transaction = self.transaction_repo.get_by_id_for_update(transaction_id=transaction_id, user_id=user_id)
         if not transaction:
-            raise TransactionNotFoundError("Транзакция не найдена")
+            raise TransactionNotFoundError("РўСЂР°РЅР·Р°РєС†РёСЏ РЅРµ РЅР°Р№РґРµРЅР°")
 
         old_account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
         if not old_account:
-            raise TransactionValidationError("Счет транзакции не найден.")
+            raise TransactionValidationError("РЎС‡РµС‚ С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ РЅР°Р№РґРµРЅ.")
 
         old_target_account = None
         if transaction.target_account_id is not None:
@@ -143,10 +143,10 @@ class TransactionService:
 
         effective = self._build_effective_update_payload(transaction=transaction, updates=updates)
 
-        # Любое редактирование уже подтверждённой транзакции должно снова отправлять её
-        # на проверку. Обратный перевод в "Готово" разрешаем только для транзакций,
-        # которые уже находятся в статусе needs_review=True, например через кнопку
-        # подтверждения на странице review.
+        # Р›СЋР±РѕРµ СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ СѓР¶Рµ РїРѕРґС‚РІРµСЂР¶РґС‘РЅРЅРѕР№ С‚СЂР°РЅР·Р°РєС†РёРё РґРѕР»Р¶РЅРѕ СЃРЅРѕРІР° РѕС‚РїСЂР°РІР»СЏС‚СЊ РµС‘
+        # РЅР° РїСЂРѕРІРµСЂРєСѓ. РћР±СЂР°С‚РЅС‹Р№ РїРµСЂРµРІРѕРґ РІ "Р“РѕС‚РѕРІРѕ" СЂР°Р·СЂРµС€Р°РµРј С‚РѕР»СЊРєРѕ РґР»СЏ С‚СЂР°РЅР·Р°РєС†РёР№,
+        # РєРѕС‚РѕСЂС‹Рµ СѓР¶Рµ РЅР°С…РѕРґСЏС‚СЃСЏ РІ СЃС‚Р°С‚СѓСЃРµ needs_review=True, РЅР°РїСЂРёРјРµСЂ С‡РµСЂРµР· РєРЅРѕРїРєСѓ
+        # РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ РЅР° СЃС‚СЂР°РЅРёС†Рµ review.
         if transaction.needs_review:
             if "needs_review" not in updates:
                 effective["needs_review"] = True
@@ -161,7 +161,7 @@ class TransactionService:
 
         new_account = self.account_repo.get_by_id_and_user_for_update(effective["account_id"], user_id)
         if not new_account:
-            raise TransactionValidationError("Новый счет транзакции не найден.")
+            raise TransactionValidationError("РќРѕРІС‹Р№ СЃС‡РµС‚ С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ РЅР°Р№РґРµРЅ.")
 
         new_target_account = self._get_target_account_for_create(user_id=user_id, payload=effective, source_account=new_account)
 
@@ -199,10 +199,10 @@ class TransactionService:
         )
 
     def _build_effective_update_payload(self, *, transaction: Transaction, updates: dict[str, Any]) -> dict[str, Any]:
-        """Собирает итоговый payload для update без затирания обязательных полей в None.
+        """РЎРѕР±РёСЂР°РµС‚ РёС‚РѕРіРѕРІС‹Р№ payload РґР»СЏ update Р±РµР· Р·Р°С‚РёСЂР°РЅРёСЏ РѕР±СЏР·Р°С‚РµР»СЊРЅС‹С… РїРѕР»РµР№ РІ None.
 
-        В review/import frontend иногда отправляет explicit null для полей, которые пользователь
-        фактически не менял. Для NOT NULL полей это приводило к IntegrityError на flush.
+        Р’ review/import frontend РёРЅРѕРіРґР° РѕС‚РїСЂР°РІР»СЏРµС‚ explicit null РґР»СЏ РїРѕР»РµР№, РєРѕС‚РѕСЂС‹Рµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ
+        С„Р°РєС‚РёС‡РµСЃРєРё РЅРµ РјРµРЅСЏР». Р”Р»СЏ NOT NULL РїРѕР»РµР№ СЌС‚Рѕ РїСЂРёРІРѕРґРёР»Рѕ Рє IntegrityError РЅР° flush.
         """
 
         def pick(key: str, current: Any, *, allow_none: bool = False) -> Any:
@@ -215,12 +215,12 @@ class TransactionService:
 
         operation_type = pick("operation_type", transaction.operation_type)
 
-        # credit_account_id — каноническое поле для кредитов. Для обратной совместимости
-        # поддерживаем target_account_id, потому что часть старого UI работала только с ним.
+        # credit_account_id вЂ” РєР°РЅРѕРЅРёС‡РµСЃРєРѕРµ РїРѕР»Рµ РґР»СЏ РєСЂРµРґРёС‚РѕРІ. Р”Р»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
+        # РїРѕРґРґРµСЂР¶РёРІР°РµРј target_account_id, РїРѕС‚РѕРјСѓ С‡С‚Рѕ С‡Р°СЃС‚СЊ СЃС‚Р°СЂРѕРіРѕ UI СЂР°Р±РѕС‚Р°Р»Р° С‚РѕР»СЊРєРѕ СЃ РЅРёРј.
         explicit_credit_account_id = updates.get("credit_account_id") if "credit_account_id" in updates else None
         explicit_target_account_id = updates.get("target_account_id") if "target_account_id" in updates else None
 
-        if operation_type == "credit_payment":
+        if operation_type in {"credit_payment", "credit_early_repayment"}:
             resolved_credit_account_id = (
                 explicit_credit_account_id
                 if explicit_credit_account_id is not None
@@ -257,11 +257,11 @@ class TransactionService:
     def delete_transaction(self, *, transaction_id: int, user_id: int) -> dict[str, str]:
         transaction = self.transaction_repo.get_by_id_for_update(transaction_id=transaction_id, user_id=user_id)
         if not transaction:
-            raise TransactionNotFoundError("Транзакция не найдена")
+            raise TransactionNotFoundError("РўСЂР°РЅР·Р°РєС†РёСЏ РЅРµ РЅР°Р№РґРµРЅР°")
 
         account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
         if not account:
-            raise TransactionValidationError("Счет не найден")
+            raise TransactionValidationError("РЎС‡РµС‚ РЅРµ РЅР°Р№РґРµРЅ")
 
         pair_id = getattr(transaction, "transfer_pair_id", None)
         if pair_id is not None:
@@ -303,7 +303,7 @@ class TransactionService:
             if transaction.target_account_id is not None:
                 target_account = self.account_repo.get_by_id_and_user_for_update(transaction.target_account_id, user_id)
                 if target_account is None:
-                    raise TransactionValidationError("Счет назначения не найден")
+                    raise TransactionValidationError("РЎС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РЅРµ РЅР°Р№РґРµРЅ")
             self._revert_balance_effect(transaction=transaction, account=account, target_account=target_account)
             self.transaction_repo.delete(transaction, auto_commit=False)
 
@@ -314,31 +314,31 @@ class TransactionService:
     def split_transaction(self, *, user_id: int, transaction_id: int, items: list[dict[str, Any]]) -> list[Transaction]:
         transaction = self.transaction_repo.get_by_id_for_update(transaction_id=transaction_id, user_id=user_id)
         if not transaction:
-            raise TransactionNotFoundError("Транзакция не найдена")
+            raise TransactionNotFoundError("РўСЂР°РЅР·Р°РєС†РёСЏ РЅРµ РЅР°Р№РґРµРЅР°")
 
         if transaction.operation_type != "regular":
-            raise TransactionValidationError("Разбивать можно только обычные транзакции.")
+            raise TransactionValidationError("Р Р°Р·Р±РёРІР°С‚СЊ РјРѕР¶РЅРѕ С‚РѕР»СЊРєРѕ РѕР±С‹С‡РЅС‹Рµ С‚СЂР°РЅР·Р°РєС†РёРё.")
 
         if len(items) < 2:
-            raise TransactionValidationError("Нужно указать минимум две части для разбивки.")
+            raise TransactionValidationError("РќСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РјРёРЅРёРјСѓРј РґРІРµ С‡Р°СЃС‚Рё РґР»СЏ СЂР°Р·Р±РёРІРєРё.")
 
         account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
         if not account:
-            raise TransactionValidationError("Счет транзакции не найден.")
+            raise TransactionValidationError("РЎС‡РµС‚ С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ РЅР°Р№РґРµРЅ.")
 
         original_amount = transaction.amount
         total_amount = sum(item.get("amount", 0) for item in items)
         if total_amount != original_amount:
-            raise TransactionValidationError("Сумма частей должна быть равна сумме исходной транзакции.")
+            raise TransactionValidationError("РЎСѓРјРјР° С‡Р°СЃС‚РµР№ РґРѕР»Р¶РЅР° Р±С‹С‚СЊ СЂР°РІРЅР° СЃСѓРјРјРµ РёСЃС…РѕРґРЅРѕР№ С‚СЂР°РЅР·Р°РєС†РёРё.")
 
         prepared_items: list[dict[str, Any]] = []
         for item in items:
             category_id = item.get("category_id")
             amount = item.get("amount")
             if category_id is None:
-                raise TransactionValidationError("Для каждой части разбивки нужно указать категорию.")
+                raise TransactionValidationError("Р”Р»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё СЂР°Р·Р±РёРІРєРё РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РєР°С‚РµРіРѕСЂРёСЋ.")
             if amount is None or amount <= 0:
-                raise TransactionValidationError("Сумма каждой части разбивки должна быть больше нуля.")
+                raise TransactionValidationError("РЎСѓРјРјР° РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё СЂР°Р·Р±РёРІРєРё РґРѕР»Р¶РЅР° Р±С‹С‚СЊ Р±РѕР»СЊС€Рµ РЅСѓР»СЏ.")
 
             payload = {
                 "account_id": transaction.account_id,
@@ -382,7 +382,7 @@ class TransactionService:
         account_id: int | None = None,
     ) -> int:
         if date_to < date_from:
-            raise TransactionValidationError("Конечная дата периода не может быть раньше начальной.")
+            raise TransactionValidationError("РљРѕРЅРµС‡РЅР°СЏ РґР°С‚Р° РїРµСЂРёРѕРґР° РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ СЂР°РЅСЊС€Рµ РЅР°С‡Р°Р»СЊРЅРѕР№.")
 
         transactions = self.transaction_repo.get_for_period_for_update(
             user_id=user_id,
@@ -401,7 +401,7 @@ class TransactionService:
         for transaction in transactions:
             source_account = accounts_by_id.get(transaction.account_id)
             if source_account is None:
-                raise TransactionValidationError(f"Не найден счёт {transaction.account_id} для удаления периода.")
+                raise TransactionValidationError(f"РќРµ РЅР°Р№РґРµРЅ СЃС‡С‘С‚ {transaction.account_id} РґР»СЏ СѓРґР°Р»РµРЅРёСЏ РїРµСЂРёРѕРґР°.")
             target_account = accounts_by_id.get(transaction.target_account_id) if transaction.target_account_id is not None else None
             self._revert_balance_effect(transaction=transaction, account=source_account, target_account=target_account)
             self.transaction_repo.delete(transaction, auto_commit=False)
@@ -442,39 +442,39 @@ class TransactionService:
 
         if operation_type == "transfer":
             if target_account_id is None and not allow_incomplete_transfer:
-                raise TransactionValidationError("Для перевода нужно указать счет назначения.")
+                raise TransactionValidationError("Р”Р»СЏ РїРµСЂРµРІРѕРґР° РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ СЃС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ.")
             if category_id is not None:
-                raise TransactionValidationError("Для перевода нельзя указывать категорию.")
-        elif operation_type == "credit_payment":
+                raise TransactionValidationError("Р”Р»СЏ РїРµСЂРµРІРѕРґР° РЅРµР»СЊР·СЏ СѓРєР°Р·С‹РІР°С‚СЊ РєР°С‚РµРіРѕСЂРёСЋ.")
+        elif operation_type in {"credit_payment", "credit_early_repayment"}:
             if target_account_id is None and not allow_incomplete_transfer:
                 raise TransactionValidationError("Для платежа по кредиту нужно указать кредит.")
             if category_id is not None:
                 raise TransactionValidationError("Для платежа по кредиту нельзя указывать категорию.")
         elif target_account_id is not None:
-            raise TransactionValidationError("Счет назначения можно указывать только для перевода и платежа по кредиту.")
+            raise TransactionValidationError("РЎС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РјРѕР¶РЅРѕ СѓРєР°Р·С‹РІР°С‚СЊ С‚РѕР»СЊРєРѕ РґР»СЏ РїРµСЂРµРІРѕРґР° Рё РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ.")
 
         if operation_type == "debt":
             if counterparty_id in (None, "", 0):
-                raise TransactionValidationError("Для долга нужно указать контрагента.")
+                raise TransactionValidationError("Р”Р»СЏ РґРѕР»РіР° РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РєРѕРЅС‚СЂР°РіРµРЅС‚Р°.")
             if debt_direction not in {"lent", "borrowed", "repaid", "collected"}:
-                raise TransactionValidationError("Для долга нужно выбрать корректное направление.")
+                raise TransactionValidationError("Р”Р»СЏ РґРѕР»РіР° РЅСѓР¶РЅРѕ РІС‹Р±СЂР°С‚СЊ РєРѕСЂСЂРµРєС‚РЅРѕРµ РЅР°РїСЂР°РІР»РµРЅРёРµ.")
         elif counterparty_id not in (None, "", 0):
-            raise TransactionValidationError("Контрагента можно указывать только для операций типа долг.")
+            raise TransactionValidationError("РљРѕРЅС‚СЂР°РіРµРЅС‚Р° РјРѕР¶РЅРѕ СѓРєР°Р·С‹РІР°С‚СЊ С‚РѕР»СЊРєРѕ РґР»СЏ РѕРїРµСЂР°С†РёР№ С‚РёРїР° РґРѕР»Рі.")
 
         if counterparty_id not in (None, "", 0):
             counterparty = self.counterparty_repo.get_by_id_and_user(int(counterparty_id), user_id)
             if counterparty is None:
-                raise TransactionValidationError("Контрагент не найден.")
+                raise TransactionValidationError("РљРѕРЅС‚СЂР°РіРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ.")
 
         if category_id is None:
             return
 
         category = self._get_category(category_id=category_id, user_id=user_id)
         if category is None:
-            raise TransactionValidationError("Категория не найдена.")
+            raise TransactionValidationError("РљР°С‚РµРіРѕСЂРёСЏ РЅРµ РЅР°Р№РґРµРЅР°.")
 
         if transaction_type is not None and category.kind != transaction_type and operation_type != "refund":
-            raise TransactionValidationError("Тип транзакции не совпадает с типом выбранной категории.")
+            raise TransactionValidationError("РўРёРї С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ СЃРѕРІРїР°РґР°РµС‚ СЃ С‚РёРїРѕРј РІС‹Р±СЂР°РЅРЅРѕР№ РєР°С‚РµРіРѕСЂРёРё.")
 
     def _get_category(self, *, category_id: int, user_id: int) -> Category | None:
         return self.category_repo.get_by_id(category_id=category_id, user_id=user_id)
@@ -489,24 +489,30 @@ class TransactionService:
         target_account_id = payload.get("target_account_id")
         operation_type = payload.get("operation_type")
 
-        if operation_type not in {"transfer", "credit_payment"}:
+        if operation_type not in {"transfer", "credit_payment", "credit_early_repayment"}:
             return None
 
         if target_account_id is None:
             if payload.get("needs_review"):
                 return None
-            if operation_type == "credit_payment":
+            if operation_type in {"credit_payment", "credit_early_repayment"}:
                 raise TransactionValidationError("Для платежа по кредиту нужно указать кредит.")
-            raise TransactionValidationError("Для перевода нужно указать счет назначения.")
+            raise TransactionValidationError("Р”Р»СЏ РїРµСЂРµРІРѕРґР° РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ СЃС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ.")
 
         if target_account_id == source_account.id:
-            raise TransactionValidationError("Счет списания и счет назначения не должны совпадать.")
+            raise TransactionValidationError("РЎС‡РµС‚ СЃРїРёСЃР°РЅРёСЏ Рё СЃС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РЅРµ РґРѕР»Р¶РЅС‹ СЃРѕРІРїР°РґР°С‚СЊ.")
 
         target_account = self.account_repo.get_by_id_and_user_for_update(target_account_id, user_id)
         if not target_account:
-            raise TransactionValidationError("Счет назначения не найден.")
-        if operation_type == "credit_payment" and not bool(getattr(target_account, "is_credit", False)):
-            raise TransactionValidationError("Для платежа по кредиту нужно выбрать кредитный счёт.")
+            raise TransactionValidationError("РЎС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РЅРµ РЅР°Р№РґРµРЅ.")
+        ALLOWED_CREDIT_TYPES = {"credit", "credit_card"}
+        if operation_type in {"credit_payment", "credit_early_repayment"}:
+            acct_type = getattr(target_account, "account_type", None)
+            is_credit = bool(getattr(target_account, "is_credit", False))
+            if acct_type not in ALLOWED_CREDIT_TYPES and not is_credit:
+                raise TransactionValidationError(
+                    "Для платежа по кредиту нужно выбрать кредитный счёт или кредитную карту."
+                )
 
         return target_account
 
@@ -526,20 +532,23 @@ class TransactionService:
             if target_account is not None:
                 target_account.balance += transaction.amount
                 self.db.add(target_account)
-        elif transaction.operation_type == "credit_payment":
+        elif transaction.operation_type in {"credit_payment", "credit_early_repayment"}:
             account.balance -= transaction.amount
             if target_account is not None:
-                current_amount = getattr(target_account, "credit_current_amount", None)
-                if current_amount is None:
-                    current_amount = Decimal("0")
-                principal_amount = transaction.credit_principal_amount
-                if principal_amount is None:
-                    principal_amount = transaction.amount
-                next_amount = current_amount - principal_amount
-                if next_amount < 0:
-                    next_amount = Decimal("0")
-                target_account.credit_current_amount = next_amount
-                target_account.balance = -next_amount
+                if getattr(target_account, "account_type", None) == "credit_card":
+                    target_account.balance += transaction.amount
+                else:
+                    current_amount = getattr(target_account, "credit_current_amount", None)
+                    if current_amount is None:
+                        current_amount = Decimal("0")
+                    principal_amount = transaction.credit_principal_amount
+                    if principal_amount is None:
+                        principal_amount = transaction.amount
+                    next_amount = current_amount - principal_amount
+                    if next_amount < 0:
+                        next_amount = Decimal("0")
+                    target_account.credit_current_amount = next_amount
+                    target_account.balance = -next_amount
                 self.db.add(target_account)
         elif transaction.type == "expense":
             account.balance -= transaction.amount
@@ -560,18 +569,21 @@ class TransactionService:
             if target_account is not None:
                 target_account.balance -= transaction.amount
                 self.db.add(target_account)
-        elif transaction.operation_type == "credit_payment":
+        elif transaction.operation_type in {"credit_payment", "credit_early_repayment"}:
             account.balance += transaction.amount
             if target_account is not None:
-                current_amount = getattr(target_account, "credit_current_amount", None)
-                if current_amount is None:
-                    current_amount = Decimal("0")
-                principal_amount = transaction.credit_principal_amount
-                if principal_amount is None:
-                    principal_amount = transaction.amount
-                next_amount = current_amount + principal_amount
-                target_account.credit_current_amount = next_amount
-                target_account.balance = -next_amount
+                if getattr(target_account, "account_type", None) == "credit_card":
+                    target_account.balance -= transaction.amount
+                else:
+                    current_amount = getattr(target_account, "credit_current_amount", None)
+                    if current_amount is None:
+                        current_amount = Decimal("0")
+                    principal_amount = transaction.credit_principal_amount
+                    if principal_amount is None:
+                        principal_amount = transaction.amount
+                    next_amount = current_amount + principal_amount
+                    target_account.credit_current_amount = next_amount
+                    target_account.balance = -next_amount
                 self.db.add(target_account)
         elif transaction.type == "expense":
             account.balance += transaction.amount

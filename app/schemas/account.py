@@ -21,6 +21,7 @@ class AccountCreateRequest(BaseModel):
     credit_current_amount: Decimal | None = None
     credit_interest_rate: Decimal | None = None
     credit_term_remaining: int | None = None
+    monthly_payment: Decimal | None = None
 
 
 class AccountUpdateRequest(BaseModel):
@@ -35,6 +36,7 @@ class AccountUpdateRequest(BaseModel):
     credit_current_amount: Decimal | None = None
     credit_interest_rate: Decimal | None = None
     credit_term_remaining: int | None = None
+    monthly_payment: Decimal | None = None
 
 
 class AccountResponse(BaseModel):
@@ -52,5 +54,6 @@ class AccountResponse(BaseModel):
     credit_current_amount: Decimal | None = None
     credit_interest_rate: Decimal | None = None
     credit_term_remaining: int | None = None
+    monthly_payment: Decimal | None = None
     created_at: datetime
     updated_at: datetime

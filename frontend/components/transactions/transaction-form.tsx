@@ -32,7 +32,7 @@ type TransactionFormValues = {
 type MainTypeValue = 'regular' | 'refund' | 'transfer' | 'investment' | 'credit_operation' | 'debt';
 type InvestmentDirection = '' | 'buy' | 'sell';
 type DebtDirection = '' | 'lent' | 'borrowed' | 'repaid' | 'collected';
-type CreditOperationKind = '' | 'disbursement' | 'payment';
+type CreditOperationKind = '' | 'disbursement' | 'payment' | 'early_repayment';
 
 const defaultValues: TransactionFormValues = {
   account_id: '',
@@ -69,7 +69,7 @@ function normalize(value: string) {
 
 
 function isLoanAccount(account: Account) {
-  return account.account_type === 'credit' || account.is_credit;
+  return account.account_type === 'credit' || account.account_type === 'credit_card' || account.is_credit;
 }
 
 function isSelectableTransactionAccount(account: Account) {
@@ -97,8 +97,18 @@ function mapOperationToUi(
   if (operationType === 'investment_sell') {
     return { mainType: 'investment', investmentDirection: 'sell', debtDirection: '', creditOperationKind: '' };
   }
-  if (operationType === 'credit_disbursement' || operationType === 'credit_payment') {
-    return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: operationType === 'credit_disbursement' ? 'disbursement' : 'payment' };
+  if (operationType === 'credit_disbursement' || operationType === 'credit_payment' || operationType === 'credit_early_repayment') {
+    return {
+      mainType: 'credit_operation',
+      investmentDirection: '',
+      debtDirection: '',
+      creditOperationKind:
+        operationType === 'credit_disbursement'
+          ? 'disbursement'
+          : operationType === 'credit_early_repayment'
+            ? 'early_repayment'
+            : 'payment',
+    };
   }
   if (operationType === 'debt') {
     return {
@@ -118,7 +128,9 @@ function mapUiToOperation(mainType: MainTypeValue, investmentDirection: Investme
     return investmentDirection === 'sell' ? 'investment_sell' : 'investment_buy';
   }
   if (mainType === 'credit_operation') {
-    return creditOperationKind === 'disbursement' ? 'credit_disbursement' : 'credit_payment';
+    if (creditOperationKind === 'disbursement') return 'credit_disbursement';
+    if (creditOperationKind === 'early_repayment') return 'credit_early_repayment';
+    return 'credit_payment';
   }
   if (mainType === 'debt') {
     return 'debt';
@@ -140,6 +152,7 @@ function getFixedTypeByOperation(operationType: TransactionOperationType): Trans
     investment_sell: 'income',
     credit_disbursement: 'income',
     credit_payment: 'expense',
+    credit_early_repayment: 'expense',
     credit_interest: 'expense',
     debt: null,
     refund: 'income',
@@ -182,7 +195,7 @@ function getOperationSummaryLabel(
   if (operationType === 'investment_buy' || operationType === 'investment_sell') {
     if (!investmentDirection) return 'Инвестиционный: действие не выбрано';
   }
-  if (operationType === 'credit_disbursement' || operationType === 'credit_payment') {
+  if (operationType === 'credit_disbursement' || operationType === 'credit_payment' || operationType === 'credit_early_repayment') {
     if (!hasValidCreditOperationKind) return 'Кредитная операция: вид не выбран';
     return `Кредитная операция: ${getCreditOperationKindLabel(creditOperationKind)}`;
   }
@@ -445,6 +458,8 @@ export function TransactionForm({
   const showInvestmentDirection = mainType === 'investment';
   const showCreditOperationKind = mainType === 'credit_operation';
   const showCreditPaymentFields = mainType === 'credit_operation' && creditOperationKind === 'payment';
+  const showCreditEarlyRepaymentFields = mainType === 'credit_operation' && creditOperationKind === 'early_repayment';
+  const showCreditRepaymentFields = showCreditPaymentFields || showCreditEarlyRepaymentFields;
   const showCreditDisbursementInfo = mainType === 'credit_operation' && creditOperationKind === 'disbursement';
   const showDebtDirection = mainType === 'debt';
   const showCounterparty = mainType === 'debt';
@@ -458,8 +473,12 @@ export function TransactionForm({
   const hasValidDebtDirection = mainType !== 'debt' || Boolean(debtDirection);
   const hasValidCounterparty = mainType !== 'debt' || Boolean(selectedCounterpartyId);
   const hasValidTargetAccount = !showTransferTarget || (Boolean(selectedTargetAccountId) && selectedTargetAccountId !== selectedAccountId);
-  const hasValidCreditAccount = !showCreditPaymentFields || (Boolean(selectedCreditAccountId) && selectedCreditAccountId !== selectedAccountId);
-  const hasValidCreditBreakdown = !showCreditPaymentFields || (Number(watch('credit_principal_amount')) >= 0 && Number(watch('credit_interest_amount')) >= 0 && Number(watch('amount')) === Number(watch('credit_principal_amount')) + Number(watch('credit_interest_amount')));
+  const hasValidCreditAccount = !showCreditRepaymentFields || (Boolean(selectedCreditAccountId) && selectedCreditAccountId !== selectedAccountId);
+  const hasValidCreditBreakdown =
+    !showCreditRepaymentFields ||
+    (showCreditPaymentFields
+      ? Number(watch('credit_principal_amount')) >= 0 && Number(watch('credit_interest_amount')) >= 0 && Number(watch('amount')) === Number(watch('credit_principal_amount')) + Number(watch('credit_interest_amount'))
+      : Number(watch('credit_principal_amount')) >= 0 && Number(watch('amount')) === Number(watch('credit_principal_amount')));
   const hasValidDirection = hasValidInvestmentDirection && hasValidCreditOperationKind && hasValidDebtDirection && hasValidTargetAccount && hasValidCreditAccount && hasValidCreditBreakdown && hasValidCounterparty;
   const resolvedOperationType = mapUiToOperation(mainType, investmentDirection || 'buy', creditOperationKind);
   const derivedType = useMemo(
@@ -469,7 +488,7 @@ export function TransactionForm({
 
   const showCreateAccountAction = Boolean(accountQuery.trim()) && !exactMatchedAccount;
   const showCreateCategoryAction = showCategory && Boolean(categoryQuery.trim()) && !exactMatchedCategory;
-  const showCreateCreditAccountAction = showCreditPaymentFields && Boolean(creditAccountQuery.trim()) && !exactMatchedCreditAccount;
+  const showCreateCreditAccountAction = showCreditRepaymentFields && Boolean(creditAccountQuery.trim()) && !exactMatchedCreditAccount;
   const showCreateCounterpartyAction = showCounterparty && Boolean(counterpartyQuery.trim()) && !exactMatchedCounterparty;
   const categoryKindForCreate = derivedType === 'income' ? 'income' : 'expense';
 
@@ -541,7 +560,7 @@ export function TransactionForm({
   }, [showCreditOperationKind]);
 
   useEffect(() => {
-    if (!showCreditPaymentFields) {
+    if (!showCreditRepaymentFields) {
       setValue('credit_account_id', '', { shouldValidate: true });
       setValue('credit_principal_amount', '', { shouldValidate: true });
       setValue('credit_interest_amount', '', { shouldValidate: true });
@@ -554,7 +573,10 @@ export function TransactionForm({
     } else if (!creditAccountQuery.trim()) {
       setValue('credit_account_id', '', { shouldValidate: true, shouldDirty: true });
     }
-  }, [creditAccountQuery, exactMatchedCreditAccount, setValue, showCreditPaymentFields]);
+    if (showCreditEarlyRepaymentFields) {
+      setValue('credit_interest_amount', '0', { shouldValidate: true });
+    }
+  }, [creditAccountQuery, exactMatchedCreditAccount, setValue, showCreditRepaymentFields, showCreditEarlyRepaymentFields]);
 
   useEffect(() => {
     if (initialData) {
@@ -637,13 +659,13 @@ export function TransactionForm({
         onSubmit({
           account_id: Number(values.account_id),
           target_account_id: showTransferTarget && values.target_account_id ? Number(values.target_account_id) : null,
-          credit_account_id: showCreditPaymentFields && values.credit_account_id ? Number(values.credit_account_id) : null,
+          credit_account_id: showCreditRepaymentFields && values.credit_account_id ? Number(values.credit_account_id) : null,
           category_id: showCategory && values.category_id ? Number(values.category_id) : null,
           counterparty_id: showCounterparty && values.counterparty_id ? Number(values.counterparty_id) : null,
           goal_id: showGoalField && values.goal_id ? Number(values.goal_id) : null,
           amount: Number(values.amount),
-          credit_principal_amount: showCreditPaymentFields ? Number(values.credit_principal_amount) : null,
-          credit_interest_amount: showCreditPaymentFields ? Number(values.credit_interest_amount) : null,
+          credit_principal_amount: showCreditRepaymentFields ? Number(values.credit_principal_amount) : null,
+          credit_interest_amount: showCreditPaymentFields ? Number(values.credit_interest_amount) : showCreditEarlyRepaymentFields ? 0 : null,
           debt_direction: showCounterparty && debtDirection ? debtDirection : null,
           currency: (selectedAccount?.currency ?? selectedTargetAccount?.currency ?? 'RUB').trim().toUpperCase(),
           type: getDerivedType(
@@ -677,7 +699,7 @@ export function TransactionForm({
         type="hidden"
         {...register('credit_account_id', {
           validate: (value) => {
-            if (!showCreditPaymentFields) return true;
+            if (!showCreditRepaymentFields) return true;
             if (!creditAccountQuery.trim()) return 'Выбери кредит';
             if (!value) return 'Выбери кредит из списка';
             if (value === selectedAccountId) return 'Счёт списания и кредит должны отличаться';
@@ -876,7 +898,7 @@ export function TransactionForm({
           </div>
         ) : null}
 
-        {showCreditPaymentFields ? (
+        {showCreditRepaymentFields ? (
           <div>
             <SearchSelect
               id="tx-credit-account"
@@ -907,7 +929,7 @@ export function TransactionForm({
         ) : null}
 
         <div>
-          <Label htmlFor="tx-amount">{showCreditPaymentFields ? 'Общая сумма платежа' : showCreditDisbursementInfo ? 'Сумма кредита' : 'Сумма'}</Label>
+          <Label htmlFor="tx-amount">{showCreditRepaymentFields ? 'Общая сумма платежа' : showCreditDisbursementInfo ? 'Сумма кредита' : 'Сумма'}</Label>
           <Input
             id="tx-amount"
             className="h-9"
@@ -922,17 +944,19 @@ export function TransactionForm({
           {errors.amount ? <p className="mt-1 text-xs text-danger">{errors.amount.message}</p> : null}
         </div>
 
-        {showCreditPaymentFields ? (
+        {showCreditRepaymentFields ? (
           <>
             <div>
-              <Label htmlFor="tx-credit-principal">Основной долг</Label>
-              <Input id="tx-credit-principal" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_principal_amount', { validate: (value) => !showCreditPaymentFields || Number(value) >= 0 || 'Введите корректную сумму' })} />
+              <Label htmlFor="tx-credit-principal">???????? ????</Label>
+              <Input id="tx-credit-principal" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_principal_amount', { validate: (value) => !showCreditRepaymentFields || Number(value) >= 0 || '??????? ?????????? ?????' })} />
             </div>
-            <div>
-              <Label htmlFor="tx-credit-interest">Проценты</Label>
-              <Input id="tx-credit-interest" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_interest_amount', { validate: (value) => !showCreditPaymentFields || Number(value) >= 0 || 'Введите корректную сумму' })} />
-              {submitCount > 0 && !hasValidCreditBreakdown ? <p className="mt-1 text-xs text-danger">Сумма должна быть равна основному долгу и процентам</p> : null}
-            </div>
+            {showCreditPaymentFields ? (
+              <div>
+                <Label htmlFor="tx-credit-interest">????????</Label>
+                <Input id="tx-credit-interest" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_interest_amount', { validate: (value) => !showCreditPaymentFields || Number(value) >= 0 || '??????? ?????????? ?????' })} />
+                {submitCount > 0 && !hasValidCreditBreakdown ? <p className="mt-1 text-xs text-danger">????? ?????? ???? ????? ????????? ????? ? ?????????</p> : null}
+              </div>
+            ) : null}
           </>
         ) : null}
 

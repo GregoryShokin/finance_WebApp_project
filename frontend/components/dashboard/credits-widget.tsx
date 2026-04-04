@@ -9,11 +9,13 @@ import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
 import type { Account } from '@/types/account';
 import type { FinancialHealth } from '@/types/financial-health';
+import type { Transaction } from '@/types/transaction';
 
 const SCALE = 1.8;
 
 type Props = {
   accounts: Account[];
+  transactions: Transaction[];
   health: FinancialHealth;
   isLoading?: boolean;
 };
@@ -40,7 +42,7 @@ function getUtilizationTone(percent: number) {
   return 'bg-rose-500';
 }
 
-export function CreditsWidget({ accounts, health, isLoading = false }: Props) {
+export function CreditsWidget({ accounts, transactions, health, isLoading = false }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
 
@@ -51,7 +53,7 @@ export function CreditsWidget({ accounts, health, isLoading = false }: Props) {
     if (cardRef.current && !isExpanded) {
       setCollapsedHeight(cardRef.current.offsetHeight);
     }
-  }, [isExpanded, accounts, health, isLoading]);
+  }, [isExpanded, accounts, transactions, health, isLoading]);
 
   useEffect(() => {
     if (!isExpanded) return;
@@ -79,33 +81,46 @@ export function CreditsWidget({ accounts, health, isLoading = false }: Props) {
   }, []);
 
   const metrics = useMemo(() => {
-    const creditAccounts = accounts.filter((account) => account.account_type === 'credit');
-    const creditCardAccounts = accounts.filter((account) => account.account_type === 'credit_card');
+    const paymentHistoryAccountIds = new Set<number>();
+    for (const transaction of transactions) {
+      if (transaction.operation_type !== 'credit_payment') continue;
+      const accountId = transaction.credit_account_id ?? transaction.target_account_id;
+      if (accountId != null) {
+        paymentHistoryAccountIds.add(accountId);
+      }
+    }
+
+    const creditAccounts = accounts
+      .filter((account) => account.account_type === 'credit')
+      .map((account) => ({
+        ...account,
+        hasPaymentHistory: paymentHistoryAccountIds.has(account.id),
+      }));
+
+    const creditCards = accounts
+      .filter((account) => account.account_type === 'credit_card')
+      .map((account) => {
+        const limit = toNumber(account.credit_limit_original);
+        const used = account.credit_limit_original != null ? Math.max(0, limit - toNumber(account.balance)) : 0;
+        const utilization = limit > 0 ? (used / limit) * 100 : 0;
+        return {
+          ...account,
+          limit,
+          used,
+          utilization,
+          hasPaymentHistory: paymentHistoryAccountIds.has(account.id),
+        };
+      });
 
     const creditDebt = creditAccounts.reduce((sum, account) => sum + Math.abs(toNumber(account.balance)), 0);
-    const cardItems = creditCardAccounts.map((account) => {
-      const limit = toNumber(account.credit_limit_original);
-      const used = account.credit_limit_original != null ? Math.max(0, limit - toNumber(account.balance)) : 0;
-      const utilization = limit > 0 ? (used / limit) * 100 : 0;
-
-      return {
-        ...account,
-        limit,
-        used,
-        utilization,
-      };
-    });
-    const creditCardUsed = cardItems.reduce((sum, card) => sum + card.used, 0);
-    const totalDebt = creditDebt + creditCardUsed;
+    const creditCardUsed = creditCards.reduce((sum, card) => sum + card.used, 0);
 
     return {
       creditAccounts,
-      creditCards: cardItems,
-      creditDebt,
-      creditCardUsed,
-      totalDebt,
+      creditCards,
+      totalDebt: creditDebt + creditCardUsed,
     };
-  }, [accounts]);
+  }, [accounts, transactions]);
 
   const dtiColor = getDtiColor(health.dti);
   const dtiBadge = getDtiBadge(health.dti);
@@ -165,78 +180,87 @@ export function CreditsWidget({ accounts, health, isLoading = false }: Props) {
             <p className="mt-2 text-sm text-slate-500">{health.dti.toFixed(1)}% от дохода</p>
           </div>
         ) : (
-          <>
-            <div className="mt-5 space-y-4">
-              {metrics.creditAccounts.length > 0 ? (
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Кредиты</p>
-                  <div className="mt-3 space-y-3">
-                    {metrics.creditAccounts.map((account) => (
-                      <div key={account.id} className="rounded-2xl bg-rose-50 px-4 py-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-sm text-slate-700">{account.name}</span>
-                          <span className="font-medium text-rose-600">{formatMoney(Math.abs(toNumber(account.balance)))}</span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-400">
-                          {account.credit_interest_rate != null ? <span>{toNumber(account.credit_interest_rate)}% годовых</span> : null}
-                          {account.credit_term_remaining != null ? <span>осталось {account.credit_term_remaining} мес.</span> : null}
-                        </div>
+          <div className="mt-5 space-y-4">
+            {metrics.creditAccounts.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Кредиты</p>
+                <div className="mt-3 space-y-3">
+                  {metrics.creditAccounts.map((account) => (
+                    <div key={account.id} className="rounded-2xl bg-rose-50 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-slate-700">{account.name}</span>
+                        <span className="font-medium text-rose-600">{formatMoney(Math.abs(toNumber(account.balance)))}</span>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              {metrics.creditCards.length > 0 ? (
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Кредитные карты</p>
-                  <div className="mt-3 space-y-3">
-                    {metrics.creditCards.map((card) => (
-                      <div key={card.id} className="rounded-2xl bg-slate-50 px-4 py-3">
-                        <div className="flex items-center justify-between gap-3 text-sm">
-                          <span className="text-slate-700">{card.name}</span>
-                          <span className="font-medium text-slate-900">{formatMoney(card.used)}</span>
-                        </div>
-                        <div className="mt-1 flex items-center justify-between gap-3 text-xs text-slate-400">
-                          <span>Лимит: {formatMoney(card.limit)}</span>
-                          <span>{card.utilization.toFixed(0)}%</span>
-                        </div>
-                        <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-slate-100">
-                          <div
-                            className={cn('h-full rounded-full transition-all duration-500', getUtilizationTone(card.utilization))}
-                            style={{ width: `${Math.min(card.utilization, 100)}%` }}
-                          />
-                        </div>
+                      <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-400">
+                        {account.credit_interest_rate != null ? <span>{toNumber(account.credit_interest_rate)}% годовых</span> : null}
+                        {account.credit_term_remaining != null ? <span>осталось {account.credit_term_remaining} мес.</span> : null}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              <hr className="border-slate-100" />
-
-              <div className="space-y-2 rounded-2xl bg-slate-50 px-4 py-4 text-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-500">Ежемесячный платёж</span>
-                  <span className="font-medium text-slate-900">{formatMoney(health.dti_total_payments)}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-500">DTI</span>
-                  <span className="font-medium" style={{ color: dtiColor }}>{health.dti.toFixed(1)}%</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-500">Средний доход</span>
-                  <span className="font-medium text-slate-900">{formatMoney(health.dti_income)}</span>
+                      {!account.hasPaymentHistory && !account.monthly_payment ? (
+                        <p className="mt-1 text-xs text-amber-600">
+                          Платежей ещё не было — внеси первый платёж чтобы DTI обновился
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
                 </div>
               </div>
+            ) : null}
 
-              {health.dti >= 40 ? (
-                <div className="rounded-2xl border-l-2 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  Нагрузка выше нормы. Приоритет — погасить кредит с наибольшей ставкой.
+            {metrics.creditCards.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Кредитные карты</p>
+                <div className="mt-3 space-y-3">
+                  {metrics.creditCards.map((card) => (
+                    <div key={card.id} className="rounded-2xl bg-slate-50 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3 text-sm">
+                        <span className="text-slate-700">{card.name}</span>
+                        <span className="font-medium text-slate-900">{formatMoney(card.used)}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-3 text-xs text-slate-400">
+                        <span>Лимит: {formatMoney(card.limit)}</span>
+                        <span>{card.utilization.toFixed(0)}%</span>
+                      </div>
+                      <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-slate-100">
+                        <div
+                          className={cn('h-full rounded-full transition-all duration-500', getUtilizationTone(card.utilization))}
+                          style={{ width: `${Math.min(card.utilization, 100)}%` }}
+                        />
+                      </div>
+                      {!card.hasPaymentHistory && !card.monthly_payment ? (
+                        <p className="mt-2 text-xs text-amber-600">
+                          Платежей ещё не было — внеси первый платёж чтобы DTI обновился
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
                 </div>
-              ) : null}
+              </div>
+            ) : null}
+
+            <hr className="border-slate-100" />
+
+            <div className="space-y-2 rounded-2xl bg-slate-50 px-4 py-4 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">Ежемесячный платёж</span>
+                <span className="font-medium text-slate-900">{formatMoney(health.dti_total_payments)}</span>
+              </div>
+              <p className="text-[11px] text-slate-400">по последнему внесённому платежу</p>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">DTI</span>
+                <span className="font-medium" style={{ color: dtiColor }}>{health.dti.toFixed(1)}%</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">Средний доход</span>
+                <span className="font-medium text-slate-900">{formatMoney(health.dti_income)}</span>
+              </div>
             </div>
-          </>
+
+            {health.dti >= 40 ? (
+              <div className="rounded-2xl border-l-2 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                Нагрузка выше нормы. Приоритет — погасить кредит с наибольшей ставкой.
+              </div>
+            ) : null}
+          </div>
         )}
       </>
     );
@@ -278,4 +302,3 @@ export function CreditsWidget({ accounts, health, isLoading = false }: Props) {
     </div>
   );
 }
-

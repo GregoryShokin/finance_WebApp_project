@@ -14,6 +14,7 @@ export type Account = {
   credit_current_amount?: string | number | null;
   credit_interest_rate?: string | number | null;
   credit_term_remaining?: number | null;
+  monthly_payment?: string | number | null;
   created_at: string;
   updated_at: string;
 };
@@ -29,6 +30,7 @@ export type CreateAccountPayload = {
   credit_current_amount?: number | null;
   credit_interest_rate?: number | null;
   credit_term_remaining?: number | null;
+  monthly_payment?: number | null;
 };
 
 export type UpdateAccountPayload = Partial<CreateAccountPayload>;
