@@ -57,6 +57,7 @@ class FinancialHealthResponse(BaseModel):
     leverage_zone: str
     leverage_total_debt: float
     leverage_own_capital: float
+    real_assets_total: float = 0.0
 
     discipline: float | None
     discipline_zone: str | None

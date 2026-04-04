@@ -85,8 +85,7 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
   );
 
   const creditCardTotal = useMemo(
-    () =>
-      creditCardAccounts.reduce((sum, account) => sum + Math.max(0, Number(account.balance)), 0),
+    () => creditCardAccounts.reduce((sum, account) => sum + Math.max(0, Number(account.balance)), 0),
     [creditCardAccounts],
   );
 
@@ -139,54 +138,52 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
         </div>
 
         {isExpanded ? (
-          <>
-            <div className="mt-3 space-y-2">
-              <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                Доступные счета
-              </p>
-              {visibleAccounts.length === 0 ? (
-                <p className="text-xs text-slate-400">Нет счетов для отображения</p>
-              ) : (
-                visibleAccounts.map((account) => {
-                  const creditLimit = account.credit_limit ?? account.credit_limit_original;
-                  const cardLike = isCreditCard(account);
-                  return (
-                    <div
-                      key={account.id}
-                      className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2"
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className="flex size-7 items-center justify-center rounded-full border border-slate-100 bg-white">
-                          <AccountIcon accountType={account.account_type} />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-slate-900">{account.name}</p>
-                        </div>
+          <div className="mt-3 space-y-2">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+              Доступные счета
+            </p>
+            {visibleAccounts.length === 0 ? (
+              <p className="text-xs text-slate-400">Нет счетов для отображения</p>
+            ) : (
+              visibleAccounts.map((account) => {
+                const creditLimit = account.credit_limit ?? account.credit_limit_original;
+                const cardLike = isCreditCard(account);
+                return (
+                  <div
+                    key={account.id}
+                    className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="flex size-7 items-center justify-center rounded-full border border-slate-100 bg-white">
+                        <AccountIcon accountType={account.account_type} />
                       </div>
-                      {cardLike ? (
-                        <div className="text-right">
-                          <p className="text-sm font-medium text-slate-900">
-                            {formatMoney(Math.abs(Number(account.balance)))}
-                          </p>
-                          {creditLimit ? (
-                            <p className="text-[11px] text-slate-400">
-                              лимит {formatMoney(Number(creditLimit))}
-                            </p>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <MoneyAmount
-                          value={Math.abs(Number(account.balance))}
-                          tone="income"
-                          className="text-sm font-medium"
-                        />
-                      )}
+                      <div>
+                        <p className="text-sm font-medium text-slate-900">{account.name}</p>
+                      </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
-          </>
+                    {cardLike ? (
+                      <div className="text-right">
+                        <p className="text-sm font-medium text-slate-900">
+                          {formatMoney(Math.abs(Number(account.balance)))}
+                        </p>
+                        {creditLimit ? (
+                          <p className="text-[11px] text-slate-400">
+                            лимит {formatMoney(Number(creditLimit))}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <MoneyAmount
+                        value={Math.abs(Number(account.balance))}
+                        tone="income"
+                        className="text-sm font-medium"
+                      />
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
         ) : null}
       </>
     );

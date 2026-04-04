@@ -42,6 +42,10 @@ function monthKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
+function startOfMonth(value: Date) {
+  return new Date(value.getFullYear(), value.getMonth(), 1);
+}
+
 function mean(values: number[]) {
   if (values.length === 0) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -151,12 +155,32 @@ export function IncomeStructureWidget({ transactions, categories, isLoading = fa
 
   const metrics = useMemo<StructureMetrics | null>(() => {
     const analyticsTransactions = transactions.filter((transaction) => transaction.affects_analytics);
+    if (analyticsTransactions.length === 0) {
+      return null;
+    }
+
     const categoriesById = new Map(categories.map((category) => [category.id, category]));
     const today = new Date();
+    const sortedTransactions = [...analyticsTransactions].sort(
+      (left, right) => new Date(left.transaction_date).getTime() - new Date(right.transaction_date).getTime(),
+    );
+    const firstTransaction = sortedTransactions[0];
+    if (!firstTransaction) {
+      return null;
+    }
+
+    const firstDate = startOfMonth(new Date(firstTransaction.transaction_date));
+    const monthsTracked =
+      (today.getFullYear() - firstDate.getFullYear()) * 12 + (today.getMonth() - firstDate.getMonth());
+    const requestedMonths = Math.max(0, Math.min(monthsTracked, MAX_MONTHS));
+    if (requestedMonths < 1) {
+      return null;
+    }
+
     const monthBuckets = new Map<string, MonthlyPoint>();
     const monthOrder: string[] = [];
 
-    for (let offset = MAX_MONTHS - 1; offset >= 0; offset -= 1) {
+    for (let offset = requestedMonths; offset >= 1; offset -= 1) {
       const pointDate = shiftMonth(today, -offset);
       const key = monthKey(pointDate);
       monthOrder.push(key);

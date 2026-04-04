@@ -228,7 +228,10 @@ export function getSixMonthTrendMetrics(transactions: Transaction[]): TrendMetri
     .filter((bucket): bucket is MonthlyPoint => Boolean(bucket))
     .map((bucket) => ({ ...bucket, balance: bucket.income - bucket.expense }));
 
-  const populatedMonths = chartData.filter((point) => point.income > 0 || point.expense > 0);
+  const currentMonthKey = monthKey(currentMonth);
+  const populatedMonths = chartData.filter(
+    (point) => (point.income > 0 || point.expense > 0) && point.key !== currentMonthKey,
+  );
   if (populatedMonths.length === 0) return null;
 
   const avgMonthlyBalance = mean(populatedMonths.map((point) => point.balance));

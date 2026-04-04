@@ -99,12 +99,16 @@ export function SavingsRateWidget({ health, transactions, categories, isLoading 
     }
 
     const firstDate = new Date(firstTransaction.transaction_date);
-    const monthsTracked = (today.getFullYear() - firstDate.getFullYear()) * 12 + (today.getMonth() - firstDate.getMonth()) + 1;
-    const requestedMonths = Math.max(1, Math.min(monthsTracked, 6));
+    const monthsTracked = (today.getFullYear() - firstDate.getFullYear()) * 12 + (today.getMonth() - firstDate.getMonth());
+    const requestedMonths = Math.max(0, Math.min(monthsTracked, 6));
+
+    if (requestedMonths < 1) {
+      return null;
+    }
 
     const monthBuckets = new Map<string, MonthlyPoint>();
     const monthOrder: string[] = [];
-    for (let offset = requestedMonths - 1; offset >= 0; offset -= 1) {
+    for (let offset = requestedMonths; offset >= 1; offset -= 1) {
       const pointDate = shiftMonth(today, -offset);
       const key = monthKey(pointDate);
       monthOrder.push(key);

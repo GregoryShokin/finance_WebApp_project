@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -32,6 +32,15 @@ type ExpenseItem = {
   priority: CategoryPriority | null;
 };
 
+type CategoryStatus = 'spike' | 'drift' | 'normal';
+
+type ExpenseItemWithStatus = ExpenseItem & {
+  status: CategoryStatus;
+  avgAmount: number;
+  monthsGrowing: number;
+  deviation: number;
+};
+
 type MonthOption = {
   key: string;
   year: number;
@@ -40,10 +49,16 @@ type MonthOption = {
 };
 
 type Metrics = {
-  topFiveCurrentMonth: ExpenseItem[];
+  topFiveCurrentMonth: ExpenseItemWithStatus[];
   availableYears: number[];
   monthOptions: MonthOption[];
-  selectedPeriodItems: ExpenseItem[];
+  selectedPeriodItems: ExpenseItemWithStatus[];
+};
+
+const BAR_COLORS: Record<CategoryStatus, string> = {
+  spike: '#E24B4A',
+  drift: '#EF9F27',
+  normal: '#378ADD',
 };
 
 function monthKey(date: Date) {
@@ -91,6 +106,66 @@ function buildExpenseItems(
   return [...grouped.values()].sort((left, right) => right.amount - left.amount);
 }
 
+function detectCategoryStatus(
+  categoryId: number | null,
+  currentMonthAmount: number,
+  transactions: Transaction[],
+  referenceMonthKey: string,
+  today: Date,
+): { status: CategoryStatus; avgAmount: number; monthsGrowing: number } {
+  const refDate = new Date(`${referenceMonthKey}-01`);
+  const historicalAmounts: number[] = [];
+
+  for (let offset = 1; offset <= 6; offset += 1) {
+    const monthDate = shiftMonth(refDate, -offset);
+    const key = monthKey(monthDate);
+    const total = transactions
+      .filter((tx) =>
+        tx.affects_analytics &&
+        tx.type === 'expense' &&
+        (tx.category_id === categoryId || (categoryId === null && tx.category_id === null)) &&
+        monthKey(new Date(tx.transaction_date)) === key,
+      )
+      .reduce((sum, tx) => sum + Number(tx.amount), 0);
+    historicalAmounts.push(total);
+  }
+
+  const nonZero = historicalAmounts.filter((value) => value > 0);
+  const avgAmount = nonZero.length > 0
+    ? nonZero.reduce((sum, value) => sum + value, 0) / nonZero.length
+    : 0;
+
+  const isSpike =
+    avgAmount > 0 &&
+    currentMonthAmount > avgAmount * 1.25 &&
+    currentMonthAmount - avgAmount > 1500;
+
+  if (isSpike) {
+    return { status: 'spike', avgAmount, monthsGrowing: 0 };
+  }
+
+  let monthsGrowing = 0;
+  for (let index = 0; index < historicalAmounts.length - 1; index += 1) {
+    if (historicalAmounts[index] > historicalAmounts[index + 1] && historicalAmounts[index] > 0) {
+      monthsGrowing += 1;
+    } else {
+      break;
+    }
+  }
+
+  const baseAmount = historicalAmounts[monthsGrowing] ?? 0;
+  const isDrift =
+    monthsGrowing >= 2 &&
+    baseAmount > 0 &&
+    historicalAmounts[0] - baseAmount > 2000;
+
+  if (isDrift) {
+    return { status: 'drift', avgAmount, monthsGrowing };
+  }
+
+  return { status: 'normal', avgAmount, monthsGrowing: 0 };
+}
+
 function formatYAxisValue(value: number) {
   if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}м`;
   if (Math.abs(value) >= 1_000) return `${Math.round(value / 1_000)}к`;
@@ -100,11 +175,28 @@ function formatYAxisValue(value: number) {
 function renderTooltip({ active, payload }: TooltipProps<number, string>) {
   if (!active || !payload || payload.length === 0) return null;
 
-  const item = payload[0];
+  const item = payload[0]?.payload as ExpenseItemWithStatus | undefined;
+  if (!item) return null;
+
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-lg">
-      <p className="text-sm font-medium text-slate-900">{String(item.payload?.name ?? 'Категория')}</p>
-      <p className="mt-1 text-sm text-slate-500">{formatMoney(Number(item.value ?? 0))}</p>
+    <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2.5 shadow-lg">
+      <p className="text-sm font-medium text-slate-900">{item.name}</p>
+      <p className="mt-1 text-sm text-slate-500">{formatMoney(item.amount)}</p>
+      {item.status === 'spike' && item.avgAmount > 0 ? (
+        <p className="mt-1 text-xs text-rose-600">
+          ↑ Всплеск: +{formatMoney(item.deviation)} к среднему
+        </p>
+      ) : null}
+      {item.status === 'drift' ? (
+        <p className="mt-1 text-xs text-amber-600">
+          ↗ Растёт {item.monthsGrowing} мес. подряд
+        </p>
+      ) : null}
+      {item.status === 'normal' && item.avgAmount > 0 ? (
+        <p className="mt-1 text-xs text-slate-400">
+          Среднее: {formatMoney(item.avgAmount)}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -183,16 +275,36 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
       });
     }
 
-    const topFiveCurrentMonth = buildExpenseItems(
+    const currentMonthReferenceKey = monthKey(today);
+
+    const topFiveCurrentMonth: ExpenseItemWithStatus[] = buildExpenseItems(
       analyticsExpenses,
       categoriesById,
       (transaction) => {
         const date = new Date(transaction.transaction_date);
         return date.getFullYear() === currentYear && date.getMonth() === currentMonth;
       },
-    ).slice(0, 5);
+    )
+      .slice(0, 5)
+      .map((item) => {
+        const { status, avgAmount, monthsGrowing } = detectCategoryStatus(
+          item.categoryId,
+          item.amount,
+          analyticsExpenses,
+          currentMonthReferenceKey,
+          today,
+        );
 
-    const selectedPeriodItems = buildExpenseItems(
+        return {
+          ...item,
+          status,
+          avgAmount,
+          monthsGrowing,
+          deviation: item.amount - avgAmount,
+        };
+      });
+
+    const selectedPeriodItems: ExpenseItemWithStatus[] = buildExpenseItems(
       analyticsExpenses,
       categoriesById,
       (transaction) => {
@@ -201,7 +313,23 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
         const priority = categoriesById.get(transaction.category_id ?? -1)?.priority ?? transaction.category_priority ?? null;
         return currentKey === selectedMonthKey && normalizeExpensePriority(priority) === categoryType;
       },
-    );
+    ).map((item) => {
+      const { status, avgAmount, monthsGrowing } = detectCategoryStatus(
+        item.categoryId,
+        item.amount,
+        analyticsExpenses,
+        selectedMonthKey,
+        today,
+      );
+
+      return {
+        ...item,
+        status,
+        avgAmount,
+        monthsGrowing,
+        deviation: item.amount - avgAmount,
+      };
+    });
 
     return {
       topFiveCurrentMonth,
@@ -238,7 +366,6 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
   }, [metrics, selectedYear, selectedMonthKey]);
 
   const monthsForSelectedYear = (metrics?.monthOptions ?? []).filter((option) => option.year === selectedYear);
-
   function handleToggle() {
     setIsExpanded((current) => {
       const next = !current;
@@ -265,7 +392,15 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
         {metrics.topFiveCurrentMonth.map((item, index) => (
           <div key={`${item.name}-${index}`} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3">
             <span className="truncate text-sm font-medium text-slate-900">{item.name}</span>
-            <span className="shrink-0 text-sm font-semibold text-slate-600">{formatMoney(item.amount)}</span>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {item.status !== 'normal' ? (
+                <span
+                  className="inline-block h-2 w-2 rounded-full"
+                  style={{ background: BAR_COLORS[item.status] }}
+                />
+              ) : null}
+              <span className="text-sm font-semibold text-slate-600">{formatMoney(item.amount)}</span>
+            </div>
           </div>
         ))}
       </div>
@@ -304,18 +439,51 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
               width={52}
             />
             <Tooltip content={renderTooltip} />
-            <Bar dataKey="amount" radius={[10, 10, 0, 0]} maxBarSize={48}>
+            <Bar dataKey="amount" radius={[6, 6, 0, 0]} maxBarSize={48}>
               {metrics.selectedPeriodItems.map((item, index) => (
                 <Cell
-                  key={`${item.name}-${index}`}
-                  fill={categoryType === 'essential' ? '#3B82F6' : '#F59E0B'}
+                  key={`cell-${index}`}
+                  fill={BAR_COLORS[item.status]}
                 />
               ))}
               <LabelList
                 dataKey="amount"
                 position="top"
-                formatter={(value: number) => formatMoney(value)}
-                style={{ fill: '#475569', fontSize: 11, fontWeight: 600 }}
+                content={(props) => {
+                  const { x, y, width, value, index } = props;
+                  const item = metrics.selectedPeriodItems[index as number];
+                  if (!item) return null;
+
+                  const icon = item.status === 'spike' ? '↑' : item.status === 'drift' ? '↗' : null;
+                  const iconColor = item.status === 'spike' ? '#A32D2D' : '#854F0B';
+                  const cx = Number(x) + Number(width) / 2;
+
+                  return (
+                    <g>
+                      <text
+                        x={cx}
+                        y={Number(y) - (icon ? 18 : 6)}
+                        textAnchor="middle"
+                        fontSize={11}
+                        fill="#64748B"
+                      >
+                        {formatMoney(Number(value))}
+                      </text>
+                      {icon ? (
+                        <text
+                          x={cx}
+                          y={Number(y) - 6}
+                          textAnchor="middle"
+                          fontSize={12}
+                          fontWeight="600"
+                          fill={iconColor}
+                        >
+                          {icon}
+                        </text>
+                      ) : null}
+                    </g>
+                  );
+                }}
               />
             </Bar>
           </BarChart>

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.account import Account
 from app.models.budget import Budget
 from app.models.category import Category
+from app.models.real_asset import RealAsset as RealAssetModel
 from app.models.transaction import Transaction
 from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
@@ -43,13 +44,14 @@ class FinancialHealthService:
         categories_by_id = {category.id: category for category in categories}
 
         lookback_months = self._resolve_months_calculated(user_id=user_id, today=today)
-        tracked_windows = self._last_month_windows(today, count=max(lookback_months, 1))
+        tracked_windows = self._last_completed_month_windows(today, count=max(lookback_months, 1))
         analytics_windows = self._last_month_windows(today, count=6)
         discipline_windows = self._last_month_windows(today, count=min(max(lookback_months, 1), 3))
 
         tx_from = self._window_start_dt(analytics_windows[0]) if analytics_windows else self._window_start_dt(current_month)
         transactions = self.transaction_repo.list_transactions(user_id=user_id, date_from=tx_from)
         active_accounts = [account for account in self.account_repo.list_by_user(user_id) if account.is_active]
+        real_assets = self.db.query(RealAssetModel).filter(RealAssetModel.user_id == user_id).all()
 
         monthly_totals = self._build_monthly_totals(windows=analytics_windows, transactions=transactions)
         current_totals = monthly_totals.get(current_month.key, {"income": ZERO, "expense": ZERO})
@@ -82,9 +84,13 @@ class FinancialHealthService:
         dti = self._percent(dti_total_payments, average_income)
         dti_zone = self._dti_zone(dti)
 
-        leverage_total_debt, leverage_own_capital = self._current_capital_snapshot(active_accounts)
+        leverage_total_debt, leverage_own_capital = self._current_capital_snapshot(
+            active_accounts,
+            real_assets,
+        )
         leverage = self._percent(leverage_total_debt, leverage_own_capital)
         leverage_zone = self._leverage_zone(leverage)
+        real_assets_total = float(sum(self._to_decimal(asset.estimated_value) for asset in real_assets))
 
         discipline, discipline_zone, discipline_violations = self._discipline_metrics(
             user_id=user_id,
@@ -158,6 +164,7 @@ class FinancialHealthService:
             leverage_zone=leverage_zone,
             leverage_total_debt=float(leverage_total_debt),
             leverage_own_capital=float(leverage_own_capital),
+            real_assets_total=real_assets_total,
             discipline=round(discipline, 2) if discipline is not None else None,
             discipline_zone=discipline_zone,
             discipline_violations=discipline_violations,
@@ -180,8 +187,8 @@ class FinancialHealthService:
         if first_transaction is None:
             return 0
         first_date = first_transaction.transaction_date.astimezone(timezone.utc).date()
-        months = (today.year - first_date.year) * 12 + (today.month - first_date.month) + 1
-        return max(1, min(months, 6))
+        months = (today.year - first_date.year) * 12 + (today.month - first_date.month)
+        return max(0, min(months, 6))
 
     def _build_monthly_totals(self, *, windows: list[MonthWindow], transactions: list[Transaction]) -> dict[str, dict[str, Decimal]]:
         totals = {
@@ -255,7 +262,11 @@ class FinancialHealthService:
             total += self._to_decimal(transaction.amount)
         return total.quantize(TWOPLACES)
 
-    def _current_capital_snapshot(self, active_accounts: list[Account]) -> tuple[Decimal, Decimal]:
+    def _current_capital_snapshot(
+        self,
+        active_accounts: list[Account],
+        real_assets: list[RealAssetModel] | None = None,
+    ) -> tuple[Decimal, Decimal]:
         total_debt = ZERO
         own_capital = ZERO
         for account in active_accounts:
@@ -267,6 +278,10 @@ class FinancialHealthService:
             else:
                 if balance > 0:
                     own_capital += balance
+
+        for asset in real_assets or []:
+            own_capital += self._to_decimal(asset.estimated_value)
+
         return total_debt.quantize(TWOPLACES), own_capital.quantize(TWOPLACES)
 
     def _discipline_metrics(
@@ -427,6 +442,16 @@ class FinancialHealthService:
             return []
         windows: list[MonthWindow] = []
         for offset in range(count - 1, -1, -1):
+            month_date = self._shift_month(today, -offset)
+            windows.append(self._month_window(month_date.year, month_date.month))
+        return windows
+
+    def _last_completed_month_windows(self, today: date, *, count: int) -> list[MonthWindow]:
+        """Возвращает count завершённых месяцев — текущий месяц не включается."""
+        if count <= 0:
+            return []
+        windows: list[MonthWindow] = []
+        for offset in range(count, 0, -1):
             month_date = self._shift_month(today, -offset)
             windows.append(self._month_window(month_date.year, month_date.month))
         return windows

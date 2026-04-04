@@ -50,6 +50,7 @@ export type FinancialHealth = {
   leverage_zone: LeverageZone;
   leverage_total_debt: number;
   leverage_own_capital: number;
+  real_assets_total?: number;
   discipline: number | null;
   discipline_zone: DisciplineZone | null;
   discipline_violations: ChronicViolation[];
