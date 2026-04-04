@@ -947,14 +947,14 @@ export function TransactionForm({
         {showCreditRepaymentFields ? (
           <>
             <div>
-              <Label htmlFor="tx-credit-principal">???????? ????</Label>
-              <Input id="tx-credit-principal" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_principal_amount', { validate: (value) => !showCreditRepaymentFields || Number(value) >= 0 || '??????? ?????????? ?????' })} />
+              <Label htmlFor="tx-credit-principal">Основной долг</Label>
+              <Input id="tx-credit-principal" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_principal_amount', { validate: (value) => !showCreditRepaymentFields || Number(value) >= 0 || 'Введите корректную сумму' })} />
             </div>
             {showCreditPaymentFields ? (
               <div>
-                <Label htmlFor="tx-credit-interest">????????</Label>
-                <Input id="tx-credit-interest" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_interest_amount', { validate: (value) => !showCreditPaymentFields || Number(value) >= 0 || '??????? ?????????? ?????' })} />
-                {submitCount > 0 && !hasValidCreditBreakdown ? <p className="mt-1 text-xs text-danger">????? ?????? ???? ????? ????????? ????? ? ?????????</p> : null}
+                <Label htmlFor="tx-credit-interest">Проценты</Label>
+                <Input id="tx-credit-interest" className="h-9" type="number" step="0.01" placeholder="0.00" {...register('credit_interest_amount', { validate: (value) => !showCreditPaymentFields || Number(value) >= 0 || 'Введите корректную сумму' })} />
+                {submitCount > 0 && !hasValidCreditBreakdown ? <p className="mt-1 text-xs text-danger">Сумма должна быть равна основному долгу и процентам</p> : null}
               </div>
             ) : null}
           </>

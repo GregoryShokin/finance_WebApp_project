@@ -6,6 +6,7 @@ import { MoneyAmount } from '@/components/shared/money-amount';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
+import { resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { Category } from '@/types/category';
 import type { FinancialHealth } from '@/types/financial-health';
 import type { Transaction } from '@/types/transaction';
@@ -54,6 +55,7 @@ export function SavingsRateWidget({ health, transactions, categories, isLoading 
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
   const [progressWidth, setProgressWidth] = useState(0);
+  const [expandUp, setExpandUp] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -189,6 +191,13 @@ export function SavingsRateWidget({ health, transactions, categories, isLoading 
     setProgressWidth(targetWidth);
   }, [targetWidth]);
 
+  function handleToggle(next?: boolean) {
+    if ((!isExpanded || next === true) && cardRef.current) {
+      setExpandUp(resolveExpandUp(cardRef.current, 450));
+    }
+    setIsExpanded((value) => next ?? !value);
+  }
+
   function renderRuleRow(label: string, pct: number, avg: number, target: number, goodColor: string, warnColor: string, badColor: string, emphasizePositive = false) {
     const color = emphasizePositive
       ? pct >= 20
@@ -257,7 +266,7 @@ export function SavingsRateWidget({ health, transactions, categories, isLoading 
 
         <button
           type="button"
-          onClick={() => setIsExpanded((value) => !value)}
+          onClick={() => handleToggle()}
           className="absolute right-3 top-3 flex size-[22px] items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
           aria-label="Подробнее"
           aria-expanded={isExpanded}
@@ -331,7 +340,7 @@ export function SavingsRateWidget({ health, transactions, categories, isLoading 
         <button
           type="button"
           aria-label="Закрыть"
-          onClick={() => setIsExpanded(false)}
+          onClick={() => handleToggle(false)}
           className="fixed inset-0 z-40 bg-black/10"
         />
       ) : null}
@@ -341,11 +350,12 @@ export function SavingsRateWidget({ health, transactions, categories, isLoading 
           className="relative overflow-visible p-5"
           style={{
             position: isExpanded ? 'absolute' : 'relative',
-            top: 0,
+            top: isExpanded && !expandUp ? 0 : 'auto',
+            bottom: isExpanded && expandUp ? 0 : 'auto',
             left: 0,
             right: 0,
             transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: 'center center',
+            transformOrigin: expandUp ? 'center bottom' : 'center center',
             transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
             zIndex: isExpanded ? 50 : 1,
             overflow: 'visible',

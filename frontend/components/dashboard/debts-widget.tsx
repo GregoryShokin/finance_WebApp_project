@@ -10,6 +10,7 @@ import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { deleteCounterparty } from '@/lib/api/counterparties';
 import { formatMoney } from '@/lib/utils/format';
+import { resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { Counterparty } from '@/types/counterparty';
 import type { FinancialHealth } from '@/types/financial-health';
 
@@ -24,6 +25,7 @@ type Props = {
 export function DebtsWidget({ counterparties, health: _health, isLoading = false }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
+  const [expandUp, setExpandUp] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -81,6 +83,9 @@ export function DebtsWidget({ counterparties, health: _health, isLoading = false
   }, [counterparties]);
 
   function handleToggle() {
+    if (!isExpanded && cardRef.current) {
+      setExpandUp(resolveExpandUp(cardRef.current, 500));
+    }
     setIsExpanded((current) => {
       const next = !current;
       document.dispatchEvent(
@@ -239,11 +244,12 @@ export function DebtsWidget({ counterparties, health: _health, isLoading = false
           className="relative overflow-visible p-5"
           style={{
             position: isExpanded ? 'absolute' : 'relative',
-            top: 0,
+            top: isExpanded && !expandUp ? 0 : 'auto',
+            bottom: isExpanded && expandUp ? 0 : 'auto',
             left: 0,
             right: 0,
             transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: 'center center',
+            transformOrigin: expandUp ? 'center bottom' : 'center center',
             transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
             zIndex: isExpanded ? 50 : 1,
             overflow: 'visible',

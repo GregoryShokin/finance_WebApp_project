@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
+import { resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { FIScoreComponents, FinancialHealth } from '@/types/financial-health';
 
 const SCALE = 1.8;
@@ -37,13 +38,14 @@ function buildComponents(components: FIScoreComponents): ScoreComponentRow[] {
     { label: 'Дисциплина', value: components.discipline },
     { label: 'Фин. независимость', value: components.financial_independence },
     { label: 'Рост капитала', value: components.capital_growth },
-    { label: 'Кред. нагрузка', value: components.dti_inverse },
+    { label: 'Кредитная нагрузка', value: components.dti_inverse },
   ];
 }
 
 export function FiScoreWidget({ data, isLoading = false }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
+  const [expandUp, setExpandUp] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -86,6 +88,9 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
   const history = data?.fi_score_components.history;
 
   function handleToggle() {
+    if (!isExpanded && cardRef.current) {
+      setExpandUp(resolveExpandUp(cardRef.current, 400));
+    }
     setIsExpanded((current) => {
       const next = !current;
       document.dispatchEvent(
@@ -222,7 +227,7 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
         <button
           type="button"
           aria-label="Закрыть"
-          onClick={() => setIsExpanded(false)}
+          onClick={handleToggle}
           className="fixed inset-0 z-40 bg-slate-950/10"
         />
       ) : null}
@@ -232,11 +237,12 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
           className="relative overflow-visible p-5"
           style={{
             position: isExpanded ? 'absolute' : 'relative',
-            top: 0,
+            top: isExpanded && !expandUp ? 0 : 'auto',
+            bottom: isExpanded && expandUp ? 0 : 'auto',
             left: 0,
             right: 0,
             transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: 'center center',
+            transformOrigin: expandUp ? 'center bottom' : 'center center',
             transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
             zIndex: isExpanded ? 50 : 1,
             overflow: 'visible',

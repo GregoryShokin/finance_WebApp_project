@@ -9,7 +9,7 @@ const labels: Record<string, string> = {
   discipline: 'Дисциплина',
   financial_independence: 'Независимость',
   capital_growth: 'Рост капитала',
-  dti_inverse: 'Нагрузка',
+  dti_inverse: 'Кредитная нагрузка',
 };
 
 export function FIScoreCard({

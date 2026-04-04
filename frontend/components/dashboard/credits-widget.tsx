@@ -7,6 +7,7 @@ import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
+import { resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { Account } from '@/types/account';
 import type { FinancialHealth } from '@/types/financial-health';
 import type { Transaction } from '@/types/transaction';
@@ -30,9 +31,9 @@ function getDtiColor(dti: number) {
   return '#E24B4A';
 }
 
-function getDtiBadge(dti: number) {
-  if (dti < 30) return { label: 'Нагрузка в норме', className: 'bg-emerald-100 text-emerald-700' };
-  if (dti < 40) return { label: 'Допустимо', className: 'bg-amber-100 text-amber-700' };
+function getLoadBadge(dti: number) {
+  if (dti < 30) return { label: 'Кредитная нагрузка в норме', className: 'bg-emerald-100 text-emerald-700' };
+  if (dti < 40) return { label: 'Нагрузка допустима', className: 'bg-amber-100 text-amber-700' };
   return { label: 'Высокая нагрузка', className: 'bg-rose-100 text-rose-700' };
 }
 
@@ -45,6 +46,7 @@ function getUtilizationTone(percent: number) {
 export function CreditsWidget({ accounts, transactions, health, isLoading = false }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
+  const [expandUp, setExpandUp] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -90,13 +92,7 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
       }
     }
 
-    const creditAccounts = accounts
-      .filter((account) => account.account_type === 'credit')
-      .map((account) => ({
-        ...account,
-        hasPaymentHistory: paymentHistoryAccountIds.has(account.id),
-      }));
-
+    const creditAccounts = accounts.filter((account) => account.account_type === 'credit');
     const creditCards = accounts
       .filter((account) => account.account_type === 'credit_card')
       .map((account) => {
@@ -123,9 +119,12 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
   }, [accounts, transactions]);
 
   const dtiColor = getDtiColor(health.dti);
-  const dtiBadge = getDtiBadge(health.dti);
+  const loadBadge = getLoadBadge(health.dti);
 
   function handleToggle() {
+    if (!isExpanded && cardRef.current) {
+      setExpandUp(resolveExpandUp(cardRef.current, 500));
+    }
     setIsExpanded((current) => {
       const next = !current;
       document.dispatchEvent(
@@ -174,8 +173,8 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
             ) : (
               <p className="text-2xl font-semibold text-slate-400 lg:text-3xl">Кредитов нет</p>
             )}
-            <span className={cn('mt-3 inline-flex rounded-full px-2.5 py-1 text-xs font-medium', dtiBadge.className)}>
-              {dtiBadge.label}
+            <span className={cn('mt-3 inline-flex rounded-full px-2.5 py-1 text-xs font-medium', loadBadge.className)}>
+              {loadBadge.label}
             </span>
             <p className="mt-2 text-sm text-slate-500">{health.dti.toFixed(1)}% от дохода</p>
           </div>
@@ -191,14 +190,11 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
                         <span className="text-sm text-slate-700">{account.name}</span>
                         <span className="font-medium text-rose-600">{formatMoney(Math.abs(toNumber(account.balance)))}</span>
                       </div>
-                      <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-400">
-                        {account.credit_interest_rate != null ? <span>{toNumber(account.credit_interest_rate)}% годовых</span> : null}
-                        {account.credit_term_remaining != null ? <span>осталось {account.credit_term_remaining} мес.</span> : null}
-                      </div>
-                      {!account.hasPaymentHistory && !account.monthly_payment ? (
-                        <p className="mt-1 text-xs text-amber-600">
-                          Платежей ещё не было — внеси первый платёж чтобы DTI обновился
-                        </p>
+                      {(account.credit_interest_rate != null || account.credit_term_remaining != null) ? (
+                        <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-400">
+                          {account.credit_interest_rate != null ? <span>{toNumber(account.credit_interest_rate)}% годовых</span> : null}
+                          {account.credit_term_remaining != null ? <span>осталось {account.credit_term_remaining} мес.</span> : null}
+                        </div>
                       ) : null}
                     </div>
                   ))}
@@ -214,11 +210,9 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
                     <div key={card.id} className="rounded-2xl bg-slate-50 px-4 py-3">
                       <div className="flex items-center justify-between gap-3 text-sm">
                         <span className="text-slate-700">{card.name}</span>
-                        <span className="font-medium text-slate-900">{formatMoney(card.used)}</span>
-                      </div>
-                      <div className="mt-1 flex items-center justify-between gap-3 text-xs text-slate-400">
-                        <span>Лимит: {formatMoney(card.limit)}</span>
-                        <span>{card.utilization.toFixed(0)}%</span>
+                        <span className="font-medium text-slate-900">
+                          {formatMoney(card.used)} / {formatMoney(card.limit)}
+                        </span>
                       </div>
                       <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-slate-100">
                         <div
@@ -226,11 +220,6 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
                           style={{ width: `${Math.min(card.utilization, 100)}%` }}
                         />
                       </div>
-                      {!card.hasPaymentHistory && !card.monthly_payment ? (
-                        <p className="mt-2 text-xs text-amber-600">
-                          Платежей ещё не было — внеси первый платёж чтобы DTI обновился
-                        </p>
-                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -244,20 +233,15 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
                 <span className="text-slate-500">Ежемесячный платёж</span>
                 <span className="font-medium text-slate-900">{formatMoney(health.dti_total_payments)}</span>
               </div>
-              <p className="text-[11px] text-slate-400">по последнему внесённому платежу</p>
               <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">DTI</span>
-                <span className="font-medium" style={{ color: dtiColor }}>{health.dti.toFixed(1)}%</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Средний доход</span>
-                <span className="font-medium text-slate-900">{formatMoney(health.dti_income)}</span>
+                <span className="text-slate-500">Кредитная нагрузка</span>
+                <span className="font-medium" style={{ color: dtiColor }}>{health.dti.toFixed(1)}% от дохода</span>
               </div>
             </div>
 
             {health.dti >= 40 ? (
               <div className="rounded-2xl border-l-2 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                Нагрузка выше нормы. Приоритет — погасить кредит с наибольшей ставкой.
+                Нагрузка выше нормы — сначала закрой самый дорогой кредит
               </div>
             ) : null}
           </div>
@@ -286,11 +270,12 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
           className="relative overflow-visible p-5"
           style={{
             position: isExpanded ? 'absolute' : 'relative',
-            top: 0,
+            top: isExpanded && !expandUp ? 0 : 'auto',
+            bottom: isExpanded && expandUp ? 0 : 'auto',
             left: 0,
             right: 0,
             transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: 'center center',
+            transformOrigin: expandUp ? 'center bottom' : 'center center',
             transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
             zIndex: isExpanded ? 50 : 1,
             overflow: 'visible',

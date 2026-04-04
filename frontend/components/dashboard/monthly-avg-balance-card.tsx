@@ -410,7 +410,7 @@ export function MonthlyAvgBalanceCard({ health, transactions, categories, goals,
       <div className="mt-4 space-y-4">
         <div className="rounded-2xl bg-slate-50 px-4 py-3">
           <div className="mb-2 flex items-center justify-between gap-3 text-sm">
-            <span className="text-slate-600">Текущий DTI</span>
+            <span className="text-slate-600">Текущая кредитная нагрузка</span>
             <span className={cn('font-medium', dtiTone.badge)}>{health.dti.toFixed(1)}%</span>
           </div>
           <ProgressBar value={health.dti} toneClass={dtiTone.bar} markerPercent={40} />
@@ -418,7 +418,7 @@ export function MonthlyAvgBalanceCard({ health, transactions, categories, goals,
 
         <div className="rounded-2xl border-l-2 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-800">
           <p>
-            При текущем платеже {formatMoney(health.dti_total_payments)}/мес нагрузка выше нормы. После снижения DTI &lt; 40% освободится {formatMoney(dtiFreed)} — направишь на подушку.
+            При текущем платеже {formatMoney(health.dti_total_payments)}/мес нагрузка выше нормы. После снижения кредитной нагрузки ниже 40% освободится {formatMoney(dtiFreed)} — направишь на подушку.
           </p>
         </div>
       </div>

@@ -8,6 +8,7 @@ import { MoneyAmount } from '@/components/shared/money-amount';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
+import { resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { Account } from '@/types/account';
 import type { FinancialHealth } from '@/types/financial-health';
 import type { RealAsset } from '@/types/real-asset';
@@ -40,6 +41,7 @@ function AssetIcon({ type }: { type: RealAsset['asset_type'] }) {
 export function CapitalWidget({ accounts, realAssets, health, isLoading = false }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
+  const [expandUp, setExpandUp] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -100,6 +102,9 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
   }, [accounts, realAssets, health]);
 
   function handleToggle() {
+    if (!isExpanded && cardRef.current) {
+      setExpandUp(resolveExpandUp(cardRef.current, 450));
+    }
     setIsExpanded((current) => {
       const next = !current;
       document.dispatchEvent(
@@ -252,11 +257,12 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
           className="relative overflow-visible p-5"
           style={{
             position: isExpanded ? 'absolute' : 'relative',
-            top: 0,
+            top: isExpanded && !expandUp ? 0 : 'auto',
+            bottom: isExpanded && expandUp ? 0 : 'auto',
             left: 0,
             right: 0,
             transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: 'center center',
+            transformOrigin: expandUp ? 'center bottom' : 'center center',
             transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
             zIndex: isExpanded ? 50 : 1,
             overflow: 'visible',
@@ -268,4 +274,3 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
     </div>
   );
 }
-

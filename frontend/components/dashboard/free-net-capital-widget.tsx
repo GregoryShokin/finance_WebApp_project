@@ -1,20 +1,19 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
+import { getFreeNetCapitalMetrics } from '@/components/dashboard/free-net-capital-data';
 import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 import { MoneyAmount } from '@/components/shared/money-amount';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
+import { resolveExpandDirection, resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { Account } from '@/types/account';
 import type { Counterparty } from '@/types/counterparty';
 import type { GoalWithProgress } from '@/types/goal';
 import type { Transaction } from '@/types/transaction';
-
-import { getFreeNetCapitalMetrics } from '@/components/dashboard/free-net-capital-data';
-
 
 type Props = {
   accounts: Account[];
@@ -39,6 +38,8 @@ export function FreeNetCapitalWidget({
 }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
+  const [expandDirection, setExpandDirection] = useState<'left' | 'right'>('right');
+  const [expandUp, setExpandUp] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -80,6 +81,11 @@ export function FreeNetCapitalWidget({
   }, []);
 
   function handleToggle() {
+    if (!isExpanded && cardRef.current) {
+      setExpandDirection(resolveExpandDirection(cardRef.current, 860));
+      setExpandUp(resolveExpandUp(cardRef.current, 600));
+    }
+
     setIsExpanded((current) => {
       const next = !current;
       document.dispatchEvent(
@@ -108,12 +114,30 @@ export function FreeNetCapitalWidget({
     );
   }
 
-  function renderContent() {
+  function renderHeader() {
+    return (
+      <div className="flex items-start justify-between gap-4">
+        <div className="pr-4">
+          <p className="text-sm font-medium text-slate-500">Свободный чистый капитал</p>
+          <p className="mt-1 text-sm text-slate-500">Свободные активы за вычетом долгов</p>
+        </div>
+        <button
+          type="button"
+          onClick={handleToggle}
+          className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
+          aria-label="Подробнее"
+          aria-expanded={isExpanded}
+        >
+          i
+        </button>
+      </div>
+    );
+  }
+
+  function renderCollapsedBody() {
     if (isLoading) {
       return (
         <>
-          <p className="text-sm font-medium text-slate-500">Свободный чистый капитал</p>
-          <p className="mt-1 text-sm text-slate-500">Свободные активы за вычетом долгов</p>
           <div className="mt-4 space-y-2">
             <div className="h-9 w-40 animate-pulse rounded bg-slate-100" />
             <div className="h-5 w-32 animate-pulse rounded bg-slate-100" />
@@ -124,110 +148,77 @@ export function FreeNetCapitalWidget({
 
     if (!metrics) {
       return (
-        <>
-          <div className="flex items-start justify-between gap-4">
-            <div className="pr-4">
-              <p className="text-sm font-medium text-slate-500">Свободный чистый капитал</p>
-              <p className="mt-1 text-sm text-slate-500">Свободные активы за вычетом долгов</p>
-            </div>
-            <button
-              type="button"
-              onClick={handleToggle}
-              className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-              aria-label="Подробнее"
-              aria-expanded={isExpanded}
-            >
-              i
-            </button>
-          </div>
-          <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
-            Недостаточно данных
-          </div>
-        </>
+        <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
+          Недостаточно данных
+        </div>
       );
     }
 
     return (
+      <div className="mt-4">
+        <MoneyAmount
+          value={metrics.freeNetCapital}
+          tone={metrics.freeNetCapital >= 0 ? 'income' : 'expense'}
+          className="text-2xl lg:text-3xl"
+        />
+        {renderDelta()}
+      </div>
+    );
+  }
+
+  function renderExpandedBody() {
+    if (!metrics || !isExpanded) return null;
+
+    return (
       <>
-        <div className="flex items-start justify-between gap-4">
-          <div className="pr-4">
-            <p className="text-sm font-medium text-slate-500">Свободный чистый капитал</p>
-            <p className="mt-1 text-sm text-slate-500">Свободные активы за вычетом долгов</p>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-xs uppercase tracking-wide text-slate-400">Личные активы</p>
+            <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.personalAssets)}</p>
           </div>
-          <button
-            type="button"
-            onClick={handleToggle}
-            className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-            aria-label="Подробнее"
-            aria-expanded={isExpanded}
-          >
-            i
-          </button>
+          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-xs uppercase tracking-wide text-slate-400">Целевые активы</p>
+            <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.targetAssets)}</p>
+          </div>
+          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-xs uppercase tracking-wide text-slate-400">Долги</p>
+            <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.debts)}</p>
+          </div>
+          <div className="rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-xs uppercase tracking-wide text-slate-400">Свободный чистый капитал</p>
+            <p className={cn('mt-1 font-medium', metrics.freeNetCapital >= 0 ? 'text-slate-900' : 'text-rose-600')}>
+              {formatMoney(metrics.freeNetCapital)}
+            </p>
+          </div>
         </div>
 
-        {!isExpanded ? (
-          <>
-            <div className="mt-4">
-              <MoneyAmount
-                value={metrics.freeNetCapital}
-                tone={metrics.freeNetCapital >= 0 ? 'income' : 'expense'}
-                className="text-2xl lg:text-3xl"
+        <div className="mt-5 h-[260px] rounded-[28px] bg-slate-50/70 px-3 py-4 sm:px-4">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={metrics.chartData} barCategoryGap="28%">
+              <CartesianGrid vertical={false} stroke="#E2E8F0" strokeDasharray="3 3" />
+              <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fill: '#64748B', fontSize: 12 }} />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                tick={{ fill: '#94A3B8', fontSize: 12 }}
+                tickFormatter={formatYAxisValue}
+                width={52}
               />
-              {renderDelta()}
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2">
-              <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Личные активы</p>
-                <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.personalAssets)}</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Целевые активы</p>
-                <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.targetAssets)}</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Долги</p>
-                <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.debts)}</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-wide text-slate-400">Свободный чистый капитал</p>
-                <p className={cn('mt-1 font-medium', metrics.freeNetCapital >= 0 ? 'text-slate-900' : 'text-rose-600')}>
-                  {formatMoney(metrics.freeNetCapital)}
-                </p>
-              </div>
-            </div>
+              <Tooltip
+                cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }}
+                formatter={(value: number) => [formatMoney(value), 'Свободный чистый капитал']}
+                labelFormatter={(label) => `Месяц: ${label}`}
+              />
+              <Bar dataKey="value" fill="#0F172A" radius={[10, 10, 0, 0]} maxBarSize={44} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
 
-            <div className="mt-5 h-[260px] rounded-[28px] bg-slate-50/70 px-3 py-4 sm:px-4">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={metrics.chartData} barCategoryGap="28%">
-                  <CartesianGrid vertical={false} stroke="#E2E8F0" strokeDasharray="3 3" />
-                  <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fill: '#64748B', fontSize: 12 }} />
-                  <YAxis
-                    tickLine={false}
-                    axisLine={false}
-                    tick={{ fill: '#94A3B8', fontSize: 12 }}
-                    tickFormatter={formatYAxisValue}
-                    width={52}
-                  />
-                  <Tooltip
-                    cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }}
-                    formatter={(value: number) => [formatMoney(value), 'Свободный чистый капитал']}
-                    labelFormatter={(label) => `Месяц: ${label}`}
-                  />
-                  <Bar dataKey="value" fill="#0F172A" radius={[10, 10, 0, 0]} maxBarSize={44} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="mt-4 space-y-2 text-sm text-slate-600">
-              {metrics.messageLines.map((line) => (
-                <p key={line}>{line}</p>
-              ))}
-            </div>
-          </>
-        )}
+        <div className="mt-4 space-y-2 text-sm text-slate-600">
+          {metrics.messageLines.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
       </>
     );
   }
@@ -248,21 +239,37 @@ export function FreeNetCapitalWidget({
       ) : null}
 
       <div ref={cardRef}>
-        <Card
-          className={cn(
-            'relative overflow-visible transition-[width,transform,box-shadow] duration-300 ease-out p-5',
-            isExpanded
-              ? 'absolute inset-x-0 top-0 z-50 shadow-2xl lg:p-6 xl:w-[calc(154%+1rem)] xl:max-w-[calc(154%+1rem)]'
-              : 'w-full',
-          )}
-          style={{
-            transformOrigin: 'left top',
-            transform: isExpanded ? 'translateY(-4px)' : 'translateY(0)',
-          }}
-        >
-          {renderContent()}
+        <Card className="relative overflow-visible p-5">
+          {renderHeader()}
+          {renderCollapsedBody()}
         </Card>
       </div>
+
+      <Card
+        className="absolute overflow-visible p-5"
+        style={{
+          position: isExpanded ? 'absolute' : 'relative',
+          top: isExpanded && !expandUp ? 0 : 'auto',
+          bottom: isExpanded && expandUp ? 0 : 'auto',
+          left: isExpanded && expandDirection === 'right' ? 0 : 'auto',
+          right: isExpanded && expandDirection === 'left' ? 0 : 'auto',
+          transform: isExpanded ? 'scale(1)' : 'scale(0.6)',
+          width: isExpanded ? 'min(860px, calc(100vw - 2rem))' : '100%',
+          transformOrigin: expandUp
+            ? (expandDirection === 'right' ? 'bottom left' : 'bottom right')
+            : (expandDirection === 'right' ? 'top left' : 'top right'),
+          transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 300ms ease',
+          opacity: isExpanded ? 1 : 0,
+          zIndex: isExpanded ? 50 : 1,
+          overflow: 'visible',
+          boxShadow: isExpanded ? '0 8px 40px rgba(0,0,0,0.12)' : 'none',
+          pointerEvents: isExpanded ? 'auto' : 'none',
+        }}
+      >
+        {renderHeader()}
+        {renderCollapsedBody()}
+        {renderExpandedBody()}
+      </Card>
     </div>
   );
 }

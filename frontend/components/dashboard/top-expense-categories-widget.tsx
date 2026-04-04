@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -8,6 +8,7 @@ import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
+import { resolveExpandDirection, resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { Category, CategoryPriority } from '@/types/category';
 import type { Transaction } from '@/types/transaction';
 
@@ -207,6 +208,8 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
   const [categoryType, setCategoryType] = useState<CategoryType>('essential');
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
   const [selectedMonthKey, setSelectedMonthKey] = useState<string>('');
+  const [expandDirection, setExpandDirection] = useState<'left' | 'right'>('right');
+  const [expandUp, setExpandUp] = useState(false);
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -366,7 +369,13 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
   }, [metrics, selectedYear, selectedMonthKey]);
 
   const monthsForSelectedYear = (metrics?.monthOptions ?? []).filter((option) => option.year === selectedYear);
+
   function handleToggle() {
+    if (!isExpanded && cardRef.current) {
+      setExpandDirection(resolveExpandDirection(cardRef.current, 860));
+      setExpandUp(resolveExpandUp(cardRef.current, 600));
+    }
+
     setIsExpanded((current) => {
       const next = !current;
       document.dispatchEvent(
@@ -407,6 +416,56 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
     );
   }
 
+  function renderExpandedControls() {
+    return (
+      <div className="mt-5 space-y-3">
+        <div className="inline-flex rounded-full bg-slate-100 p-1 text-xs text-slate-500">
+          {CATEGORY_TYPE_OPTIONS.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              onClick={() => setCategoryType(option.key)}
+              className={cn(
+                'rounded-full px-3 py-1.5 transition',
+                categoryType === option.key ? 'bg-white text-slate-900 shadow-sm' : 'hover:text-slate-700',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-2">
+          <label className="relative block">
+            <select
+              value={String(selectedYear)}
+              onChange={(event) => setSelectedYear(Number(event.target.value))}
+              className="h-10 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-4 pr-9 text-sm text-slate-700 outline-none transition focus:border-slate-400"
+            >
+              {metrics?.availableYears.map((year) => (
+                <option key={year} value={year}>{year}</option>
+              ))}
+            </select>
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">▼</span>
+          </label>
+
+          <label className="relative block">
+            <select
+              value={selectedMonthKey}
+              onChange={(event) => setSelectedMonthKey(event.target.value)}
+              className="h-10 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-4 pr-9 text-sm text-slate-700 outline-none transition focus:border-slate-400"
+            >
+              {monthsForSelectedYear.map((option) => (
+                <option key={option.key} value={option.key}>{MONTH_OPTIONS[option.monthIndex]}</option>
+              ))}
+            </select>
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">▼</span>
+          </label>
+        </div>
+      </div>
+    );
+  }
+
   function renderExpandedChart() {
     if (!metrics || metrics.selectedPeriodItems.length === 0) {
       return (
@@ -425,34 +484,31 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
               dataKey="name"
               tickLine={false}
               axisLine={false}
+              tick={{ fill: '#64748B', fontSize: 12 }}
               interval={0}
-              height={72}
-              tick={{ fill: '#64748B', fontSize: 11 }}
-              angle={-24}
+              angle={-20}
               textAnchor="end"
+              height={64}
             />
             <YAxis
               tickLine={false}
               axisLine={false}
               tick={{ fill: '#94A3B8', fontSize: 12 }}
               tickFormatter={formatYAxisValue}
-              width={52}
+              width={56}
             />
-            <Tooltip content={renderTooltip} />
+            <Tooltip content={renderTooltip} cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }} />
             <Bar dataKey="amount" radius={[6, 6, 0, 0]} maxBarSize={48}>
               {metrics.selectedPeriodItems.map((item, index) => (
-                <Cell
-                  key={`cell-${index}`}
-                  fill={BAR_COLORS[item.status]}
-                />
+                <Cell key={`cell-${index}`} fill={BAR_COLORS[item.status]} />
               ))}
               <LabelList
                 dataKey="amount"
                 position="top"
-                content={(props) => {
+                content={(props: { x?: number | string; y?: number | string; width?: number | string; value?: number | string; index?: number }) => {
                   const { x, y, width, value, index } = props;
                   const item = metrics.selectedPeriodItems[index as number];
-                  if (!item) return null;
+                  if (!item || x == null || y == null || width == null || value == null) return null;
 
                   const icon = item.status === 'spike' ? '↑' : item.status === 'drift' ? '↗' : null;
                   const iconColor = item.status === 'spike' ? '#A32D2D' : '#854F0B';
@@ -492,7 +548,32 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
     );
   }
 
-  function renderContent() {
+  function renderHeader() {
+    return (
+      <div className="flex items-start justify-between gap-4">
+        <div className="pr-4">
+          <h4 className="text-base font-semibold text-slate-900">
+            {isExpanded ? 'Категории расходов' : 'Топ 5 категорий расходов'}
+          </h4>
+          <p className="mt-1 text-sm text-slate-500">
+            {isExpanded ? 'Анализ расходов по категориям' : 'за текущий месяц'}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleToggle}
+          className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
+          aria-label="Подробнее"
+          aria-expanded={isExpanded}
+        >
+          i
+        </button>
+      </div>
+    );
+  }
+
+  function renderBaseContent() {
     if (isLoading) {
       return (
         <>
@@ -523,80 +604,8 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
 
     return (
       <>
-        <div className="flex items-start justify-between gap-4">
-          <div className="pr-4">
-            <h4 className="text-base font-semibold text-slate-900">
-              {isExpanded ? 'Категории расходов' : 'Топ 5 категорий расходов'}
-            </h4>
-            <p className="mt-1 text-sm text-slate-500">
-              {isExpanded ? 'Анализ расходов по категориям' : 'за текущий месяц'}
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleToggle}
-            className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-            aria-label="Подробнее"
-            aria-expanded={isExpanded}
-          >
-            i
-          </button>
-        </div>
-
-        {!isExpanded ? (
-          renderCollapsedList()
-        ) : (
-          <>
-            <div className="mt-5 space-y-3">
-              <div className="inline-flex rounded-full bg-slate-100 p-1 text-xs text-slate-500">
-                {CATEGORY_TYPE_OPTIONS.map((option) => (
-                  <button
-                    key={option.key}
-                    type="button"
-                    onClick={() => setCategoryType(option.key)}
-                    className={cn(
-                      'rounded-full px-3 py-1.5 transition',
-                      categoryType === option.key ? 'bg-white text-slate-900 shadow-sm' : 'hover:text-slate-700',
-                    )}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="grid gap-2 sm:grid-cols-2">
-                <label className="relative block">
-                  <select
-                    value={String(selectedYear)}
-                    onChange={(event) => setSelectedYear(Number(event.target.value))}
-                    className="h-10 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-4 pr-9 text-sm text-slate-700 outline-none transition focus:border-slate-400"
-                  >
-                    {metrics.availableYears.map((year) => (
-                      <option key={year} value={year}>{year}</option>
-                    ))}
-                  </select>
-                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">▼</span>
-                </label>
-
-                <label className="relative block">
-                  <select
-                    value={selectedMonthKey}
-                    onChange={(event) => setSelectedMonthKey(event.target.value)}
-                    className="h-10 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-4 pr-9 text-sm text-slate-700 outline-none transition focus:border-slate-400"
-                  >
-                    {monthsForSelectedYear.map((option) => (
-                      <option key={option.key} value={option.key}>{MONTH_OPTIONS[option.monthIndex]}</option>
-                    ))}
-                  </select>
-                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">▼</span>
-                </label>
-              </div>
-            </div>
-
-            {renderExpandedChart()}
-          </>
-        )}
+        {renderHeader()}
+        {renderCollapsedList()}
       </>
     );
   }
@@ -617,21 +626,40 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
       ) : null}
 
       <div ref={cardRef}>
-        <Card
-          className={cn(
-            'relative overflow-visible transition-[width,transform,box-shadow] duration-300 ease-out',
-            isExpanded
-              ? 'absolute right-0 top-0 z-50 w-[min(760px,calc(100vw-2rem))] p-5 shadow-2xl lg:p-6 xl:w-[760px]'
-              : 'w-full p-4 lg:p-5',
-          )}
-          style={{
-            transformOrigin: 'right top',
-            transform: isExpanded ? 'translateY(-4px)' : 'translateY(0)',
-          }}
-        >
-          {renderContent()}
+        <Card className="relative overflow-visible p-4 lg:p-5">
+          {renderBaseContent()}
         </Card>
       </div>
+
+      <Card
+        className="absolute overflow-visible p-4 lg:p-5"
+        style={{
+          position: isExpanded ? 'absolute' : 'relative',
+          top: isExpanded && !expandUp ? 0 : 'auto',
+          bottom: isExpanded && expandUp ? 0 : 'auto',
+          left: isExpanded && expandDirection === 'right' ? 0 : 'auto',
+          right: isExpanded && expandDirection === 'left' ? 0 : 'auto',
+          transform: isExpanded ? 'scale(1)' : 'scale(0.6)',
+          width: isExpanded ? 'min(860px, calc(100vw - 2rem))' : '100%',
+          transformOrigin: expandUp
+            ? (expandDirection === 'right' ? 'bottom left' : 'bottom right')
+            : (expandDirection === 'right' ? 'top left' : 'top right'),
+          transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 300ms ease',
+          opacity: isExpanded ? 1 : 0,
+          zIndex: isExpanded ? 50 : 1,
+          overflow: 'visible',
+          boxShadow: isExpanded ? '0 8px 40px rgba(0,0,0,0.12)' : 'none',
+          pointerEvents: isExpanded ? 'auto' : 'none',
+        }}
+      >
+        {renderHeader()}
+        {isExpanded ? (
+          <>
+            {renderExpandedControls()}
+            {renderExpandedChart()}
+          </>
+        ) : null}
+      </Card>
     </div>
   );
 }
