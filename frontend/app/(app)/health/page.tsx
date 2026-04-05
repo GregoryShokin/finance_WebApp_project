@@ -396,7 +396,15 @@ export default function HealthPage() {
       if (currentHealth.discipline === null) {
         return 'Создай бюджет по категориям, чтобы отслеживать дисциплину.';
       }
-      return 'Отлично держишь план по всем направлениям.';
+      // Есть направления с планом но плохим выполнением (< 80%)
+      const poorDirections = (lastMonth.direction_heatmap ?? [])
+        .filter((item) => item.fulfillment >= 0 && item.fulfillment < 80)
+        .sort((a, b) => a.fulfillment - b.fulfillment);
+      if (poorDirections.length > 0) {
+        const worst = poorDirections[0];
+        return `В ${lastMonth.label}: ${worst.label.toLowerCase()} выполнено на ${Math.round(worst.fulfillment)}%. Обрати внимание.`;
+      }
+      return 'Отлично — план выполнен по всем направлениям.';
     }
 
     const savingsGapMonthly = Math.max(0, avgIncome * 0.2 - Math.max(avgSavings, 0));

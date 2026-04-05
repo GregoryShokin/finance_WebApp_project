@@ -67,7 +67,7 @@ class FinancialHealthService:
         lookback_months = self._resolve_months_calculated(user_id=user_id, today=today)
         tracked_windows = self._last_completed_month_windows(today, count=max(lookback_months, 1))
         analytics_windows = self._last_month_windows(today, count=6)
-        discipline_windows = self._last_month_windows(today, count=min(max(lookback_months, 1), 3))
+        discipline_windows = self._last_completed_month_windows(today, count=min(max(lookback_months, 1), 3))
 
         tx_from = self._window_start_dt(analytics_windows[0]) if analytics_windows else self._window_start_dt(current_month)
         transactions = self.transaction_repo.list_transactions(user_id=user_id, date_from=tx_from)
@@ -746,6 +746,22 @@ class FinancialHealthService:
         transactions: list[Transaction],
         categories_by_id: dict[int, Category],
     ) -> tuple[float | None, str | None, list[ChronicViolation]]:
+        """
+        Дисциплина считается по 4 направлениям (direction), а не по категориям.
+
+        Направления:
+          - income_active:      доходы активные  → выполнение = min(fact/plan, 1)
+          - income_passive:     доходы пассивные → выполнение = min(fact/plan, 1)
+          - expense_essential:  обязательные     → выполнение = min(plan/fact, 1)
+          - expense_secondary:  второстепенные   → выполнение = min(plan/fact, 1)
+
+        Направление учитывается только если plan > 0.
+        Если plan > 0 и fact == 0 — для доходов это 0% выполнения,
+        для расходов — 100% (ничего не потратил, лимит соблюдён).
+        Итог: среднее выполнение по направлениям у которых есть план,
+        усреднённое по всем окнам.
+        Chronic violations не меняются — оставь текущую логику по категориям.
+        """
         if not windows:
             return None, None, []
 
@@ -760,13 +776,79 @@ class FinancialHealthService:
         if not budget_rows:
             return None, None, []
 
+        # plan по направлениям за каждый месяц
+        plan_by_month_direction: dict[tuple[str, str], Decimal] = {}
+        for row in budget_rows:
+            month_key = f"{row.month.year:04d}-{row.month.month:02d}"
+            category = categories_by_id.get(row.category_id)
+            if category is None:
+                continue
+            priority = str(category.priority or "").strip().lower()
+            if priority not in {"income_active", "income_passive", "expense_essential", "expense_secondary"}:
+                continue
+            key = (month_key, priority)
+            plan_by_month_direction[key] = plan_by_month_direction.get(key, ZERO) + self._to_decimal(row.planned_amount)
+
+        if not plan_by_month_direction:
+            return None, None, []
+
+        # fact по направлениям за каждый месяц
+        fact_by_month_direction: dict[tuple[str, str], Decimal] = {}
+        relevant_months = {window.key for window in windows}
+        for transaction in transactions:
+            if not transaction.affects_analytics or transaction.category_id is None:
+                continue
+            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
+            month_key = f"{tx_date.year:04d}-{tx_date.month:02d}"
+            if month_key not in relevant_months:
+                continue
+            category = categories_by_id.get(transaction.category_id)
+            if category is None:
+                continue
+            priority = str(category.priority or "").strip().lower()
+            if priority not in {"income_active", "income_passive", "expense_essential", "expense_secondary"}:
+                continue
+            key = (month_key, priority)
+            fact_by_month_direction[key] = fact_by_month_direction.get(key, ZERO) + self._to_decimal(transaction.amount)
+
+        # считаем выполнение по каждому направлению в каждом окне
+        # используем взвешенное среднее — вес = plan по направлению
+        # чтобы мелкий пассивный доход (кэшбэк 2000 ₽) не перевешивал
+        # крупные направления (активный доход 150 000 ₽)
+        weighted_sum: float = 0.0
+        total_weight: float = 0.0
+        for window in windows:
+            for direction in ("income_active", "income_passive", "expense_essential", "expense_secondary"):
+                plan = plan_by_month_direction.get((window.key, direction), ZERO)
+                if plan <= ZERO:
+                    continue  # нет плана — направление не учитывается
+                fact = fact_by_month_direction.get((window.key, direction), ZERO)
+                is_income = direction.startswith("income_")
+                if is_income:
+                    score = float(min(fact / plan, Decimal("1")))
+                else:
+                    if fact <= ZERO:
+                        score = 1.0
+                    else:
+                        score = float(min(plan / fact, Decimal("1")))
+                weight = float(plan)
+                weighted_sum += score * weight
+                total_weight += weight
+
+        if total_weight <= 0:
+            return None, None, []
+
+        discipline = round(weighted_sum / total_weight * 100, 2)
+
+        # chronic violations — оставляем старую логику по категориям
+        # собираем actuals по категориям для chronic
         budgets_by_month_category: dict[tuple[str, int], Decimal] = {}
         for row in budget_rows:
-            key = (f"{row.month.year:04d}-{row.month.month:02d}", row.category_id)
+            month_key = f"{row.month.year:04d}-{row.month.month:02d}"
+            key = (month_key, row.category_id)
             budgets_by_month_category[key] = self._to_decimal(row.planned_amount)
 
         actuals_by_month_category: dict[tuple[str, int], Decimal] = {}
-        relevant_months = {window.key for window in windows}
         for transaction in transactions:
             if transaction.type != "expense" or not transaction.affects_analytics or transaction.category_id is None:
                 continue
@@ -777,24 +859,19 @@ class FinancialHealthService:
             key = (month_key, transaction.category_id)
             actuals_by_month_category[key] = actuals_by_month_category.get(key, ZERO) + self._to_decimal(transaction.amount)
 
-        total_limits = ZERO
-        total_capped_fact = ZERO
         chronic_rows: list[ChronicViolation] = []
-
-        ordered_windows = sorted(windows, key=lambda item: item.key)
-        category_ids = sorted({category_id for (_, category_id) in budgets_by_month_category.keys()})
+        ordered_windows = sorted(windows, key=lambda w: w.key)
+        category_ids = sorted({cat_id for (_, cat_id) in budgets_by_month_category.keys()})
 
         for category_id in category_ids:
             streak: list[tuple[Decimal, Decimal]] = []
             best_streak: list[tuple[Decimal, Decimal]] = []
             for window in ordered_windows:
                 limit = budgets_by_month_category.get((window.key, category_id))
-                if limit is None or limit <= 0:
+                if limit is None or limit <= ZERO:
                     streak = []
                     continue
                 fact = actuals_by_month_category.get((window.key, category_id), ZERO)
-                total_limits += limit
-                total_capped_fact += min(fact, limit)
                 if fact > limit:
                     streak.append((fact, limit))
                     if len(streak) > len(best_streak):
@@ -802,21 +879,20 @@ class FinancialHealthService:
                 else:
                     streak = []
             if len(best_streak) >= 2:
-                avg_overage = sum(((fact - limit) / limit * Decimal("100")) for fact, limit in best_streak) / Decimal(str(len(best_streak)))
+                avg_overage = sum(
+                    ((f - l) / l * Decimal("100")) for f, l in best_streak
+                ) / Decimal(str(len(best_streak)))
+                category = categories_by_id.get(category_id)
                 chronic_rows.append(
                     ChronicViolation(
-                        category_name=categories_by_id.get(category_id).name if categories_by_id.get(category_id) else f"Category {category_id}",
+                        category_name=category.name if category else f"Category {category_id}",
                         months_count=len(best_streak),
                         overage_percent=round(float(avg_overage), 2),
                     )
                 )
 
-        if total_limits <= 0:
-            return None, None, []
-
-        discipline = self._percent(total_capped_fact, total_limits)
-        chronic_rows.sort(key=lambda row: (-row.months_count, -row.overage_percent, row.category_name.lower()))
-        return round(discipline, 2), self._discipline_zone(discipline), chronic_rows[:3]
+        chronic_rows.sort(key=lambda r: (-r.months_count, -r.overage_percent, r.category_name.lower()))
+        return discipline, self._discipline_zone(discipline), chronic_rows[:3]
 
     def _current_month_passive_income(
         self,

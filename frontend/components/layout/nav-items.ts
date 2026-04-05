@@ -53,6 +53,6 @@ export const navItems: NavItem[] = [
   { href: '/import', label: 'Импорт', icon: FileUp },
   { href: '/categories', label: 'Категории', icon: ListTree },
   { href: '/rules', label: 'Правила', icon: FolderTree },
-  { href: '/accounts', label: 'Счета', icon: Wallet },
+  { href: '/accounts', label: 'Активы', icon: Wallet },
   { href: '/bank-connections', label: 'Банковские подключения', icon: Landmark },
 ];

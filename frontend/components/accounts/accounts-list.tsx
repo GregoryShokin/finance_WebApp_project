@@ -1,6 +1,7 @@
 'use client';
 
 import type { Account } from '@/types/account';
+import type { Transaction } from '@/types/transaction';
 import { AccountCard } from '@/components/accounts/account-card';
 
 export function AccountsList({
@@ -10,6 +11,7 @@ export function AccountsList({
   onCancelDelete,
   deletingId,
   pendingDeleteIds,
+  transactions,
 }: {
   accounts: Account[];
   onEdit: (account: Account) => void;
@@ -17,6 +19,7 @@ export function AccountsList({
   onCancelDelete: (accountId: number) => void;
   deletingId?: number | null;
   pendingDeleteIds?: number[];
+  transactions: Transaction[];
 }) {
   const pendingSet = new Set(pendingDeleteIds ?? []);
 
@@ -31,6 +34,7 @@ export function AccountsList({
           onCancelDelete={onCancelDelete}
           isDeletePending={pendingSet.has(account.id)}
           isDeleting={deletingId === account.id}
+          transactions={transactions}
         />
       ))}
     </div>

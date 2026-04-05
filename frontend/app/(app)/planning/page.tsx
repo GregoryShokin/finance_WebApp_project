@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -9,24 +9,17 @@ import {
   ChevronLeft,
   ChevronRight,
   Pencil,
-  Plus,
-  Trash2,
   X,
 } from 'lucide-react';
 import { PageShell } from '@/components/layout/page-shell';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select } from '@/components/ui/select';
-import { getAccounts } from '@/lib/api/accounts';
 import { getBudgetAlerts, getBudgetProgress, markAlertRead, updateBudget } from '@/lib/api/budget';
-import { createRealAsset, deleteRealAsset, getRealAssets, updateRealAsset } from '@/lib/api/financial-health';
 import { formatMoney } from '@/lib/utils/format';
 import { cn } from '@/lib/utils/cn';
 import { toast } from 'sonner';
-import type { Account } from '@/types/account';
 import type { BudgetAlert, BudgetAlertType, BudgetProgress } from '@/types/budget';
-import type { RealAsset, RealAssetPayload, RealAssetType } from '@/types/financial-health';
 
 // ── Month helpers ─────────────────────────────────────────────────────────────
 
@@ -93,30 +86,6 @@ function incomePctColor(pct: number) {
   if (pct >= 80) return 'text-emerald-600';
   if (pct >= 40) return 'text-amber-600';
   return 'text-rose-500';
-}
-
-// ── Asset type labels ─────────────────────────────────────────────────────────
-
-const ASSET_TYPE_LABELS: Record<RealAssetType, string> = {
-  real_estate: 'Недвижимость',
-  car: 'Автомобиль',
-  other: 'Прочее',
-};
-
-const ASSET_TYPE_OPTIONS: RealAssetType[] = ['real_estate', 'car', 'other'];
-
-// ── Credit debt helper ────────────────────────────────────────────────────────
-
-function calcCreditDebt(account: Account): number {
-  const balance = Number(account.balance);
-  if (account.account_type === 'credit_card') {
-    const limit = Number(account.credit_limit_original ?? 0);
-    return Math.max(0, limit - balance);
-  }
-  if (account.account_type === 'credit' || account.is_credit) {
-    return Math.max(0, -balance);
-  }
-  return 0;
 }
 
 // ── EditablePlanned ───────────────────────────────────────────────────────────
@@ -339,7 +308,7 @@ function ExpenseGroup({
                 </div>
 
                 {/* Fact */}
-                <p className={cn('hidden text-right text-sm font-semibold tabular-nums sm:block', pctTextColor(pct))}>
+                <p className={cn('hidden text-right text-sm font-semibold tabular-nums sm:block', planned === 0 && Number(item.spent_amount) > 0 ? 'text-rose-600' : pctTextColor(pct))}>
                   {formatMoney(item.spent_amount)}
                 </p>
 
@@ -359,6 +328,8 @@ function ExpenseGroup({
                         {pct.toFixed(0)}%
                       </span>
                     </>
+                  ) : Number(item.spent_amount) > 0 ? (
+                    <span className="text-xs font-semibold text-rose-600">превышение</span>
                   ) : (
                     <span className="text-xs text-slate-400">без плана</span>
                   )}
@@ -575,100 +546,6 @@ function IncomeGroup({
   );
 }
 
-// ── RealAsset form ────────────────────────────────────────────────────────────
-
-const EMPTY_FORM: RealAssetPayload = { asset_type: 'real_estate', name: '', estimated_value: 0, linked_account_id: null };
-
-function RealAssetForm({
-  initial,
-  creditAccounts,
-  onSave,
-  onCancel,
-  isSaving,
-}: {
-  initial: RealAssetPayload;
-  creditAccounts: Account[];
-  onSave: (data: RealAssetPayload) => void;
-  onCancel: () => void;
-  isSaving: boolean;
-}) {
-  const [form, setForm] = useState<RealAssetPayload>(initial);
-
-  function set<K extends keyof RealAssetPayload>(key: K, val: RealAssetPayload[K]) {
-    setForm(prev => ({ ...prev, [key]: val }));
-  }
-
-  function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!form.name.trim()) { toast.error('Введите название актива'); return; }
-    if (form.estimated_value < 0) { toast.error('Стоимость не может быть отрицательной'); return; }
-    onSave(form);
-  }
-
-  return (
-    <form onSubmit={submit} className="surface-muted space-y-3 rounded-2xl p-4">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500">Тип</label>
-          <Select
-            value={form.asset_type}
-            onChange={(e) => set('asset_type', e.target.value as RealAssetType)}
-            disabled={isSaving}
-          >
-            {ASSET_TYPE_OPTIONS.map(t => (
-              <option key={t} value={t}>{ASSET_TYPE_LABELS[t]}</option>
-            ))}
-          </Select>
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500">Название</label>
-          <Input
-            value={form.name}
-            onChange={(e) => set('name', e.target.value)}
-            placeholder="Квартира на Ленина"
-            disabled={isSaving}
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500">Оценочная стоимость, ₽</label>
-          <Input
-            type="number"
-            min={0}
-            step="any"
-            value={form.estimated_value || ''}
-            onChange={(e) => set('estimated_value', parseFloat(e.target.value) || 0)}
-            placeholder="5 000 000"
-            disabled={isSaving}
-          />
-        </div>
-      </div>
-      {creditAccounts.length > 0 && (
-        <div>
-          <label className="mb-1 block text-xs font-medium text-slate-500">Привязанный кредит</label>
-          <Select
-            value={form.linked_account_id ?? ''}
-            onChange={(e) => set('linked_account_id', e.target.value ? Number(e.target.value) : null)}
-            disabled={isSaving}
-          >
-            <option value="">— не привязан —</option>
-            {creditAccounts.map(a => (
-              <option key={a.id} value={a.id}>{a.name}</option>
-            ))}
-          </Select>
-        </div>
-      )}
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={isSaving}>
-          <Check className="size-3.5" /> Сохранить
-        </Button>
-        <Button type="button" variant="secondary" size="sm" onClick={onCancel} disabled={isSaving}>
-          Отмена
-        </Button>
-      </div>
-    </form>
-  );
-}
-
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function PlanningPage() {
@@ -684,16 +561,6 @@ export default function PlanningPage() {
   const alertsQuery = useQuery({
     queryKey: ['budget-alerts'],
     queryFn: getBudgetAlerts,
-  });
-
-  const assetsQuery = useQuery({
-    queryKey: ['real-assets'],
-    queryFn: getRealAssets,
-  });
-
-  const accountsQuery = useQuery({
-    queryKey: ['accounts'],
-    queryFn: getAccounts,
   });
 
   // ── Mutations ─────────────────────────────────────────────────────────────
@@ -712,49 +579,9 @@ export default function PlanningPage() {
     onError: () => toast.error('Не удалось обновить план'),
   });
 
-  const createAssetMutation = useMutation({
-    mutationFn: createRealAsset,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['real-assets'] });
-      queryClient.invalidateQueries({ queryKey: ['financial-health'] });
-      toast.success('Актив добавлен');
-      setAssetForm(null);
-    },
-    onError: () => toast.error('Не удалось добавить актив'),
-  });
-
-  const updateAssetMutation = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: Partial<RealAssetPayload> }) =>
-      updateRealAsset(id, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['real-assets'] });
-      queryClient.invalidateQueries({ queryKey: ['financial-health'] });
-      toast.success('Актив обновлён');
-      setAssetForm(null);
-    },
-    onError: () => toast.error('Не удалось обновить актив'),
-  });
-
-  const deleteAssetMutation = useMutation({
-    mutationFn: deleteRealAsset,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['real-assets'] });
-      queryClient.invalidateQueries({ queryKey: ['financial-health'] });
-      toast.success('Актив удалён');
-    },
-    onError: () => toast.error('Не удалось удалить актив'),
-  });
-
-  // ── Local state ───────────────────────────────────────────────────────────
-  // assetForm: null = closed, { id: undefined } = new, { id: number } = edit
-  const [assetForm, setAssetForm] = useState<{ id?: number; initial: RealAssetPayload } | null>(null);
-
   // ── Derived data ──────────────────────────────────────────────────────────
   const items = budgetQuery.data ?? [];
   const alerts = alertsQuery.data ?? [];
-  const creditAccounts = (accountsQuery.data ?? []).filter(
-    (a: Account) => a.account_type === 'credit',
-  );
   const expenseItems         = items.filter(i => i.category_kind === 'expense' && !i.exclude_from_planning);
   const excludedExpenseItems = items.filter(i => i.category_kind === 'expense' && i.exclude_from_planning);
   const incomeItems          = items.filter(i => i.category_kind === 'income');
@@ -785,7 +612,7 @@ export default function PlanningPage() {
   return (
     <PageShell
       title="Планирование"
-      description="Бюджет по категориям, итоги месяца и учёт реальных активов."
+      description="Бюджет по категориям и итоги месяца."
     >
       {/* ── Alerts ────────────────────────────────────────────────────────── */}
       {alerts.length > 0 && (
@@ -949,134 +776,6 @@ export default function PlanningPage() {
           )}
         </Card>
       )}
-
-
-      {/* ── Real assets ────────────────────────────────────────────────────── */}
-      <div>
-        <div className="mb-4 flex items-center justify-between gap-4">
-          <div>
-            <h3 className="text-lg font-semibold text-slate-950">Реальные активы</h3>
-            <p className="mt-0.5 text-sm text-slate-500">Недвижимость, автомобили и другое имущество.</p>
-          </div>
-          {!assetForm && (
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => setAssetForm({ initial: EMPTY_FORM })}
-            >
-              <Plus className="size-4" /> Добавить
-            </Button>
-          )}
-        </div>
-
-        <div className="space-y-3">
-          {/* Add/Edit form */}
-          {assetForm && (
-            <RealAssetForm
-              initial={assetForm.initial}
-              creditAccounts={creditAccounts}
-              isSaving={createAssetMutation.isPending || updateAssetMutation.isPending}
-              onCancel={() => setAssetForm(null)}
-              onSave={(data) => {
-                if (assetForm.id !== undefined) {
-                  updateAssetMutation.mutate({ id: assetForm.id, data });
-                } else {
-                  createAssetMutation.mutate(data);
-                }
-              }}
-            />
-          )}
-
-          {/* List */}
-          {assetsQuery.isLoading && (
-            <Card className="p-5">
-              <div className="space-y-3">
-                {[1, 2].map(i => (
-                  <div key={i} className="flex items-center justify-between gap-4">
-                    <div className="h-4 w-40 animate-pulse rounded bg-slate-100" />
-                    <div className="h-4 w-24 animate-pulse rounded bg-slate-100" />
-                  </div>
-                ))}
-              </div>
-            </Card>
-          )}
-
-          {!assetsQuery.isLoading && (assetsQuery.data ?? []).length === 0 && !assetForm && (
-            <Card className="p-6 text-center">
-              <p className="text-sm text-slate-500">Реальные активы не добавлены.</p>
-              <p className="mt-1 text-xs text-slate-400">Добавь недвижимость, авто или другое имущество для расчёта собственного капитала.</p>
-            </Card>
-          )}
-
-          {!assetsQuery.isLoading && (assetsQuery.data ?? []).length > 0 && (
-            <Card className="divide-y divide-slate-100">
-              {(assetsQuery.data ?? []).map((asset: RealAsset) => {
-                const linkedAccount = asset.linked_account_id
-                  ? creditAccounts.find((a: Account) => a.id === asset.linked_account_id)
-                  : null;
-                const debt = linkedAccount ? calcCreditDebt(linkedAccount) : 0;
-                const netValue = Number(asset.estimated_value) - debt;
-                return (
-                <div key={asset.id} className="px-5 py-4">
-                  <div className="flex items-center gap-4">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-600">
-                          {ASSET_TYPE_LABELS[asset.asset_type] ?? asset.asset_type}
-                        </span>
-                        <p className="truncate text-sm font-medium text-slate-900">{asset.name}</p>
-                      </div>
-                    </div>
-                    <p className="shrink-0 text-sm font-semibold text-slate-900 tabular-nums">
-                      {formatMoney(Number(asset.estimated_value))}
-                    </p>
-                    <div className="flex shrink-0 gap-1.5">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => setAssetForm({
-                          id: asset.id,
-                          initial: { asset_type: asset.asset_type, name: asset.name, estimated_value: Number(asset.estimated_value), linked_account_id: asset.linked_account_id ?? null },
-                        })}
-                        aria-label="Редактировать"
-                      >
-                        <Pencil className="size-4" />
-                      </Button>
-                      <Button
-                        variant="danger"
-                        size="icon"
-                        onClick={() => deleteAssetMutation.mutate(asset.id)}
-                        disabled={deleteAssetMutation.isPending}
-                        aria-label="Удалить"
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </div>
-                  </div>
-                  {linkedAccount && (
-                    <p className="mt-1.5 text-xs text-slate-500">
-                      Кредит: <span className="font-medium text-slate-700">{linkedAccount.name}</span>
-                      {' · '}остаток долга: <span className="font-medium text-rose-600 tabular-nums">{formatMoney(debt)}</span>
-                      {' · '}чистая стоимость: <span className="font-medium text-emerald-700 tabular-nums">{formatMoney(netValue)}</span>
-                    </p>
-                  )}
-                </div>
-                );
-              })}
-
-              {/* Assets total */}
-              {(assetsQuery.data ?? []).length > 1 && (
-                <div className="flex items-center justify-between px-5 py-3">
-                  <p className="text-sm font-medium text-slate-500">Итого</p>
-                  <p className="text-sm font-semibold text-slate-950 tabular-nums">
-                    {formatMoney((assetsQuery.data ?? []).reduce((s, a) => s + Number(a.estimated_value), 0))}
-                  </p>
-                </div>
-              )}
-            </Card>
-          )}
-        </div>
-      </div>
     </PageShell>
   );
 }

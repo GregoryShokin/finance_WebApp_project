@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -27,7 +27,6 @@ import { MoneyAmount } from '@/components/shared/money-amount';
 import { StatCard } from '@/components/shared/stat-card';
 import { operationTypeLabels, transactionTypeLabels } from '@/components/transactions/constants';
 import { useDelayedDelete } from '@/hooks/use-delayed-delete';
-
 
 type FiltersState = {
   search: string;
@@ -99,7 +98,7 @@ export default function TransactionsPage() {
   const transactionsQuery = useQuery({
     queryKey: ['transactions', filters],
     queryFn: () => getTransactions({
-      account_id: filters.account_id ? Number(filters.account_id) : undefined,
+      account_id: undefined,
       category_id: filters.category_id ? Number(filters.category_id) : undefined,
       category_priority: filters.category_priority,
       type: filters.type,
@@ -134,12 +133,18 @@ export default function TransactionsPage() {
   const filteredTransactions = useMemo(() => {
     const search = normalizeSearchValue(filters.search);
     const list = transactionsQuery.data ?? [];
-    if (!search) return list;
+    const accountFiltered = filters.account_id
+      ? list.filter((tx) => {
+          const id = Number(filters.account_id);
+          return tx.account_id === id || tx.target_account_id === id || tx.credit_account_id === id;
+        })
+      : list;
+    if (!search) return accountFiltered;
 
     const accountsById = new Map((accountsQuery.data ?? []).map((item) => [item.id, item]));
     const categoriesById = new Map((categoriesQuery.data ?? []).map((item) => [item.id, item]));
 
-    return list.filter((item) => {
+    return accountFiltered.filter((item) => {
       const account = accountsById.get(item.account_id);
       const targetAccount = item.target_account_id ? accountsById.get(item.target_account_id) : null;
       const category = item.category_id ? categoriesById.get(item.category_id) : null;
@@ -161,7 +166,7 @@ export default function TransactionsPage() {
       ].join(' '));
       return haystack.includes(search);
     });
-  }, [transactionsQuery.data, accountsQuery.data, categoriesQuery.data, filters.search]);
+  }, [transactionsQuery.data, accountsQuery.data, categoriesQuery.data, filters.search, filters.account_id]);
 
   const stats = useMemo(() => {
     const list = filteredTransactions;
