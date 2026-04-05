@@ -5,11 +5,11 @@ import { fiScoreTone } from '@/components/dashboard/card-tones';
 import type { FinancialHealth } from '@/types/financial-health';
 
 const labels: Record<string, string> = {
-  savings_rate: 'Норма сбережений',
-  discipline: 'Дисциплина',
-  financial_independence: 'Независимость',
-  capital_growth: 'Рост капитала',
-  dti_inverse: 'Кредитная нагрузка',
+  savings_rate: 'РќРѕСЂРјР° СЃР±РµСЂРµР¶РµРЅРёР№',
+  discipline: 'Р”РёСЃС†РёРїР»РёРЅР°',
+  financial_independence: 'РќРµР·Р°РІРёСЃРёРјРѕСЃС‚СЊ',
+  safety_buffer: 'Подушка безопасности',
+  dti_inverse: 'РљСЂРµРґРёС‚РЅР°СЏ РЅР°РіСЂСѓР·РєР°',
 };
 
 export function FIScoreCard({
@@ -48,9 +48,9 @@ export function FIScoreCard({
           </div>
           {history ? (
             <div className="grid gap-2 text-xs text-slate-500 sm:grid-cols-3">
-              <div className="rounded-2xl bg-slate-50 p-3">База: <span className="font-semibold text-slate-900">{history.baseline.toFixed(1)}</span></div>
-              <div className="rounded-2xl bg-slate-50 p-3">Прошлый: <span className="font-semibold text-slate-900">{history.previous.toFixed(1)}</span></div>
-              <div className="rounded-2xl bg-slate-50 p-3">Сейчас: <span className="font-semibold text-slate-900">{history.current.toFixed(1)}</span></div>
+              <div className="rounded-2xl bg-slate-50 p-3">Р‘Р°Р·Р°: <span className="font-semibold text-slate-900">{history.baseline.toFixed(1)}</span></div>
+              <div className="rounded-2xl bg-slate-50 p-3">РџСЂРѕС€Р»С‹Р№: <span className="font-semibold text-slate-900">{history.previous.toFixed(1)}</span></div>
+              <div className="rounded-2xl bg-slate-50 p-3">РЎРµР№С‡Р°СЃ: <span className="font-semibold text-slate-900">{history.current.toFixed(1)}</span></div>
             </div>
           ) : null}
         </div>

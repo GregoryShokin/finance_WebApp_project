@@ -26,19 +26,19 @@ function getCompColor(value: number): string {
 }
 
 function getFiZone(score: number) {
-  if (score >= 8) return { color: '#0F6E56', label: 'Свобода', badgeClass: 'bg-teal-100 text-teal-700' };
-  if (score >= 6) return { color: '#1D9E75', label: 'Путь', badgeClass: 'bg-emerald-100 text-emerald-700' };
-  if (score >= 3) return { color: '#EF9F27', label: 'Рост', badgeClass: 'bg-amber-100 text-amber-700' };
-  return { color: '#E24B4A', label: 'Риск', badgeClass: 'bg-rose-100 text-rose-700' };
+  if (score >= 8) return { color: '#0F6E56', label: 'РЎРІРѕР±РѕРґР°', badgeClass: 'bg-teal-100 text-teal-700' };
+  if (score >= 6) return { color: '#1D9E75', label: 'РџСѓС‚СЊ', badgeClass: 'bg-emerald-100 text-emerald-700' };
+  if (score >= 3) return { color: '#EF9F27', label: 'Р РѕСЃС‚', badgeClass: 'bg-amber-100 text-amber-700' };
+  return { color: '#E24B4A', label: 'Р РёСЃРє', badgeClass: 'bg-rose-100 text-rose-700' };
 }
 
 function buildComponents(components: FIScoreComponents): ScoreComponentRow[] {
   return [
-    { label: 'Норма сбережений', value: components.savings_rate },
-    { label: 'Дисциплина', value: components.discipline },
-    { label: 'Фин. независимость', value: components.financial_independence },
-    { label: 'Рост капитала', value: components.capital_growth },
-    { label: 'Кредитная нагрузка', value: components.dti_inverse },
+    { label: 'РќРѕСЂРјР° СЃР±РµСЂРµР¶РµРЅРёР№', value: components.savings_rate },
+    { label: 'Р”РёСЃС†РёРїР»РёРЅР°', value: components.discipline },
+    { label: 'Р¤РёРЅ. РЅРµР·Р°РІРёСЃРёРјРѕСЃС‚СЊ', value: components.financial_independence },
+    { label: 'Подушка безопасности', value: components.safety_buffer },
+    { label: 'РљСЂРµРґРёС‚РЅР°СЏ РЅР°РіСЂСѓР·РєР°', value: components.dti_inverse },
   ];
 }
 
@@ -122,7 +122,7 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
           <p className="text-xs font-medium uppercase tracking-wider text-slate-400">FI-score</p>
           <div className="mt-3">
             <p className="text-3xl font-medium text-slate-300">-</p>
-            <p className="mt-2 text-sm text-slate-400">Недостаточно данных</p>
+            <p className="mt-2 text-sm text-slate-400">РќРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РґР°РЅРЅС‹С…</p>
           </div>
         </>
       );
@@ -136,7 +136,7 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
           type="button"
           onClick={handleToggle}
           className="absolute right-3 top-3 flex size-[22px] items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-          aria-label="Подробнее"
+          aria-label="РџРѕРґСЂРѕР±РЅРµРµ"
           aria-expanded={isExpanded}
         >
           i
@@ -165,10 +165,10 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
             <div className="flex-[2] bg-teal-100" />
           </div>
           <div className="mt-0.5 flex justify-between text-[9px] text-slate-300">
-            <span>Риск</span>
-            <span>Рост</span>
-            <span>Путь</span>
-            <span>Свобода</span>
+            <span>Р РёСЃРє</span>
+            <span>Р РѕСЃС‚</span>
+            <span>РџСѓС‚СЊ</span>
+            <span>РЎРІРѕР±РѕРґР°</span>
           </div>
         </div>
 
@@ -177,7 +177,7 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
             <hr className="my-3 border-slate-100" />
 
             <p className="mb-2.5 text-[11px] font-medium uppercase tracking-wider text-slate-400">
-              Из чего складывается
+              РР· С‡РµРіРѕ СЃРєР»Р°РґС‹РІР°РµС‚СЃСЏ
             </p>
 
             {componentRows.map(({ label, value }) => {
@@ -200,15 +200,15 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
 
             {worstComponent ? (
               <div className="mt-2.5 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                Главный рычаг роста - улучшить «{worstComponent.label}»
+                Р“Р»Р°РІРЅС‹Р№ СЂС‹С‡Р°Рі СЂРѕСЃС‚Р° - СѓР»СѓС‡С€РёС‚СЊ В«{worstComponent.label}В»
               </div>
             ) : null}
 
             {history ? (
               <div className="mt-2.5 grid gap-2 text-xs text-slate-500 sm:grid-cols-3">
-                <div className="rounded-lg bg-slate-50 px-3 py-2">База: <span className="font-semibold text-slate-900">{history.baseline.toFixed(1)}</span></div>
-                <div className="rounded-lg bg-slate-50 px-3 py-2">Прошлый: <span className="font-semibold text-slate-900">{history.previous.toFixed(1)}</span></div>
-                <div className="rounded-lg bg-slate-50 px-3 py-2">Сейчас: <span className="font-semibold text-slate-900">{history.current.toFixed(1)}</span></div>
+                <div className="rounded-lg bg-slate-50 px-3 py-2">Р‘Р°Р·Р°: <span className="font-semibold text-slate-900">{history.baseline.toFixed(1)}</span></div>
+                <div className="rounded-lg bg-slate-50 px-3 py-2">РџСЂРѕС€Р»С‹Р№: <span className="font-semibold text-slate-900">{history.previous.toFixed(1)}</span></div>
+                <div className="rounded-lg bg-slate-50 px-3 py-2">РЎРµР№С‡Р°СЃ: <span className="font-semibold text-slate-900">{history.current.toFixed(1)}</span></div>
               </div>
             ) : null}
           </>
@@ -226,7 +226,7 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
       {isExpanded ? (
         <button
           type="button"
-          aria-label="Закрыть"
+          aria-label="Р—Р°РєСЂС‹С‚СЊ"
           onClick={handleToggle}
           className="fixed inset-0 z-40 bg-slate-950/10"
         />

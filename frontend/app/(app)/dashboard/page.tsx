@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -8,8 +8,6 @@ import { AvailableFinancesWidget } from '@/components/dashboard/available-financ
 import { CapitalWidget } from '@/components/dashboard/capital-widget';
 import { CreditsWidget } from '@/components/dashboard/credits-widget';
 import { DebtsWidget } from '@/components/dashboard/debts-widget';
-import { DisciplineCard } from '@/components/dashboard/discipline-card';
-import { DTICard } from '@/components/dashboard/dti-card';
 import { FreeNetCapitalWidget } from '@/components/dashboard/free-net-capital-widget';
 import { IncomeStructureWidget } from '@/components/dashboard/income-structure-widget';
 import { MonthlyAvgBalanceCard } from '@/components/dashboard/monthly-avg-balance-card';
@@ -18,8 +16,6 @@ import { SixMonthTrendChartCard } from '@/components/dashboard/six-month-trend-c
 import { SixMonthTrendWidget } from '@/components/dashboard/six-month-trend-widget';
 import { TopExpenseCategoriesWidget } from '@/components/dashboard/top-expense-categories-widget';
 import { PageShell } from '@/components/layout/page-shell';
-import { FinancialIndependenceWidget } from '@/components/planning/financial-independence-widget';
-import { FiScoreWidget, FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 import { ErrorState, LoadingState } from '@/components/states/page-state';
 import { getAccounts } from '@/lib/api/accounts';
 import { getCategories } from '@/lib/api/categories';
@@ -28,6 +24,7 @@ import { getGoals } from '@/lib/api/goals';
 import { getRealAssets } from '@/lib/api/real-assets';
 import { getTransactions } from '@/lib/api/transactions';
 import { useFinancialHealth } from '@/hooks/use-financial-health';
+import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 
 export default function DashboardPage() {
   const [activeCard, setActiveCard] = useState<string | null>(null);
@@ -83,36 +80,23 @@ export default function DashboardPage() {
   return (
     <PageShell
       title="Дашборд"
-      description="Ключевые финансовые показатели, динамика месяца, бюджет и долговая нагрузка в одном экране."
+      description="Ключевые финансовые показатели, динамика месяца, аналитика расходов и структура капитала в одном экране."
     >
       {isLoading ? (
         <LoadingState
           title="Собираем показатели"
-          description="Подтягиваем транзакции, цели, бюджеты и финансовое здоровье."
+          description="Подтягиваем транзакции, цели, счета и данные финансового здоровья."
         />
       ) : null}
       {isError ? (
         <ErrorState
           title="Не удалось загрузить дашборд"
-          description="Проверь доступность backend API и повтори попытку."
+          description="Проверь доступность backend API и попробуй обновить страницу ещё раз."
         />
       ) : null}
 
       {!isLoading && !isError && health ? (
         <>
-          <section className="space-y-4">
-            <div>
-              <h3 className="text-lg font-semibold text-slate-950">Основные показатели</h3>
-              <p className="mt-1 text-sm text-slate-500">Сводка по финансовой устойчивости, долговой нагрузке и дисциплине.</p>
-            </div>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <FiScoreWidget data={healthQuery.data} isLoading={healthQuery.isLoading} />
-              <FinancialIndependenceWidget data={healthQuery.data} isLoading={healthQuery.isLoading} />
-              <DTICard health={health} isExpanded={activeCard === 'dti'} onToggle={() => toggle('dti')} />
-              <DisciplineCard health={health} isExpanded={activeCard === 'discipline'} onToggle={() => toggle('discipline')} />
-            </div>
-          </section>
-
           <section className="space-y-4">
             <div>
               <h3 className="text-lg font-semibold text-slate-950">Деньги месяца</h3>

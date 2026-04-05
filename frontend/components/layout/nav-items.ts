@@ -1,5 +1,18 @@
-import type { LucideIcon } from 'lucide-react';
-import { CalendarDays, FileUp, FolderTree, Landmark, LayoutDashboard, ListTree, PiggyBank, ReceiptText, Target, Wallet } from 'lucide-react';
+﻿import type { LucideIcon } from 'lucide-react';
+import {
+  BarChart2,
+  CalendarDays,
+  FileUp,
+  FolderTree,
+  HeartPulse,
+  Landmark,
+  LayoutDashboard,
+  ListTree,
+  PiggyBank,
+  ReceiptText,
+  Target,
+  Wallet,
+} from 'lucide-react';
 
 export type NavLeaf = {
   href: string;
@@ -20,19 +33,26 @@ export function isNavGroup(item: NavItem): item is NavGroup {
 }
 
 export const navItems: NavItem[] = [
-  { href: '/dashboard',        label: 'Дашборд',                icon: LayoutDashboard },
-  { href: '/transactions',     label: 'Транзакции',             icon: ReceiptText },
+  {
+    label: 'Аналитика',
+    icon: BarChart2,
+    children: [
+      { href: '/dashboard', label: 'Дашборд', icon: LayoutDashboard },
+      { href: '/health', label: 'Финансовое здоровье', icon: HeartPulse },
+    ],
+  },
+  { href: '/transactions', label: 'Транзакции', icon: ReceiptText },
   {
     label: 'Планирование',
     icon: PiggyBank,
     children: [
-      { href: '/planning', label: 'План',  icon: CalendarDays },
-      { href: '/goals',    label: 'Цели',  icon: Target },
+      { href: '/planning', label: 'План', icon: CalendarDays },
+      { href: '/goals', label: 'Цели', icon: Target },
     ],
   },
-  { href: '/import',           label: 'Импорт',                 icon: FileUp },
-  { href: '/categories',       label: 'Категории',              icon: ListTree },
-  { href: '/rules',            label: 'Правила',                icon: FolderTree },
-  { href: '/accounts',         label: 'Счета',                  icon: Wallet },
+  { href: '/import', label: 'Импорт', icon: FileUp },
+  { href: '/categories', label: 'Категории', icon: ListTree },
+  { href: '/rules', label: 'Правила', icon: FolderTree },
+  { href: '/accounts', label: 'Счета', icon: Wallet },
   { href: '/bank-connections', label: 'Банковские подключения', icon: Landmark },
 ];
