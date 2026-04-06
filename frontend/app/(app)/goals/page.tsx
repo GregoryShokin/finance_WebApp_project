@@ -24,7 +24,62 @@ function plural(n: number, one: string, few: string, many: string) {
 }
 
 function monthsLabel(n: number) {
-  return `${n} ${plural(n, 'месяц', 'месяца', 'месяцев')}`;
+  return `${n} ${plural(n, '\u043c\u0435\u0441\u044f\u0446', '\u043c\u0435\u0441\u044f\u0446\u0430', '\u043c\u0435\u0441\u044f\u0446\u0435\u0432')}`;
+}
+
+
+type Tone = 'good' | 'warning' | 'danger' | 'neutral';
+
+type GoalCardGoal = GoalWithProgress & {
+  is_system?: boolean;
+  is_on_track?: boolean | null;
+};
+
+function getToneBadge(tone: Tone): string {
+  if (tone === 'good') return 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200';
+  if (tone === 'warning') return 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200';
+  if (tone === 'danger') return 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200';
+  return 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200';
+}
+
+function GoalStatusBadge({ goal }: { goal: GoalCardGoal }) {
+  if (goal.status === 'achieved') {
+    return (
+      <span className={cn('inline-flex rounded-full px-2.5 py-1 text-xs font-semibold', getToneBadge('good'))}>
+        Достигнута ✓
+      </span>
+    );
+  }
+
+  if (!goal.deadline) {
+    return (
+      <span className={cn('inline-flex rounded-full px-2.5 py-1 text-xs font-semibold', getToneBadge('neutral'))}>
+        В процессе
+      </span>
+    );
+  }
+
+  if (goal.is_on_track === true) {
+    return (
+      <span className={cn('inline-flex rounded-full px-2.5 py-1 text-xs font-semibold', getToneBadge('good'))}>
+        На треке
+      </span>
+    );
+  }
+
+  if (goal.is_on_track === false) {
+    return (
+      <span className={cn('inline-flex rounded-full px-2.5 py-1 text-xs font-semibold', getToneBadge('warning'))}>
+        Отстаёшь
+      </span>
+    );
+  }
+
+  return (
+    <span className={cn('inline-flex rounded-full px-2.5 py-1 text-xs font-semibold', getToneBadge('neutral'))}>
+      Нет данных
+    </span>
+  );
 }
 
 // ── Goal form modal ───────────────────────────────────────────────────────────
@@ -121,13 +176,14 @@ function GoalCard({
   onEdit,
   onArchive,
 }: {
-  goal: GoalWithProgress;
-  onEdit: (goal: GoalWithProgress) => void;
-  onArchive: (goal: GoalWithProgress) => void;
+  goal: GoalCardGoal;
+  onEdit: (goal: GoalCardGoal) => void;
+  onArchive: (goal: GoalCardGoal) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const isAchieved = goal.status === 'achieved';
   const isArchived = goal.status === 'archived';
+  const isSystem = goal.is_system === true;
 
   return (
     <div
@@ -139,44 +195,56 @@ function GoalCard({
     >
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
-        <p className="text-sm font-semibold text-slate-900 leading-snug">{goal.name}</p>
+        <div className="space-y-2">
+          <p className="text-sm font-semibold leading-snug text-slate-900">{goal.name}</p>
+          {isSystem ? (
+            <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600 ring-1 ring-inset ring-slate-200">
+              Системная цель
+            </span>
+          ) : null}
+        </div>
 
-        {/* ··· menu */}
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            onClick={() => setMenuOpen((v) => !v)}
-            className="flex size-7 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-          >
-            <MoreHorizontal className="size-4" />
-          </button>
-          {menuOpen && (
-            <>
-              {/* backdrop to close on outside click */}
-              <div
-                className="fixed inset-0 z-10"
-                onClick={() => setMenuOpen(false)}
-              />
-              <div className="absolute right-0 top-8 z-20 min-w-[160px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-md">
-                {!isArchived && (
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
-                    onClick={() => { setMenuOpen(false); onEdit(goal); }}
-                  >
-                    <Pencil className="size-3.5" /> Редактировать
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
-                  onClick={() => { setMenuOpen(false); onArchive(goal); }}
-                >
-                  <Archive className="size-3.5" /> Архивировать
-                </button>
-              </div>
-            </>
-          )}
+        <div className="flex shrink-0 items-center gap-2">
+          {!isSystem ? <GoalStatusBadge goal={goal} /> : null}
+
+          {!isSystem ? (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setMenuOpen((v) => !v)}
+                className="flex size-7 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+              >
+                <MoreHorizontal className="size-4" />
+              </button>
+              {menuOpen && (
+                <>
+                  {/* backdrop to close on outside click */}
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setMenuOpen(false)}
+                  />
+                  <div className="absolute right-0 top-8 z-20 min-w-[160px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-md">
+                    {!isArchived && (
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
+                        onClick={() => { setMenuOpen(false); onEdit(goal); }}
+                      >
+                        <Pencil className="size-3.5" /> Редактировать
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
+                      onClick={() => { setMenuOpen(false); onArchive(goal); }}
+                    >
+                      <Archive className="size-3.5" /> Архивировать
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
 
