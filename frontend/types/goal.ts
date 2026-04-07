@@ -19,6 +19,9 @@ export type GoalWithProgress = Goal & {
   percent: number;
   remaining: number;
   monthly_needed: number | null;
+  is_on_track: boolean | null;
+  shortfall: number | null;
+  estimated_date: string | null;
 };
 
 export type CreateGoalPayload = {
@@ -31,4 +34,16 @@ export type UpdateGoalPayload = {
   name?: string;
   target_amount?: number;
   deadline?: string | null;
+};
+
+export type GoalForecastResponse = {
+  monthly_avg_balance: number;
+  monthly_needed: number | null;
+  estimated_months: number | null;
+  estimated_date: string | null;
+  is_achievable: boolean;
+  shortfall: number | null;
+  suggested_date: string | null;
+  contribution_percent: number | null;
+  deadline_too_close: boolean;
 };

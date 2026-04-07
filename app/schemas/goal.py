@@ -18,6 +18,12 @@ class GoalUpdateRequest(BaseModel):
     deadline: date | None = None
 
 
+class GoalForecastRequest(BaseModel):
+    target_amount: Decimal = Field(gt=0)
+    deadline: date | None = None
+    monthly_contribution: Decimal | None = Field(default=None, ge=0)
+
+
 class GoalResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -38,3 +44,18 @@ class GoalWithProgressResponse(GoalResponse):
     percent: float
     remaining: Decimal
     monthly_needed: Decimal | None
+    is_on_track: bool | None = None
+    shortfall: Decimal | None = None
+    estimated_date: date | None = None
+
+
+class GoalForecastResponse(BaseModel):
+    monthly_avg_balance: Decimal
+    monthly_needed: Decimal | None
+    estimated_months: int | None
+    estimated_date: date | None
+    is_achievable: bool
+    shortfall: Decimal | None
+    suggested_date: date | None
+    contribution_percent: Decimal | None
+    deadline_too_close: bool = False

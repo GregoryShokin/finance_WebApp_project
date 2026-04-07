@@ -173,7 +173,6 @@ export function TransactionFilters({
     date_to: string;
     min_amount: string;
     max_amount: string;
-    needs_review: 'all' | 'true' | 'false';
   };
   accounts: Account[];
   categories: Category[];
@@ -191,7 +190,6 @@ export function TransactionFilters({
     date_to: string;
     min_amount: string;
     max_amount: string;
-    needs_review: 'all' | 'true' | 'false';
   }) => void;
 }) {
   const [typeQuery, setTypeQuery] = useState('Все виды');
@@ -199,7 +197,6 @@ export function TransactionFilters({
   const [accountQuery, setAccountQuery] = useState('Все счета');
   const [priorityQuery, setPriorityQuery] = useState('Все признаки категорий');
   const [categoryQuery, setCategoryQuery] = useState('Все категории');
-  const [reviewQuery, setReviewQuery] = useState('Все статусы проверки');
 
   const transactionTypeItems = useMemo<SearchSelectItem[]>(
     () => [
@@ -284,15 +281,6 @@ export function TransactionFilters({
     [visibleCategories],
   );
 
-  const reviewItems = useMemo<SearchSelectItem[]>(
-    () => [
-      { value: 'all', label: 'Все статусы проверки', searchText: 'все статусы проверки' },
-      { value: 'true', label: 'Только требующие проверки', searchText: 'требует проверки review' },
-      { value: 'false', label: 'Только подтверждённые', searchText: 'подтверждена подтвержденные' },
-    ],
-    [],
-  );
-
   useEffect(() => {
     setTypeQuery(transactionTypeItems.find((item) => item.value === value.type)?.label ?? 'Все виды');
   }, [transactionTypeItems, value.type]);
@@ -312,10 +300,6 @@ export function TransactionFilters({
   useEffect(() => {
     setCategoryQuery(categoryItems.find((item) => item.value === value.category_id)?.label ?? 'Все категории');
   }, [categoryItems, value.category_id]);
-
-  useEffect(() => {
-    setReviewQuery(reviewItems.find((item) => item.value === value.needs_review)?.label ?? 'Все статусы проверки');
-  }, [reviewItems, value.needs_review]);
 
   return (
     <Card className="p-4">
@@ -342,7 +326,7 @@ export function TransactionFilters({
           <FilterBlock
             icon={<SlidersHorizontal className="size-4" />}
             title="Поиск по признакам"
-            description="Сузь список по виду операции, типу, счёту, категории, признаку категории, сумме и статусу проверки."
+            description="Сузь список по виду операции, типу, счёту, категории, признаку категории и сумме."
           >
             <div className="grid gap-3">
               <SearchSelect
@@ -447,19 +431,6 @@ export function TransactionFilters({
                 />
               </div>
 
-              <SearchSelect
-                id="transaction-filter-review"
-                label="Статус проверки"
-                placeholder="Выбери статус проверки"
-                widthClassName="w-full"
-                query={reviewQuery}
-                setQuery={setReviewQuery}
-                items={reviewItems}
-                selectedValue={value.needs_review}
-                onSelect={(item) => onChange({ ...value, needs_review: item.value as 'all' | 'true' | 'false' })}
-                showAllOnFocus
-                limit={12}
-              />
             </div>
           </FilterBlock>
 

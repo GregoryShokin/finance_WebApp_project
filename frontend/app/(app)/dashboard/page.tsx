@@ -18,6 +18,7 @@ import { TopExpenseCategoriesWidget } from '@/components/dashboard/top-expense-c
 import { PageShell } from '@/components/layout/page-shell';
 import { ErrorState, LoadingState } from '@/components/states/page-state';
 import { getAccounts } from '@/lib/api/accounts';
+import { getBudgetProgress } from '@/lib/api/budget';
 import { getCategories } from '@/lib/api/categories';
 import { getCounterparties } from '@/lib/api/counterparties';
 import { getGoals } from '@/lib/api/goals';
@@ -28,9 +29,15 @@ import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 
 export default function DashboardPage() {
   const [activeCard, setActiveCard] = useState<string | null>(null);
+  const currentDate = new Date();
+  const currentMonth = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-01`;
   const healthQuery = useFinancialHealth();
   const health = healthQuery.data;
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
+  const budgetQuery = useQuery({
+    queryKey: ['budget', currentMonth],
+    queryFn: () => getBudgetProgress(currentMonth),
+  });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'dashboard'], queryFn: () => getCategories() });
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: getGoals });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
@@ -40,6 +47,7 @@ export default function DashboardPage() {
   const isLoading =
     healthQuery.isLoading ||
     accountsQuery.isLoading ||
+    budgetQuery.isLoading ||
     categoriesQuery.isLoading ||
     goalsQuery.isLoading ||
     counterpartiesQuery.isLoading ||
@@ -49,6 +57,7 @@ export default function DashboardPage() {
   const isError = Boolean(
     healthQuery.error ||
       accountsQuery.error ||
+      budgetQuery.error ||
       categoriesQuery.error ||
       goalsQuery.error ||
       counterpartiesQuery.error ||
@@ -113,16 +122,9 @@ export default function DashboardPage() {
                 onToggle={() => toggle('avgBalance')}
               />
               <FreeNetCapitalWidget
-                accounts={accountsQuery.data ?? []}
-                goals={goalsQuery.data ?? []}
-                counterparties={counterpartiesQuery.data ?? []}
+                budgetProgress={budgetQuery.data ?? []}
                 transactions={transactionsQuery.data ?? []}
-                isLoading={
-                  accountsQuery.isLoading ||
-                  goalsQuery.isLoading ||
-                  counterpartiesQuery.isLoading ||
-                  transactionsQuery.isLoading
-                }
+                isLoading={budgetQuery.isLoading || transactionsQuery.isLoading}
               />
               <SafetyBufferWidget goals={goalsQuery.data ?? []} isLoading={goalsQuery.isLoading} />
             </div>

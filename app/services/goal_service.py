@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.models.goal import Goal, GoalStatus, GoalSystemKey
@@ -33,10 +34,21 @@ class GoalProgress:
     percent: float
     remaining: Decimal
     monthly_needed: Decimal | None
+    is_on_track: bool | None = None
+    shortfall: Decimal | None = None
+    estimated_date: date | None = None
 
 
 def _months_between(d_from: date, d_to: date) -> int:
+    """
+    Количество полных месяцев от d_from до d_to.
+    Если d_to.day >= d_from.day — месяц считается полным.
+    Пример: 6 апреля -> 7 декабря = 8 месяцев.
+    Пример: 6 апреля -> 5 декабря = 7 месяцев.
+    """
     months = (d_to.year - d_from.year) * 12 + (d_to.month - d_from.month)
+    if d_to.day < d_from.day:
+        months -= 1
     return max(months, 0)
 
 
@@ -117,6 +129,34 @@ class GoalService:
 
         return _to_money(total_expense / Decimal(str(months_used)))
 
+    def _compute_monthly_avg_balance(self, user_id: int) -> Decimal:
+        today = date.today()
+        current_month_start = date(today.year, today.month, 1)
+        rows = (
+            self.db.query(
+                func.date_trunc("month", Transaction.transaction_date).label("month"),
+                func.sum(
+                    case(
+                        (Transaction.type == "income", Transaction.amount),
+                        else_=-Transaction.amount,
+                    )
+                ).label("balance"),
+            )
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.affects_analytics.is_(True),
+                Transaction.transaction_date < current_month_start,
+            )
+            .group_by(func.date_trunc("month", Transaction.transaction_date))
+            .order_by(func.date_trunc("month", Transaction.transaction_date).desc())
+            .limit(6)
+            .all()
+        )
+        if not rows:
+            return Decimal("0")
+        total = sum((Decimal(str(row.balance)) for row in rows), Decimal("0"))
+        return _to_money(total / Decimal(str(len(rows))))
+
     def _sync_safety_buffer_goal(self, user_id: int) -> Goal:
         avg_monthly_expenses = self._compute_avg_monthly_expenses(user_id)
         target_amount = _to_money(avg_monthly_expenses * _SAFETY_BUFFER_MONTHS) if avg_monthly_expenses > 0 else _ZERO
@@ -186,13 +226,102 @@ class GoalService:
             if months > 0:
                 monthly_needed = _to_money(remaining / Decimal(str(months)))
 
+        smo = self._compute_monthly_avg_balance(goal.user_id)
+        is_on_track: bool | None = None
+        shortfall: Decimal | None = None
+        estimated_date: date | None = None
+
+        if smo > 0 and remaining > 0:
+            months_needed = int(
+                (remaining / smo).to_integral_value(rounding=ROUND_HALF_UP)
+            )
+            estimated_date = _shift_month(date.today(), months_needed)
+
+        if monthly_needed is not None and smo > 0:
+            is_on_track = smo >= monthly_needed
+            if not is_on_track:
+                shortfall = _to_money(monthly_needed - smo)
+
         return GoalProgress(
             goal=goal,
             saved=_to_money(saved),
             percent=round(pct, 1),
             remaining=_to_money(remaining),
             monthly_needed=monthly_needed,
+            is_on_track=is_on_track,
+            shortfall=shortfall,
+            estimated_date=estimated_date,
         )
+
+    def compute_forecast(
+        self,
+        *,
+        user_id: int,
+        target_amount: Decimal,
+        deadline: date | None,
+        monthly_contribution: Decimal | None,
+    ) -> dict:
+        smo = self._compute_monthly_avg_balance(user_id)
+        contribution = monthly_contribution if monthly_contribution is not None else smo
+
+        monthly_needed: Decimal | None = None
+        is_achievable = True
+        shortfall: Decimal | None = None
+        estimated_months: int | None = None
+        estimated_date: date | None = None
+        suggested_date: date | None = None
+        contribution_percent: Decimal | None = None
+        deadline_too_close = False
+
+        if smo > 0:
+            contribution_percent = _to_money(contribution / smo * 100)
+
+        if contribution > 0:
+            months_needed = math.ceil(float(target_amount / contribution))
+            estimated_months = months_needed
+            estimated_date = _shift_month(date.today(), months_needed)
+
+        if deadline is not None:
+            months_to_deadline = _months_between(date.today(), deadline)
+            if months_to_deadline == 0:
+                return {
+                    "monthly_avg_balance": _to_money(smo),
+                    "monthly_needed": None,
+                    "estimated_months": estimated_months,
+                    "estimated_date": estimated_date,
+                    "is_achievable": False,
+                    "shortfall": _to_money(target_amount),
+                    "suggested_date": estimated_date,
+                    "contribution_percent": contribution_percent,
+                    "deadline_too_close": True,
+                }
+
+            monthly_needed = _to_money(target_amount / Decimal(str(months_to_deadline)))
+
+        if deadline is not None and estimated_date is not None:
+            is_achievable = estimated_date <= deadline
+            if is_achievable:
+                suggested_date = None
+                shortfall = None
+            else:
+                shortfall = (
+                    _to_money(monthly_needed - contribution)
+                    if monthly_needed is not None
+                    else None
+                )
+                suggested_date = estimated_date
+
+        return {
+            "monthly_avg_balance": _to_money(smo),
+            "monthly_needed": monthly_needed,
+            "estimated_months": estimated_months,
+            "estimated_date": estimated_date,
+            "is_achievable": is_achievable,
+            "shortfall": shortfall,
+            "suggested_date": suggested_date,
+            "contribution_percent": contribution_percent,
+            "deadline_too_close": deadline_too_close,
+        }
 
     def create_goal(
         self,

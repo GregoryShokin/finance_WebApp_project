@@ -1,15 +1,15 @@
 'use client';
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, FileUp, Info, Plus, ShieldOff, Sparkles, Split, Trash2, Undo2 } from 'lucide-react';
+import { CheckCircle2, ChevronDown, FileUp, Info, Plus, ShieldOff, Split, Trash2, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { getAccounts, createAccount } from '@/lib/api/accounts';
 import { getCategoryRules } from '@/lib/api/category-rules';
 import { getCategories, createCategory } from '@/lib/api/categories';
 import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
-import { commitImport, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
+import { commitImport, getImportSession, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
 import { DescriptionAutocomplete } from '@/components/import/description-autocomplete';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -20,6 +20,8 @@ import { ImportStatusBadge } from '@/components/import/import-status-badge';
 import { AccountDialog } from '@/components/accounts/account-dialog';
 import { CategoryDialog } from '@/components/categories/category-dialog';
 import { CounterpartyDialog } from '@/components/counterparties/counterparty-dialog';
+import { cn } from '@/lib/utils/cn';
+import { dequeueImportSession, enqueueImportSession, getQueuedImportSession } from '@/lib/utils/import-queue';
 import type { Account, CreateAccountPayload } from '@/types/account';
 import type { Category, CategoryKind, CategoryPriority, CreateCategoryPayload } from '@/types/category';
 import type { Counterparty, CreateCounterpartyPayload } from '@/types/counterparty';
@@ -30,6 +32,7 @@ import type {
   ImportPreviewResponse,
   ImportPreviewRow,
   ImportRowUpdatePayload,
+  ImportSessionResponse,
   ImportSourceType,
   ImportSplitItem,
   ImportUploadResponse,
@@ -158,12 +161,16 @@ function normalize(value: string) {
   return value.trim().toLowerCase();
 }
 
-function isLoanAccount(account: Account) {
+function isCreditPaymentAccount(account: Account) {
   return account.account_type === 'credit' || account.account_type === 'credit_card' || account.is_credit;
 }
 
 function isSelectableTransactionAccount(account: Account) {
-  return !isLoanAccount(account);
+  return account.account_type !== 'credit';
+}
+
+function isImportAccount(account: Account) {
+  return account.is_active;
 }
 
 function resolveTransactionAccountId(accounts: Account[], accountId: unknown, fallbackAccountId = '') {
@@ -183,7 +190,7 @@ function resolveCreditAccountId(accounts: Account[], accountId: unknown) {
   if (!normalizedAccountId) return '';
 
   const matchedAccount = accounts.find((account) => String(account.id) === normalizedAccountId);
-  if (matchedAccount && isLoanAccount(matchedAccount)) {
+  if (matchedAccount && isCreditPaymentAccount(matchedAccount)) {
     return normalizedAccountId;
   }
 
@@ -211,6 +218,37 @@ function toPreviewPayload(mappingForm: MappingState): ImportMappingPayload {
     table_name: mappingForm.table_name || null,
     field_mapping: Object.fromEntries(Object.entries(mappingForm.field_mapping).map(([key, value]) => [key, value || null])),
     skip_duplicates: mappingForm.skip_duplicates,
+  };
+}
+
+function buildUploadResultFromSession(session: ImportSessionResponse): ImportUploadResponse {
+  const parseSettings = (session.parse_settings ?? {}) as Record<string, unknown>;
+  const detection = (session.mapping_json ?? {}) as ImportDetection;
+  const tables = Array.isArray(parseSettings.tables) ? (parseSettings.tables as Array<Record<string, unknown>>) : [];
+  const selectedTable = typeof detection.selected_table === 'string' ? detection.selected_table : null;
+  const primaryTable = tables.find((table) => table.name === selectedTable) ?? tables[0];
+  const rows = Array.isArray(primaryTable?.rows) ? (primaryTable.rows as Array<Record<string, unknown>>) : [];
+
+  return {
+    session_id: session.id,
+    filename: session.filename,
+    source_type: session.source_type,
+    status: session.status,
+    detected_columns: session.detected_columns,
+    sample_rows: rows.slice(0, 5).map((row) =>
+      Object.fromEntries(Object.entries(row).map(([key, value]) => [key, String(value ?? '')])),
+    ),
+    total_rows: rows.length,
+    extraction: ((parseSettings.extraction as Record<string, unknown> | undefined) ?? {}),
+    detection,
+    suggested_account_id: session.account_id,
+    contract_number: typeof parseSettings.contract_number === 'string' ? parseSettings.contract_number : null,
+    contract_match_reason: null,
+    contract_match_confidence: null,
+    statement_account_number:
+      typeof parseSettings.statement_account_number === 'string' ? parseSettings.statement_account_number : null,
+    statement_account_match_reason: null,
+    statement_account_match_confidence: null,
   };
 }
 
@@ -376,6 +414,16 @@ function buildRowUpdatePayload(
   splitRowsMap: Record<number, SplitRowState[]>,
 ): ImportRowUpdatePayload {
   const resolved = resolveOperationFields(form);
+  const previewType =
+    String(row.normalized_data.type ?? '') === 'income'
+      ? 'income'
+      : String(row.normalized_data.type ?? '') === 'expense'
+        ? 'expense'
+        : null;
+  const effectiveType =
+    resolved.operation_type === 'transfer'
+      ? (previewType ?? resolved.type)
+      : resolved.type;
   const activeSplit = Boolean(splitExpandedMap[row.id]) && form.main_type === 'regular';
   const splitPayload: ImportSplitItem[] | undefined = activeSplit
     ? (splitRowsMap[row.id] ?? getSplitState(row)).map((item) => ({
@@ -399,7 +447,7 @@ function buildRowUpdatePayload(
     category_id: resolved.operation_type === 'regular' || resolved.operation_type === 'refund' ? (splitPayload && splitPayload.length >= 2 ? null : form.category_id ? Number(form.category_id) : null) : null,
     counterparty_id: resolved.operation_type === 'debt' ? (form.counterparty_id ? Number(form.counterparty_id) : null) : null,
     amount: toNumericValue(form.amount),
-    type: resolved.type,
+    type: effectiveType,
     operation_type: resolved.operation_type,
     debt_direction: resolved.operation_type === 'debt' ? form.debt_direction || null : null,
     description: form.description,
@@ -435,7 +483,13 @@ function arePayloadsEqual(left: ImportRowUpdatePayload, right: ImportRowUpdatePa
   return JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right));
 }
 
-export function ImportWizard() {
+type Props = {
+  initialSessionId?: number;
+  onSessionCreated?: () => void;
+  sidebar?: ReactNode;
+};
+
+export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Props) {
   const queryClient = useQueryClient();
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'import-preview'], queryFn: () => getCategories() });
@@ -544,6 +598,11 @@ export function ImportWizard() {
     useEffect(() => {
     if (draftHydrated || typeof window === 'undefined') return;
 
+    if (initialSessionId) {
+      setDraftHydrated(true);
+      return;
+    }
+
     try {
       const rawDraft = window.localStorage.getItem(IMPORT_DRAFT_STORAGE_KEY);
 
@@ -579,7 +638,84 @@ export function ImportWizard() {
     } finally {
       setDraftHydrated(true);
     }
-  }, [draftHydrated]);
+  }, [draftHydrated, initialSessionId]);
+
+  useEffect(() => {
+    if (!initialSessionId || !draftHydrated || accounts.length === 0) return;
+
+    let cancelled = false;
+
+    async function loadSession() {
+      try {
+        const session = await getImportSession(initialSessionId!);
+        if (cancelled) return;
+
+        const queuedSession = getQueuedImportSession(initialSessionId!);
+        const fallbackAccountId = queuedSession?.accountId ?? mappingForm.account_id;
+        const restoredUploadResult = buildUploadResultFromSession(session);
+        const nextMapping = buildMappingState(
+          restoredUploadResult.detection,
+          accounts,
+          session.account_id ? String(session.account_id) : fallbackAccountId,
+        );
+        const delimiter =
+          typeof (session.parse_settings as Record<string, unknown> | undefined)?.delimiter === 'string'
+            ? String((session.parse_settings as Record<string, unknown>).delimiter)
+            : defaultUploadForm.delimiter;
+
+        setSelectedFile(null);
+        setUploadForm({ delimiter });
+        setUploadResult(restoredUploadResult);
+        setPreviewResult(null);
+        setCommitResult(null);
+        setRowForms({});
+        setRowQueries({});
+        setSplitExpanded({});
+        setSplitRows({});
+        setSplitQueries({});
+        setMappingForm({
+          ...nextMapping,
+          account_id: session.account_id ? String(session.account_id) : nextMapping.account_id,
+          currency: session.currency ?? nextMapping.currency,
+        });
+
+        const resolvedMapping = {
+          ...nextMapping,
+          account_id: session.account_id ? String(session.account_id) : nextMapping.account_id,
+          currency: session.currency ?? nextMapping.currency,
+        };
+        const hasDetectedFields = Object.values(restoredUploadResult.detection.field_mapping ?? {}).some(Boolean);
+
+        if ((session.status === 'preview_ready' || session.status === 'analyzed') && resolvedMapping.account_id && hasDetectedFields) {
+          const preview = await previewImport(session.id, toPreviewPayload({
+            ...resolvedMapping,
+          }));
+          if (cancelled) return;
+
+          setPreviewResult(preview);
+          setCommitResult(null);
+          setRowForms({});
+          setRowQueries({});
+          setSplitExpanded({});
+          setSplitRows({});
+          setSplitQueries({});
+        }
+
+        dequeueImportSession(session.id);
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : 'Не удалось загрузить сессию импорта';
+          toast.error(message);
+        }
+      }
+    }
+
+    loadSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accounts, draftHydrated, initialSessionId, mappingForm.account_id]);
 
   useEffect(() => {
     if (!draftHydrated || typeof window === 'undefined') return;
@@ -624,8 +760,9 @@ export function ImportWizard() {
     [accounts, mappingForm.account_id],
   );
 
+  const importAccountItems = useMemo<SearchSelectItem[]>(() => accounts.filter(isImportAccount).map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency })), [accounts]);
   const accountItems = useMemo<SearchSelectItem[]>(() => accounts.filter(isSelectableTransactionAccount).map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency })), [accounts]);
-  const creditAccountItems = useMemo<SearchSelectItem[]>(() => accounts.filter(isLoanAccount).map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency })), [accounts]);
+  const creditAccountItems = useMemo<SearchSelectItem[]>(() => accounts.filter(isCreditPaymentAccount).map((account) => ({ value: String(account.id), label: account.name, searchText: `${account.name} ${account.currency}`, badge: account.currency })), [accounts]);
   const mainTypeItems = useMemo<SearchSelectItem[]>(() => [
     { value: 'regular', label: 'Обычный', searchText: 'обычный обычная regular' },
     { value: 'investment', label: 'Инвестиционный', searchText: 'инвестиционный инвестиции investment' },
@@ -678,33 +815,6 @@ export function ImportWizard() {
 
   const uploadMutation = useMutation({
     mutationFn: uploadImportFile,
-    onSuccess: (data) => {
-      const nextMapping = buildMappingState(data.detection, accounts, mappingForm.account_id);
-      setUploadResult(data);
-      setPreviewResult(null);
-      setCommitResult(null);
-      setMappingForm(nextMapping);
-
-      const hasDetectedFields = Object.values(data.detection.field_mapping).some(Boolean);
-      if (!hasDetectedFields) {
-        const extraction = data.extraction as Record<string, unknown>;
-        const isPdf = data.source_type === 'pdf';
-        const parsedCount = typeof extraction?.parsed_transaction_count === 'number' ? extraction.parsed_transaction_count : -1;
-        if (isPdf && parsedCount === 0) {
-          toast.error('Выписка не содержит транзакций — проверь период выгрузки в приложении банка');
-        } else {
-          toast.error('Формат файла не распознан — структура выписки не поддерживается');
-        }
-        return;
-      }
-
-      toast.success('Источник загружен и распознан');
-      if (!nextMapping.account_id) {
-        toast.error('Сначала создай или выбери счёт для импорта');
-        return;
-      }
-      previewMutation.mutate({ sessionId: data.session_id, payload: toPreviewPayload(nextMapping) });
-    },
     onError: (error: Error) => toast.error(error.message || 'Не удалось загрузить источник'),
   });
 
@@ -914,8 +1024,7 @@ export function ImportWizard() {
     setSelectedFile(event.target.files?.[0] ?? null);
   }
 
-  function handleUploadSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function handleUpload({ goToPreview }: { goToPreview: boolean }) {
     if (!selectedFile) {
       toast.error('Выбери CSV, XLSX или PDF');
       return;
@@ -924,7 +1033,57 @@ export function ImportWizard() {
       toast.error('Выбери счёт, на который импортируется выписка');
       return;
     }
-    uploadMutation.mutate({ file: selectedFile, delimiter: uploadForm.delimiter });
+    uploadMutation.mutate(
+      { file: selectedFile, delimiter: uploadForm.delimiter },
+      {
+        onSuccess: (data) => {
+          const suggestedId = data.suggested_account_id ? String(data.suggested_account_id) : undefined;
+          const nextMapping = buildMappingState(
+            data.detection,
+            accounts,
+            suggestedId ?? mappingForm.account_id,
+          );
+
+          setUploadResult(data);
+          setPreviewResult(null);
+          setCommitResult(null);
+          setMappingForm(nextMapping);
+          queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+
+          const hasDetectedFields = Object.values(data.detection.field_mapping).some(Boolean);
+          if (!hasDetectedFields) {
+            const extraction = data.extraction as Record<string, unknown>;
+            const isPdf = data.source_type === 'pdf';
+            const parsedCount = typeof extraction?.parsed_transaction_count === 'number' ? extraction.parsed_transaction_count : -1;
+            if (isPdf && parsedCount === 0) {
+              toast.error('Выписка не содержит транзакций — проверь период выгрузки в приложении банка');
+            } else {
+              toast.error('Формат файла не распознан — структура выписки не поддерживается');
+            }
+            return;
+          }
+
+          if (!goToPreview) {
+            enqueueImportSession({ id: data.session_id, accountId: nextMapping.account_id });
+            toast.success('Выписка добавлена в очередь');
+            resetAll();
+            onSessionCreated?.();
+            return;
+          }
+
+          toast.success('Источник загружен и распознан');
+          if (data.suggested_account_id) {
+            const accountName = accounts.find((account) => account.id === data.suggested_account_id)?.name;
+            toast.success(`Определён счёт: ${accountName ?? 'счёт'}. Проверь и подтверди.`);
+          }
+          if (!nextMapping.account_id) {
+            toast.error('Сначала создай или выбери счёт для импорта');
+            return;
+          }
+          previewMutation.mutate({ sessionId: data.session_id, payload: toPreviewPayload(nextMapping) });
+        },
+      },
+    );
   }
 
   function rebuildPreview(nextForm: MappingState) {
@@ -1052,6 +1211,22 @@ export function ImportWizard() {
       }));
   }
 
+  const extractedStatementIdentifier = uploadResult?.contract_number
+    ? {
+        label: 'Номер договора',
+        value: uploadResult.contract_number,
+        reason: uploadResult.contract_match_reason,
+        confidence: uploadResult.contract_match_confidence,
+      }
+    : uploadResult?.statement_account_number
+      ? {
+          label: 'Лицевой счёт',
+          value: uploadResult.statement_account_number,
+          reason: uploadResult.statement_account_match_reason,
+          confidence: uploadResult.statement_account_match_confidence,
+        }
+      : null;
+
   if (accountsQuery.isLoading || categoriesQuery.isLoading || counterpartiesQuery.isLoading) {
     return <LoadingState title="Подготавливаем импорт" description="Загружаем счета и категории для корректного сопоставления строк." />;
   }
@@ -1069,82 +1244,112 @@ export function ImportWizard() {
         {statCard('Требуют внимания', previewSummary?.warning_rows ?? 0, 'warning')}
       </div>
 
-      <Card className="rounded-3xl bg-white p-5 shadow-soft lg:p-6">
-        <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-          <form className="space-y-4" onSubmit={handleUploadSubmit}>
-            <div>
-              <h3 className="text-lg font-semibold text-slate-900">1. Загрузка источника</h3>
-              <p className="mt-1 text-sm text-slate-500">Загрузи CSV, XLSX или PDF. После распознавания все строки редактируются сразу внутри блока транзакции.</p>
-            </div>
-            <div className="grid gap-4 md:grid-cols-[1fr_160px]">
+      <div className={cn('grid gap-6 lg:items-start', sidebar ? 'lg:grid-cols-[minmax(0,1fr)_420px]' : 'grid-cols-1')}>
+        <Card className="rounded-3xl bg-white p-5 shadow-soft lg:p-6">
+          <div>
+            <form className="space-y-4" onSubmit={(event) => event.preventDefault()}>
               <div>
-                <label className="mb-2 block text-sm font-medium text-slate-700">Файл</label>
-                <Input type="file" accept=".csv,.xlsx,.xls,.pdf" onChange={handleFileChange} />
+                <h3 className="text-lg font-semibold text-slate-900">1. Загрузка источника</h3>
+                <p className="mt-1 text-sm text-slate-500">Загрузи CSV, XLSX или PDF. После распознавания все строки редактируются сразу внутри блока транзакции.</p>
               </div>
-              <div>
-                <label className="mb-2 block text-sm font-medium text-slate-700">Разделитель CSV</label>
-                <Input value={uploadForm.delimiter} onChange={(event) => setUploadForm((prev) => ({ ...prev, delimiter: event.target.value }))} />
+              <div className="grid gap-4 md:grid-cols-[1fr_160px]">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">Файл</label>
+                  <Input type="file" accept=".csv,.xlsx,.xls,.pdf" onChange={handleFileChange} />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">Разделитель CSV</label>
+                  <Input value={uploadForm.delimiter} onChange={(event) => setUploadForm((prev) => ({ ...prev, delimiter: event.target.value }))} />
+                </div>
               </div>
-            </div>
-            <SearchSelect
-              id="import-account"
-              label="Счёт импорта"
-              placeholder="Выбери счёт, куда импортируется выписка"
-              widthClassName="w-full"
-              query={rowQueries[0]?.import_account ?? importAccount?.name ?? ''}
-              setQuery={(value) => {
-                setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', credit_account_id: '', category_id: '', counterparty_id: '', main_type: '', investment_direction: '', debt_direction: '', credit_operation_kind: '', import_account: value } }));
-              }}
-              items={accountItems}
-              selectedValue={mappingForm.account_id}
-              onSelect={(item) => {
-                const nextMapping = { ...mappingForm, account_id: item.value, currency: accounts.find((account) => String(account.id) === item.value)?.currency ?? mappingForm.currency };
-                setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', credit_account_id: '', category_id: '', counterparty_id: '', main_type: '', investment_direction: '', debt_direction: '', credit_operation_kind: '', import_account: item.label } }));
-                if (uploadResult) {
-                  rebuildPreview(nextMapping);
-                } else {
-                  setMappingForm(nextMapping);
-                }
-              }}
-              showAllOnFocus
-              createAction={{
-                visible: Boolean((rowQueries[0]?.import_account ?? '').trim()) && !accountItems.some((item) => normalize(item.label) === normalize(rowQueries[0]?.import_account ?? '')),
-                label: 'Создать счёт',
-                onClick: () => {
-                  setPendingFieldTarget({ rowId: null, field: 'import_account' });
-                  setPendingAccountDraft({ name: (rowQueries[0]?.import_account ?? '').trim(), currency: mappingForm.currency || 'RUB', balance: 0, is_active: true, account_type: 'regular', is_credit: false });
-                  setAccountDialogOpen(true);
-                },
-              }}
-            />
-            <div className="flex flex-wrap gap-3">
-              <Button type="submit" disabled={uploadMutation.isPending || previewMutation.isPending}>
-                <FileUp className="size-4" />
-                {uploadMutation.isPending ? 'Загрузка...' : 'Загрузить файл'}
-              </Button>
-              <Button type="button" variant="secondary" onClick={resetAll}>Сбросить</Button>
-            </div>
-          </form>
-
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-              <Sparkles className="size-4" />
-              Автоматическое распознавание
-            </div>
-            {uploadResult ? (
-              <div className="mt-3 space-y-2 text-sm text-slate-600">
-                <div><span className="font-medium text-slate-900">Файл:</span> {uploadResult.filename}</div>
-                <div><span className="font-medium text-slate-900">Тип:</span> {sourceLabel(uploadResult.source_type)}</div>
-                <div><span className="font-medium text-slate-900">Строк:</span> {uploadResult.total_rows}</div>
-                <div><span className="font-medium text-slate-900">Счёт импорта:</span> {importAccount?.name ?? '—'}</div>
-                <div><span className="font-medium text-slate-900">Уверенность:</span> {Math.round((uploadResult.detection.overall_confidence ?? 0) * 100)}%</div>
+              <SearchSelect
+                id="import-account"
+                label="Счёт импорта"
+                placeholder="Выбери счёт, куда импортируется выписка"
+                widthClassName="w-full"
+                query={rowQueries[0]?.import_account ?? importAccount?.name ?? ''}
+                setQuery={(value) => {
+                  setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', credit_account_id: '', category_id: '', counterparty_id: '', main_type: '', investment_direction: '', debt_direction: '', credit_operation_kind: '', import_account: value } }));
+                }}
+                items={importAccountItems}
+                selectedValue={mappingForm.account_id}
+                onSelect={(item) => {
+                  const nextMapping = { ...mappingForm, account_id: item.value, currency: accounts.find((account) => String(account.id) === item.value)?.currency ?? mappingForm.currency };
+                  setRowQueries((prev) => ({ ...prev, 0: { account_id: '', target_account_id: '', credit_account_id: '', category_id: '', counterparty_id: '', main_type: '', investment_direction: '', debt_direction: '', credit_operation_kind: '', import_account: item.label } }));
+                  if (uploadResult) {
+                    rebuildPreview(nextMapping);
+                  } else {
+                    setMappingForm(nextMapping);
+                  }
+                }}
+                showAllOnFocus
+                createAction={{
+                  visible: Boolean((rowQueries[0]?.import_account ?? '').trim()) && !importAccountItems.some((item) => normalize(item.label) === normalize(rowQueries[0]?.import_account ?? '')),
+                  label: 'Создать счёт',
+                  onClick: () => {
+                    setPendingFieldTarget({ rowId: null, field: 'import_account' });
+                    setPendingAccountDraft({ name: (rowQueries[0]?.import_account ?? '').trim(), currency: mappingForm.currency || 'RUB', balance: 0, is_active: true, account_type: 'regular', is_credit: false });
+                    setAccountDialogOpen(true);
+                  },
+                }}
+              />
+              <div className="flex flex-wrap items-start gap-3">
+                <Button
+                  type="button"
+                  disabled={!selectedFile || uploadMutation.isPending || previewMutation.isPending}
+                  onClick={() => handleUpload({ goToPreview: true })}
+                >
+                  <FileUp className="size-4" />
+                  {uploadMutation.isPending ? 'Загрузка...' : 'Загрузить и проверить'}
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={!selectedFile || uploadMutation.isPending}
+                  onClick={() => handleUpload({ goToPreview: false })}
+                >
+                  Добавить в очередь
+                </Button>
+                <Button type="button" variant="secondary" onClick={resetAll}>Сбросить</Button>
+                <div className="min-w-[220px] flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-slate-400">
+                    Идентификатор из выписки
+                  </p>
+                  <p className="mt-1 text-xs font-medium text-slate-500">
+                    {uploadResult?.source_type === 'pdf'
+                      ? extractedStatementIdentifier?.label ?? 'Не найден'
+                      : 'Появится после загрузки PDF-выписки'}
+                  </p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">
+                    {uploadResult?.source_type === 'pdf'
+                      ? extractedStatementIdentifier?.value ?? 'Не найден'
+                      : 'Появится после загрузки PDF-выписки'}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {uploadResult?.source_type === 'pdf'
+                      ? 'Система показывает, какой постоянный идентификатор был извлечён из этой выписки.'
+                      : 'После загрузки файла здесь появится то, что система смогла распознать в шапке PDF.'}
+                  </p>
+                  {uploadResult?.source_type === 'pdf' && extractedStatementIdentifier?.reason ? (
+                    <p className="mt-1 text-xs text-slate-400">
+                      {extractedStatementIdentifier.reason}
+                      {typeof extractedStatementIdentifier.confidence === 'number'
+                        ? ` · ${Math.round(extractedStatementIdentifier.confidence * 100)}%`
+                        : ''}
+                    </p>
+                  ) : null}
+                </div>
               </div>
-            ) : (
-              <p className="mt-3 text-sm text-slate-500">После загрузки здесь появится краткая сводка по распознаванию и составу файла.</p>
-            )}
+            </form>
           </div>
-        </div>
-      </Card>
+        </Card>
+
+        {sidebar ? (
+          <div className="space-y-3 lg:max-h-[430px] lg:overflow-y-auto lg:overscroll-contain lg:pr-2">
+            {sidebar}
+          </div>
+        ) : null}
+      </div>
 
       {previewResult ? (
         <Card className="rounded-3xl bg-white p-5 shadow-soft lg:p-6">
@@ -1301,7 +1506,7 @@ export function ImportWizard() {
                             patch.credit_interest_amount = '';
                             patch.credit_operation_kind = '';
                             patch.category_id = '';
-                            patch.type = 'expense';
+                            patch.type = normalized.type === 'income' ? 'income' : 'expense';
                           }
                           if (nextMainType === 'regular') {
                             patch.investment_direction = '';
@@ -1436,7 +1641,7 @@ export function ImportWizard() {
                       ) : form.main_type === 'transfer' ? (
                         <SearchSelect
                           id={`row-target-account-${row.id}`}
-                          label={form.type === 'income' ? 'Счёт отправления' : 'Счёт поступления'}
+                          label={normalized.type === 'income' ? 'Счёт списания' : 'Счёт поступления'}
                           placeholder="Начни вводить..."
                           widthClassName="w-full"
                           query={queries.target_account_id}

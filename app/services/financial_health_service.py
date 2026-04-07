@@ -729,6 +729,8 @@ class FinancialHealthService:
             if is_credit:
                 if balance < 0:
                     total_debt += abs(balance)
+            elif account.account_type == "deposit":
+                own_capital += balance
             else:
                 if balance > 0:
                     own_capital += balance

@@ -1,9 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import date
+from decimal import Decimal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
 from app.models.user import User
-from app.schemas.goal import GoalCreateRequest, GoalUpdateRequest, GoalWithProgressResponse, GoalResponse
+from app.schemas.goal import (
+    GoalCreateRequest,
+    GoalForecastResponse,
+    GoalResponse,
+    GoalUpdateRequest,
+    GoalWithProgressResponse,
+)
 from app.services.goal_service import GoalNotFoundError, GoalService, GoalValidationError
 
 router = APIRouter(prefix="/goals", tags=["Goals"])
@@ -25,6 +34,9 @@ def _to_progress_response(progress) -> GoalWithProgressResponse:
         percent=progress.percent,
         remaining=progress.remaining,
         monthly_needed=progress.monthly_needed,
+        is_on_track=progress.is_on_track,
+        shortfall=progress.shortfall,
+        estimated_date=progress.estimated_date,
     )
 
 
@@ -51,6 +63,24 @@ def list_goals(
 ):
     service = GoalService(db)
     return [_to_progress_response(progress) for progress in service.get_goals(current_user.id)]
+
+
+@router.get("/forecast", response_model=GoalForecastResponse)
+def get_goal_forecast(
+    target_amount: Decimal = Query(..., gt=0),
+    deadline: date | None = Query(default=None),
+    monthly_contribution: Decimal | None = Query(default=None, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    svc = GoalService(db)
+    result = svc.compute_forecast(
+        user_id=current_user.id,
+        target_amount=target_amount,
+        deadline=deadline,
+        monthly_contribution=monthly_contribution,
+    )
+    return GoalForecastResponse(**result)
 
 
 @router.get("/{goal_id}", response_model=GoalWithProgressResponse)

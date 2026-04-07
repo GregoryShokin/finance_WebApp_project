@@ -25,7 +25,7 @@ def create_account(payload: AccountCreateRequest, db: Session = Depends(get_db),
 
 @router.get("", response_model=list[AccountResponse])
 def list_accounts(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return AccountService(db).list(user_id=current_user.id)
+    return AccountService(db).list_with_last_transaction(user_id=current_user.id)
 
 
 @router.get("/{account_id}", response_model=AccountResponse)

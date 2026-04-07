@@ -1,4 +1,4 @@
-export type AccountType = 'regular' | 'credit' | 'credit_card' | 'cash' | 'broker';
+export type AccountType = 'regular' | 'credit' | 'credit_card' | 'cash' | 'broker' | 'deposit';
 
 export type Account = {
   id: number;
@@ -13,8 +13,15 @@ export type Account = {
   credit_limit_original?: string | number | null;
   credit_current_amount?: string | number | null;
   credit_interest_rate?: string | number | null;
+  deposit_interest_rate?: string | number | null;
+  deposit_open_date?: string | null;
+  deposit_close_date?: string | null;
+  deposit_capitalization_period?: 'daily' | 'monthly' | 'quarterly' | 'yearly' | null;
   credit_term_remaining?: number | null;
   monthly_payment?: string | number | null;
+  contract_number?: string | null;
+  statement_account_number?: string | null;
+  last_transaction_date: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -29,8 +36,14 @@ export type CreateAccountPayload = {
   credit_limit_original?: number | null;
   credit_current_amount?: number | null;
   credit_interest_rate?: number | null;
+  deposit_interest_rate?: number | null;
+  deposit_open_date?: string | null;
+  deposit_close_date?: string | null;
+  deposit_capitalization_period?: 'daily' | 'monthly' | 'quarterly' | 'yearly' | null;
   credit_term_remaining?: number | null;
   monthly_payment?: number | null;
+  contract_number?: string | null;
+  statement_account_number?: string | null;
 };
 
 export type UpdateAccountPayload = Partial<CreateAccountPayload>;

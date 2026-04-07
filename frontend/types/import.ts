@@ -38,6 +38,29 @@ export type ImportUploadResponse = {
   total_rows: number;
   extraction: Record<string, unknown>;
   detection: ImportDetection;
+  suggested_account_id: number | null;
+  contract_number: string | null;
+  contract_match_reason: string | null;
+  contract_match_confidence: number | null;
+  statement_account_number: string | null;
+  statement_account_match_reason: string | null;
+  statement_account_match_confidence: number | null;
+};
+
+export type ImportSessionResponse = {
+  id: number;
+  user_id: number;
+  filename: string;
+  source_type: ImportSourceType;
+  status: ImportSessionStatus;
+  detected_columns: string[];
+  parse_settings: Record<string, unknown>;
+  mapping_json: Record<string, unknown>;
+  summary_json: Record<string, unknown>;
+  account_id: number | null;
+  currency: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ImportMappingPayload = {
@@ -88,6 +111,19 @@ export type ImportCommitResponse = {
   duplicate_count: number;
   error_count: number;
   review_count: number;
+};
+
+export type ImportSessionListItem = {
+  id: number;
+  filename: string;
+  source_type: string;
+  status: string;
+  account_id: number | null;
+  created_at: string;
+  updated_at: string;
+  row_count: number;
+  ready_count: number;
+  error_count: number;
 };
 
 

@@ -1,43 +1,113 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-
-import { getFreeNetCapitalMetrics } from '@/components/dashboard/free-net-capital-data';
+import { useMemo, useRef, useEffect, useState } from 'react';
+import { Info } from 'lucide-react';
+import { getMonthProgressMetrics, MonthProgressMetrics, BarStatus } from '@/components/dashboard/free-net-capital-data';
 import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
-import { MoneyAmount } from '@/components/shared/money-amount';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
 import { resolveExpandDirection, resolveExpandUp } from '@/lib/utils/widget-expand';
-import type { Account } from '@/types/account';
-import type { Counterparty } from '@/types/counterparty';
-import type { GoalWithProgress } from '@/types/goal';
+import type { BudgetProgress } from '@/types/budget';
 import type { Transaction } from '@/types/transaction';
 
 type Props = {
-  accounts: Account[];
-  goals: GoalWithProgress[];
-  counterparties: Counterparty[];
+  budgetProgress: BudgetProgress[];
   transactions: Transaction[];
   isLoading?: boolean;
 };
 
-function formatYAxisValue(value: number) {
-  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}м`;
-  if (Math.abs(value) >= 1_000) return `${Math.round(value / 1_000)}к`;
-  return String(Math.round(value));
+function barColor(status: BarStatus): string {
+  if (status === 'danger') return '#E24B4A';
+  if (status === 'warning') return '#EF9F27';
+  return '#1D9E75';
+}
+
+function statusBadgeClass(status: MonthProgressMetrics['status']): string {
+  if (status === 'danger') return 'bg-rose-50 text-rose-700';
+  if (status === 'warning') return 'bg-amber-50 text-amber-700';
+  if (status === 'no_data') return 'bg-slate-100 text-slate-500';
+  return 'bg-emerald-50 text-emerald-700';
+}
+
+function statusLabel(status: MonthProgressMetrics['status']): string {
+  if (status === 'danger') return 'Опережаешь бюджет';
+  if (status === 'warning') return 'Чуть выше нормы';
+  if (status === 'no_data') return 'Нет данных';
+  return 'В рамках бюджета';
+}
+
+function ProgressRow({
+  label,
+  spentPercent,
+  timePercent,
+  status,
+  spentAmount,
+  plannedAmount,
+  topCategory,
+  showRemaining = false,
+  compact = false,
+}: {
+  label: string;
+  spentPercent: number;
+  timePercent: number;
+  status: BarStatus;
+  spentAmount: number;
+  plannedAmount: number;
+  topCategory: string | null;
+  showRemaining?: boolean;
+  compact?: boolean;
+}) {
+  const clampedSpent = Math.min(spentPercent, 100);
+  const color = barColor(status);
+  const remainingAmount = plannedAmount - spentAmount;
+  const remainingLabel = remainingAmount >= 0
+    ? `осталось ${formatMoney(remainingAmount)}`
+    : `перерасход ${formatMoney(Math.abs(remainingAmount))}`;
+
+  return (
+    <div className={compact ? 'space-y-1' : 'space-y-2'}>
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="font-medium text-slate-700">{label}</span>
+        <span className="text-slate-500">
+          {spentPercent}%
+          {!compact && plannedAmount > 0 && (
+            <span className="ml-1 text-slate-400">
+              {showRemaining
+                ? `(${remainingLabel})`
+                : `(${formatMoney(spentAmount)} из ${formatMoney(plannedAmount)})`}
+            </span>
+          )}
+        </span>
+      </div>
+
+      <div className="relative h-3 w-full overflow-hidden rounded-full bg-slate-100">
+        <div
+          className="absolute top-0 bottom-0 z-10 w-0.5 bg-slate-400"
+          style={{ left: `${timePercent}%` }}
+        />
+        <div
+          className="absolute top-0 left-0 h-full rounded-full transition-all duration-500"
+          style={{ width: `${clampedSpent}%`, backgroundColor: color }}
+        />
+      </div>
+
+      {!compact && topCategory && status !== 'good' && (
+        <p className="text-xs text-slate-400">
+          Больше всего — <span className="text-slate-600">{topCategory}</span>
+        </p>
+      )}
+    </div>
+  );
 }
 
 export function FreeNetCapitalWidget({
-  accounts,
-  goals,
-  counterparties,
+  budgetProgress,
   transactions,
   isLoading = false,
 }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
+  const [collapsedHeight, setCollapsedHeight] = useState(0);
   const [expandDirection, setExpandDirection] = useState<'left' | 'right'>('right');
   const [expandUp, setExpandUp] = useState(false);
 
@@ -45,8 +115,8 @@ export function FreeNetCapitalWidget({
   const cardRef = useRef<HTMLDivElement>(null);
 
   const metrics = useMemo(
-    () => getFreeNetCapitalMetrics(accounts, goals, counterparties, transactions),
-    [accounts, goals, counterparties, transactions],
+    () => getMonthProgressMetrics(budgetProgress, transactions),
+    [budgetProgress, transactions],
   );
 
   useEffect(() => {
@@ -57,78 +127,53 @@ export function FreeNetCapitalWidget({
 
   useEffect(() => {
     if (!isExpanded) return;
-
-    function handleClick(event: MouseEvent) {
-      if (!wrapperRef.current?.contains(event.target as Node)) {
-        setIsExpanded(false);
-      }
+    function handleClick(e: MouseEvent) {
+      if (!wrapperRef.current?.contains(e.target as Node)) setIsExpanded(false);
     }
-
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [isExpanded]);
 
   useEffect(() => {
-    function handleExternalToggle(event: Event) {
-      const customEvent = event as CustomEvent<{ source?: string; open?: boolean }>;
-      if (customEvent.detail?.source !== 'free-net-capital-widget' && customEvent.detail?.open) {
+    function handleExternal(e: Event) {
+      const ce = e as CustomEvent<{ source?: string; open?: boolean }>;
+      if (ce.detail?.source !== 'month-progress-widget' && ce.detail?.open) {
         setIsExpanded(false);
       }
     }
-
-    document.addEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
-    return () => document.removeEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
+    document.addEventListener(FI_SCORE_WIDGET_EVENT, handleExternal as EventListener);
+    return () => document.removeEventListener(FI_SCORE_WIDGET_EVENT, handleExternal as EventListener);
   }, []);
 
   function handleToggle() {
     if (!isExpanded && cardRef.current) {
       setExpandDirection(resolveExpandDirection(cardRef.current, 860));
-      setExpandUp(resolveExpandUp(cardRef.current, 600));
+      setExpandUp(resolveExpandUp(cardRef.current, 500));
     }
-
-    setIsExpanded((current) => {
-      const next = !current;
-      document.dispatchEvent(
-        new CustomEvent(FI_SCORE_WIDGET_EVENT, {
-          detail: { source: 'free-net-capital-widget', open: next },
-        }),
-      );
+    setIsExpanded((v) => {
+      const next = !v;
+      document.dispatchEvent(new CustomEvent(FI_SCORE_WIDGET_EVENT, {
+        detail: { source: 'month-progress-widget', open: next },
+      }));
       return next;
     });
-  }
-
-  function renderDelta() {
-    if (!metrics || metrics.deltaFromPreviousMonth === null) {
-      return <p className="mt-3 text-sm text-slate-400">Недостаточно данных для сравнения</p>;
-    }
-
-    const delta = metrics.deltaFromPreviousMonth;
-    const isPositive = delta > 0;
-    const isNegative = delta < 0;
-
-    return (
-      <p className={cn('mt-3 text-sm font-medium', isPositive ? 'text-emerald-600' : isNegative ? 'text-rose-600' : 'text-slate-500')}>
-        {isPositive ? '+' : isNegative ? '−' : ''}
-        {formatMoney(Math.abs(delta))} за месяц
-      </p>
-    );
   }
 
   function renderHeader() {
     return (
       <div className="flex items-start justify-between gap-4">
-        <div className="pr-4">
-          <p className="text-sm font-medium text-slate-500">Свободный чистый капитал</p>
-          <p className="mt-1 text-sm text-slate-500">Свободные активы за вычетом долгов</p>
+        <div>
+          <p className="text-sm font-medium text-slate-500">Прогресс месяца</p>
+          <p className="mt-0.5 text-xs capitalize text-slate-400">{metrics.monthLabel}</p>
         </div>
         <button
           type="button"
           onClick={handleToggle}
-          className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
+          className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
           aria-label="Подробнее"
           aria-expanded={isExpanded}
         >
-          i
+          <Info className="size-3.5" />
         </button>
       </div>
     );
@@ -137,89 +182,116 @@ export function FreeNetCapitalWidget({
   function renderCollapsedBody() {
     if (isLoading) {
       return (
-        <>
-          <div className="mt-4 space-y-2">
-            <div className="h-9 w-40 animate-pulse rounded bg-slate-100" />
-            <div className="h-5 w-32 animate-pulse rounded bg-slate-100" />
-          </div>
-        </>
-      );
-    }
-
-    if (!metrics) {
-      return (
-        <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
-          Недостаточно данных
+        <div className="mt-4 space-y-3">
+          <div className="h-4 w-32 animate-pulse rounded bg-slate-100" />
+          <div className="h-3 w-full animate-pulse rounded bg-slate-100" />
+          <div className="h-3 w-full animate-pulse rounded bg-slate-100" />
+          <div className="h-3 w-full animate-pulse rounded bg-slate-100" />
         </div>
       );
     }
 
     return (
-      <div className="mt-4">
-        <MoneyAmount
-          value={metrics.freeNetCapital}
-          tone={metrics.freeNetCapital >= 0 ? 'income' : 'expense'}
-          className="text-2xl lg:text-3xl"
+      <div className="mt-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className={cn(
+            'rounded-full px-2.5 py-1 text-xs font-medium',
+            statusBadgeClass(metrics.status),
+          )}>
+            {statusLabel(metrics.status)}
+          </span>
+          <span className="text-xs text-slate-400">
+            {metrics.daysPassed} из {metrics.daysTotal} дней
+          </span>
+        </div>
+
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs text-slate-400">
+            <span>Месяц прошёл</span>
+            <span>{metrics.timePercent}%</span>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full rounded-full bg-slate-300 transition-all duration-500"
+              style={{ width: `${metrics.timePercent}%` }}
+            />
+          </div>
+        </div>
+
+        <ProgressRow
+          label="Обязательные"
+          spentPercent={metrics.essential.spentPercent}
+          timePercent={metrics.timePercent}
+          status={metrics.essential.status}
+          spentAmount={metrics.essential.spentAmount}
+          plannedAmount={metrics.essential.plannedAmount}
+          topCategory={null}
+          compact
         />
-        {renderDelta()}
+
+        <ProgressRow
+          label="Второстепенные"
+          spentPercent={metrics.secondary.spentPercent}
+          timePercent={metrics.timePercent}
+          status={metrics.secondary.status}
+          spentAmount={metrics.secondary.spentAmount}
+          plannedAmount={metrics.secondary.plannedAmount}
+          topCategory={null}
+          compact
+        />
       </div>
     );
   }
 
   function renderExpandedBody() {
-    if (!metrics || !isExpanded) return null;
+    if (!isExpanded) return null;
 
     return (
-      <>
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-2xl bg-slate-50 px-4 py-3">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Личные активы</p>
-            <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.personalAssets)}</p>
+      <div className="mt-5 space-y-5">
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs text-slate-400">
+            <span>Месяц прошёл</span>
+            <span>{metrics.daysPassed} из {metrics.daysTotal} дней · {metrics.timePercent}%</span>
           </div>
-          <div className="rounded-2xl bg-slate-50 px-4 py-3">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Целевые активы</p>
-            <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.targetAssets)}</p>
-          </div>
-          <div className="rounded-2xl bg-slate-50 px-4 py-3">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Долги</p>
-            <p className="mt-1 font-medium text-slate-900">{formatMoney(metrics.debts)}</p>
-          </div>
-          <div className="rounded-2xl bg-slate-50 px-4 py-3">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Свободный чистый капитал</p>
-            <p className={cn('mt-1 font-medium', metrics.freeNetCapital >= 0 ? 'text-slate-900' : 'text-rose-600')}>
-              {formatMoney(metrics.freeNetCapital)}
-            </p>
+          <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full rounded-full bg-slate-300 transition-all"
+              style={{ width: `${metrics.timePercent}%` }}
+            />
           </div>
         </div>
 
-        <div className="mt-5 h-[260px] rounded-[28px] bg-slate-50/70 px-3 py-4 sm:px-4">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={metrics.chartData} barCategoryGap="28%">
-              <CartesianGrid vertical={false} stroke="#E2E8F0" strokeDasharray="3 3" />
-              <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fill: '#64748B', fontSize: 12 }} />
-              <YAxis
-                tickLine={false}
-                axisLine={false}
-                tick={{ fill: '#94A3B8', fontSize: 12 }}
-                tickFormatter={formatYAxisValue}
-                width={52}
-              />
-              <Tooltip
-                cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }}
-                formatter={(value: number) => [formatMoney(value), 'Свободный чистый капитал']}
-                labelFormatter={(label) => `Месяц: ${label}`}
-              />
-              <Bar dataKey="value" fill="#0F172A" radius={[10, 10, 0, 0]} maxBarSize={44} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        <ProgressRow
+          label="Обязательные расходы"
+          spentPercent={metrics.essential.spentPercent}
+          timePercent={metrics.timePercent}
+          status={metrics.essential.status}
+          spentAmount={metrics.essential.spentAmount}
+          plannedAmount={metrics.essential.plannedAmount}
+          topCategory={metrics.essential.topCategory}
+          showRemaining
+          compact={false}
+        />
 
-        <div className="mt-4 space-y-2 text-sm text-slate-600">
-          {metrics.messageLines.map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-        </div>
-      </>
+        <ProgressRow
+          label="Второстепенные расходы"
+          spentPercent={metrics.secondary.spentPercent}
+          timePercent={metrics.timePercent}
+          status={metrics.secondary.status}
+          spentAmount={metrics.secondary.spentAmount}
+          plannedAmount={metrics.secondary.plannedAmount}
+          topCategory={metrics.secondary.topCategory}
+          showRemaining
+          compact={false}
+        />
+
+        {!metrics.hasData && (
+          <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+            Задай бюджет по категориям в разделе Планирование — тогда виджет
+            покажет насколько ты укладываешься в план.
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -229,14 +301,14 @@ export function FreeNetCapitalWidget({
       className="relative self-start overflow-visible"
       style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
     >
-      {isExpanded ? (
+      {isExpanded && (
         <button
           type="button"
           aria-label="Закрыть"
           onClick={handleToggle}
           className="fixed inset-0 z-40 bg-black/10"
         />
-      ) : null}
+      )}
 
       <div ref={cardRef}>
         <Card className="relative overflow-visible p-5">
@@ -267,7 +339,6 @@ export function FreeNetCapitalWidget({
         }}
       >
         {renderHeader()}
-        {renderCollapsedBody()}
         {renderExpandedBody()}
       </Card>
     </div>

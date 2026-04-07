@@ -62,7 +62,13 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
   }, [isExpanded]);
 
   const debitAccounts = useMemo(
-    () => accounts.filter((account) => !isCreditCard(account) && !isLoan(account)),
+    () => accounts.filter(
+      (account) =>
+        !isCreditCard(account) &&
+        !isLoan(account) &&
+        account.account_type !== 'deposit' &&
+        account.account_type !== 'broker',
+    ),
     [accounts],
   );
 
