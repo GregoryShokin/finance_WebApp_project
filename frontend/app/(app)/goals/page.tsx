@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { archiveGoal, createGoal, getGoals, updateGoal } from '@/lib/api/goals';
+import { getCategories } from '@/lib/api/categories';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
 import type { CreateGoalPayload, GoalWithProgress } from '@/types/goal';
@@ -30,14 +31,19 @@ type GoalFormValues = {
   name: string;
   target_amount: string;
   deadline: string;
+  category_id: string;
 };
 
 function GoalFormModal({ initial, onClose, onSubmit, isSubmitting }: { initial?: GoalWithProgress | null; onClose: () => void; onSubmit: (values: GoalFormValues) => void; isSubmitting: boolean; }) {
+  const { data: categories } = useQuery({ queryKey: ['categories'], queryFn: () => getCategories({ kind: 'expense' }), staleTime: 1000 * 60 * 5 });
+  const expenseCategories = categories ?? [];
+
   const { register, handleSubmit, formState: { errors } } = useForm<GoalFormValues>({
     defaultValues: {
       name: initial?.name ?? '',
       target_amount: initial ? String(initial.target_amount) : '',
       deadline: initial?.deadline ?? '',
+      category_id: initial?.category_id ? String(initial.category_id) : '',
     },
   });
 
@@ -60,6 +66,24 @@ function GoalFormModal({ initial, onClose, onSubmit, isSubmitting }: { initial?:
             <Label htmlFor="goal-deadline">Дедлайн (необязательно)</Label>
             <Input id="goal-deadline" className="h-9" type="date" {...register('deadline')} />
           </div>
+          {expenseCategories.length > 0 && (
+            <div>
+              <Label htmlFor="goal-category">Категория расходов (необязательно)</Label>
+              <select
+                id="goal-category"
+                className="mt-1 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                {...register('category_id')}
+              >
+                <option value="">— не привязывать —</option>
+                {expenseCategories.map((cat) => (
+                  <option key={cat.id} value={String(cat.id)}>{cat.name}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-slate-400">
+                Взносы на цель будут отображаться в аналитике в выбранной категории.
+              </p>
+            </div>
+          )}
           <div className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:justify-end">
             <Button type="button" variant="secondary" onClick={onClose}>Отмена</Button>
             <Button type="submit" disabled={isSubmitting}>{isSubmitting ? 'Сохраняем...' : initial ? 'Сохранить' : 'Создать'}</Button>
@@ -134,13 +158,26 @@ export default function GoalsPage() {
   const archiveMutation = useMutation({ mutationFn: archiveGoal, onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['goals'] }); } });
 
   function handleCreateSubmit(values: GoalFormValues) {
-    const payload: CreateGoalPayload = { name: values.name.trim(), target_amount: Number(values.target_amount), deadline: values.deadline || null };
+    const payload: CreateGoalPayload = {
+      name: values.name.trim(),
+      target_amount: Number(values.target_amount),
+      deadline: values.deadline || null,
+      category_id: values.category_id ? Number(values.category_id) : null,
+    };
     createMutation.mutate(payload);
   }
 
   function handleEditSubmit(values: GoalFormValues) {
     if (!editingGoal) return;
-    updateMutation.mutate({ id: editingGoal.id, payload: { name: values.name.trim(), target_amount: Number(values.target_amount), deadline: values.deadline || null } });
+    updateMutation.mutate({
+      id: editingGoal.id,
+      payload: {
+        name: values.name.trim(),
+        target_amount: Number(values.target_amount),
+        deadline: values.deadline || null,
+        category_id: values.category_id ? Number(values.category_id) : null,
+      },
+    });
   }
 
   const visibleGoals = goals?.filter((goal) => goal.status !== 'archived') ?? [];

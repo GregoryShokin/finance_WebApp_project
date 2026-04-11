@@ -1,15 +1,13 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, CreditCard, TrendingUp, Wallet } from 'lucide-react';
+import { useMemo } from 'react';
+import { CreditCard, TrendingUp, Wallet } from 'lucide-react';
 
 import { MoneyAmount } from '@/components/shared/money-amount';
 import { Card } from '@/components/ui/card';
 import { formatMoney } from '@/lib/utils/format';
-import { resolveExpandUp } from '@/lib/utils/widget-expand';
+import { useExpandableCard } from '@/hooks/use-expandable-card';
 import type { Account } from '@/types/account';
-
-const SCALE = 1.8;
 
 type Props = {
   accounts: Account[];
@@ -30,76 +28,76 @@ function isCreditCard(account: Account): boolean {
   return account.account_type === 'credit_card';
 }
 
-function isLoan(account: Account): boolean {
-  return account.account_type === 'credit';
+function pluralAccounts(n: number): string {
+  if (n === 1) return 'счёт';
+  if (n >= 2 && n <= 4) return 'счёта';
+  return 'счетов';
 }
 
 export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
-  const [expandUp, setExpandUp] = useState(false);
+  const {
+    wrapperRef,
+    cardRef,
+    isExpanded,
+    wrapperStyle,
+    cardStyle,
+    backdrop,
+    toggleButton,
+  } = useExpandableCard({ id: 'available-finances-widget', expandHeight: 400 });
 
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (cardRef.current && !isExpanded) {
-      setCollapsedHeight(cardRef.current.offsetHeight);
-    }
-  }, [isExpanded, accounts, isLoading]);
-
-  useEffect(() => {
-    if (!isExpanded) return;
-
-    function handleClick(event: MouseEvent) {
-      if (!wrapperRef.current?.contains(event.target as Node)) {
-        setIsExpanded(false);
-      }
-    }
-
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isExpanded]);
-
+  // Только дебетовые (regular, cash) — реальные деньги, без вкладов и кредитов
   const debitAccounts = useMemo(
-    () => accounts.filter((account) => !isCreditCard(account) && !isLoan(account)),
+    () => accounts.filter(
+      (a) => a.account_type === 'regular' || a.account_type === 'cash',
+    ),
     [accounts],
   );
 
+  // Кредитные карты
   const creditCardAccounts = useMemo(
-    () => accounts.filter((account) => isCreditCard(account)),
+    () => accounts.filter(isCreditCard),
     [accounts],
   );
 
-  const visibleDebitAccounts = useMemo(
-    () => debitAccounts.filter((account) => Math.max(0, Number(account.balance)) >= 1000),
+  // Все релевантные счета для этого виджета
+  const allRelevantAccounts = useMemo(
+    () => [...debitAccounts, ...creditCardAccounts],
+    [debitAccounts, creditCardAccounts],
+  );
+
+  // Основная цифра — только реальные деньги (дебет)
+  const realMoneyTotal = useMemo(
+    () => debitAccounts.reduce((sum, a) => sum + Math.max(0, Number(a.balance)), 0),
     [debitAccounts],
   );
 
-  const visibleAccounts = useMemo(
-    () => [...visibleDebitAccounts, ...creditCardAccounts],
-    [creditCardAccounts, visibleDebitAccounts],
-  );
-
-  const debitTotal = useMemo(
-    () => debitAccounts.reduce((sum, account) => sum + Math.max(0, Number(account.balance)), 0),
-    [debitAccounts],
-  );
-
-  const creditCardTotal = useMemo(
-    () => creditCardAccounts.reduce((sum, account) => sum + Math.max(0, Number(account.balance)), 0),
+  // Доступный кредитный резерв
+  const creditAvailableTotal = useMemo(
+    () => creditCardAccounts.reduce((sum, a) => sum + Math.max(0, Number(a.balance)), 0),
     [creditCardAccounts],
   );
 
-  const totalAvailable = debitTotal + creditCardTotal;
-  const totalCreditAvailable = creditCardTotal;
+  // Итого с учётом кредитных лимитов
+  const totalWithCredit = realMoneyTotal + creditAvailableTotal;
 
-  function handleToggle(next?: boolean) {
-    if ((!isExpanded || next === true) && cardRef.current) {
-      setExpandUp(resolveExpandUp(cardRef.current, 400));
-    }
-    setIsExpanded((value) => next ?? !value);
-  }
+  // Счета с балансом >= 1000 — показываем по отдельности
+  const visibleAccounts = useMemo(
+    () => allRelevantAccounts.filter((a) => Math.max(0, Number(a.balance)) >= 1000),
+    [allRelevantAccounts],
+  );
+
+  // Счета с балансом < 1000 — сворачиваем в одну строку
+  const hiddenAccounts = useMemo(
+    () => allRelevantAccounts.filter((a) => Math.max(0, Number(a.balance)) < 1000),
+    [allRelevantAccounts],
+  );
+
+  const hiddenTotal = useMemo(
+    () => hiddenAccounts.reduce((sum, a) => sum + Math.max(0, Number(a.balance)), 0),
+    [hiddenAccounts],
+  );
+
+  const totalAccountCount = allRelevantAccounts.length;
 
   function renderContent() {
     if (isLoading) {
@@ -119,78 +117,88 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
       <>
         <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Доступные финансы</p>
 
-        <button
-          type="button"
-          onClick={() => handleToggle()}
-          className="absolute right-3 top-3 flex size-[24px] items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-          aria-label="Подробнее"
-          aria-expanded={isExpanded}
-        >
-          <ChevronDown className={`size-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-        </button>
+        {toggleButton}
 
         <div className="mt-3">
+          {/* Основная цифра — только реальные деньги */}
           <MoneyAmount
-            value={totalAvailable}
-            tone={totalAvailable >= 0 ? 'income' : 'expense'}
+            value={realMoneyTotal}
+            tone={realMoneyTotal >= 0 ? 'income' : 'expense'}
             className="text-2xl lg:text-3xl"
           />
-          <p className="mt-1 text-sm text-slate-500">по доступным счетам</p>
-          {totalCreditAvailable > 0 ? (
-            <p className="mt-0.5 text-xs text-slate-400">
-              из них кредитные: {formatMoney(totalCreditAvailable)}
+          <p className="mt-1 text-sm text-slate-500">реальные деньги</p>
+
+          {/* Дополнительная строка — с учётом кредитных лимитов */}
+          {creditAvailableTotal > 0 && (
+            <p className="mt-1.5 text-xs text-slate-400">
+              с кредитными лимитами:{' '}
+              <span className="font-medium text-slate-600">{formatMoney(totalWithCredit)}</span>
             </p>
-          ) : null}
+          )}
+
           <p className="mt-2 text-xs font-medium uppercase tracking-wide text-slate-400">
-            {visibleAccounts.length} {visibleAccounts.length === 1 ? 'счёт' : visibleAccounts.length < 5 ? 'счёта' : 'счетов'}
+            {totalAccountCount} {pluralAccounts(totalAccountCount)}
           </p>
         </div>
 
         {isExpanded ? (
           <div className="mt-3 space-y-2">
             <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-              Доступные счета
+              Счета
             </p>
-            {visibleAccounts.length === 0 ? (
+            {visibleAccounts.length === 0 && hiddenAccounts.length === 0 ? (
               <p className="text-xs text-slate-400">Нет счетов для отображения</p>
             ) : (
-              visibleAccounts.map((account) => {
-                const creditLimit = account.credit_limit ?? account.credit_limit_original;
-                const cardLike = isCreditCard(account);
-                return (
-                  <div
-                    key={account.id}
-                    className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2"
-                  >
-                    <div className="flex items-center gap-2">
-                      <div className="flex size-7 items-center justify-center rounded-full border border-slate-100 bg-white">
-                        <AccountIcon accountType={account.account_type} />
-                      </div>
-                      <div>
+              <>
+                {visibleAccounts.map((account) => {
+                  const creditLimit = account.credit_limit ?? account.credit_limit_original;
+                  const cardLike = isCreditCard(account);
+                  return (
+                    <div
+                      key={account.id}
+                      className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2"
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className="flex size-7 items-center justify-center rounded-full border border-slate-100 bg-white">
+                          <AccountIcon accountType={account.account_type} />
+                        </div>
                         <p className="text-sm font-medium text-slate-900">{account.name}</p>
                       </div>
-                    </div>
-                    {cardLike ? (
-                      <div className="text-right">
-                        <p className="text-sm font-medium text-slate-900">
-                          {formatMoney(Math.abs(Number(account.balance)))}
-                        </p>
-                        {creditLimit ? (
-                          <p className="text-[11px] text-slate-400">
-                            лимит {formatMoney(Number(creditLimit))}
+                      {cardLike ? (
+                        <div className="text-right">
+                          <p className="text-sm font-medium text-slate-900">
+                            {formatMoney(Math.max(0, Number(account.balance)))}
                           </p>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <MoneyAmount
-                        value={Math.abs(Number(account.balance))}
-                        tone="income"
-                        className="text-sm font-medium"
-                      />
-                    )}
+                          {creditLimit ? (
+                            <p className="text-[11px] text-slate-400">
+                              лимит {formatMoney(Number(creditLimit))}
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <MoneyAmount
+                          value={Math.max(0, Number(account.balance))}
+                          tone="income"
+                          className="text-sm font-medium"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+
+                {hiddenAccounts.length > 0 && (
+                  <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
+                    <p className="text-sm text-slate-500">
+                      Остальные счета ({hiddenAccounts.length})
+                    </p>
+                    <MoneyAmount
+                      value={hiddenTotal}
+                      tone="income"
+                      className="text-sm font-medium"
+                    />
                   </div>
-                );
-              })
+                )}
+              </>
             )}
           </div>
         ) : null}
@@ -202,33 +210,11 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
     <div
       ref={wrapperRef}
       className="relative h-full overflow-visible"
-      style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
+      style={wrapperStyle}
     >
-      {isExpanded ? (
-        <button
-          type="button"
-          aria-label="Закрыть"
-          onClick={() => handleToggle(false)}
-          className="fixed inset-0 z-40 bg-black/10"
-        />
-      ) : null}
-
+      {backdrop}
       <div ref={cardRef}>
-        <Card
-          className="relative overflow-visible p-5"
-          style={{
-            position: isExpanded ? 'absolute' : 'relative',
-            top: isExpanded && !expandUp ? 0 : 'auto',
-            bottom: isExpanded && expandUp ? 0 : 'auto',
-            left: 0,
-            right: 0,
-            transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: expandUp ? 'center bottom' : 'center center',
-            transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
-            zIndex: isExpanded ? 50 : 1,
-            overflow: 'visible',
-          }}
-        >
+        <Card className="relative overflow-visible p-5" style={cardStyle}>
           {renderContent()}
         </Card>
       </div>

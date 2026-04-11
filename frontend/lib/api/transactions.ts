@@ -2,6 +2,7 @@ import { apiClient } from '@/lib/api/client';
 import type {
   CreateTransactionPayload,
   DeleteTransactionsByPeriodPayload,
+  LargePurchaseCheck,
   Transaction,
   TransactionsQuery,
   UpdateTransactionPayload,
@@ -63,4 +64,10 @@ export function splitTransaction(transactionId: number, payload: SplitTransactio
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export function checkLargePurchase(amount: number) {
+  return apiClient<LargePurchaseCheck>(
+    `/transactions/large-purchase-check?amount=${amount}`,
+  );
 }

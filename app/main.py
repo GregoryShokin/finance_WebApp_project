@@ -7,8 +7,10 @@ from app.models.budget import Budget  # noqa: F401 — registers mapper
 from app.models.budget_alert import BudgetAlert  # noqa: F401 — registers mapper
 from app.models.goal import Goal  # noqa: F401 — registers mapper
 from app.models.real_asset import RealAsset  # noqa: F401 — registers mapper
+from app.models.user_settings import UserSettings  # noqa: F401 — registers mapper
 
 from app.api.v1.accounts import router as accounts_router
+from app.api.v1.analytics import router as analytics_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.categories import router as categories_router
 from app.api.v1.budget import router as budget_router
@@ -20,6 +22,7 @@ from app.api.v1.counterparties import router as counterparties_router
 from app.api.v1.health import router as health_router
 from app.api.v1.imports import router as imports_router
 from app.api.v1.transactions import router as transactions_router
+from app.api.v1.user_settings import router as user_settings_router
 from app.core.config import settings
 from app.core.middleware import SecurityHeadersMiddleware
 
@@ -55,6 +58,8 @@ app.include_router(financial_health_router, prefix=settings.API_V1_PREFIX)
 app.include_router(goals_router, prefix=settings.API_V1_PREFIX)
 app.include_router(metrics_router, prefix=settings.API_V1_PREFIX)
 app.include_router(category_rules_router, prefix=settings.API_V1_PREFIX)
+app.include_router(analytics_router, prefix=settings.API_V1_PREFIX)
+app.include_router(user_settings_router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/")

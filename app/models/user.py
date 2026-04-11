@@ -20,3 +20,4 @@ class User(Base):
     budgets = relationship("Budget", back_populates="user", cascade="all, delete-orphan")
     budget_alerts = relationship("BudgetAlert", back_populates="user", cascade="all, delete-orphan")
     real_assets = relationship("RealAsset", back_populates="user", cascade="all, delete-orphan")
+    settings = relationship("UserSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")

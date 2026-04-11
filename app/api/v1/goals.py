@@ -40,6 +40,7 @@ def create_goal(
         name=payload.name,
         target_amount=payload.target_amount,
         deadline=payload.deadline,
+        category_id=payload.category_id,
     )
     return goal
 
@@ -84,6 +85,7 @@ def update_goal(
             name=data.get("name"),
             target_amount=data.get("target_amount"),
             deadline=data["deadline"] if "deadline" in data else _UNSET,
+            category_id=data["category_id"] if "category_id" in data else _UNSET,
         )
         return goal
     except GoalNotFoundError as exc:

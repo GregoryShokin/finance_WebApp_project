@@ -1,10 +1,10 @@
-﻿'use client';
+'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo } from 'react';
 
-import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
+import { useExpandableCard } from '@/hooks/use-expandable-card';
 import type { Category } from '@/types/category';
 import type { Transaction } from '@/types/transaction';
 
@@ -116,42 +116,15 @@ function renderBarRow(label: string, value: number, target: number, toneClass: s
 }
 
 export function IncomeStructureWidget({ transactions, categories, isLoading = false }: Props) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
-
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (cardRef.current && !isExpanded) {
-      setCollapsedHeight(cardRef.current.offsetHeight);
-    }
-  }, [isExpanded, isLoading, transactions, categories]);
-
-  useEffect(() => {
-    if (!isExpanded) return;
-
-    function handleClick(event: MouseEvent) {
-      if (!wrapperRef.current?.contains(event.target as Node)) {
-        setIsExpanded(false);
-      }
-    }
-
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isExpanded]);
-
-  useEffect(() => {
-    function handleExternalToggle(event: Event) {
-      const customEvent = event as CustomEvent<{ source?: string; open?: boolean }>;
-      if (customEvent.detail?.source !== 'income-structure-widget' && customEvent.detail?.open) {
-        setIsExpanded(false);
-      }
-    }
-
-    document.addEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
-    return () => document.removeEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
-  }, []);
+  const {
+    wrapperRef,
+    cardRef,
+    isExpanded,
+    wrapperStyle,
+    cardStyle,
+    backdrop,
+    toggleButton,
+  } = useExpandableCard({ id: 'income-structure-widget', expandHeight: 520 });
 
   const metrics = useMemo<StructureMetrics | null>(() => {
     const analyticsTransactions = transactions.filter((transaction) => transaction.affects_analytics);
@@ -250,18 +223,6 @@ export function IncomeStructureWidget({ transactions, categories, isLoading = fa
     };
   }, [transactions, categories]);
 
-  function handleToggle() {
-    setIsExpanded((current) => {
-      const next = !current;
-      document.dispatchEvent(
-        new CustomEvent(FI_SCORE_WIDGET_EVENT, {
-          detail: { source: 'income-structure-widget', open: next },
-        }),
-      );
-      return next;
-    });
-  }
-
   function renderContent() {
     if (isLoading) {
       return (
@@ -280,10 +241,8 @@ export function IncomeStructureWidget({ transactions, categories, isLoading = fa
     if (!metrics) {
       return (
         <>
-          <div className="pr-10">
-            <p className="text-sm font-semibold text-slate-900">Структура дохода</p>
-            <p className="mt-1 text-sm text-slate-500">по правилу 50/30/20</p>
-          </div>
+          <p className="text-sm font-semibold text-slate-900">Структура дохода</p>
+          <p className="mt-1 text-sm text-slate-500">по правилу 50/30/20</p>
           <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
             Недостаточно данных по доходам для построения структуры.
           </div>
@@ -293,24 +252,11 @@ export function IncomeStructureWidget({ transactions, categories, isLoading = fa
 
     return (
       <>
-        <div className="flex items-start justify-between gap-4">
-          <div className="pr-4">
-            <h4 className="text-base font-semibold text-slate-900">Структура дохода</h4>
-            <p className="mt-1 text-sm text-slate-500">
-              {isExpanded ? 'Сравнение с рекомендуемой моделью 50/30/20' : 'по правилу 50/30/20'}
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleToggle}
-            className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-            aria-label="Подробнее"
-            aria-expanded={isExpanded}
-          >
-            i
-          </button>
-        </div>
+        <p className="text-sm font-semibold text-slate-900">Структура дохода</p>
+        <p className="mt-1 text-sm text-slate-500">
+          {isExpanded ? 'Сравнение с рекомендуемой моделью 50/30/20' : 'по правилу 50/30/20'}
+        </p>
+        {toggleButton}
 
         <div className="mt-4 space-y-4">
           {renderBarRow('Обязательные', metrics.essentialShare, 50, getBarTone(metrics.essentialShare, 50))}
@@ -335,31 +281,12 @@ export function IncomeStructureWidget({ transactions, categories, isLoading = fa
   return (
     <div
       ref={wrapperRef}
-      className="relative self-start overflow-visible"
-      style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
+      className="relative h-full overflow-visible"
+      style={wrapperStyle}
     >
-      {isExpanded ? (
-        <button
-          type="button"
-          aria-label="Закрыть"
-          onClick={handleToggle}
-          className="fixed inset-0 z-40 bg-black/10"
-        />
-      ) : null}
-
+      {backdrop}
       <div ref={cardRef}>
-        <Card
-          className={cn(
-            'relative overflow-visible transition-[width,transform,box-shadow] duration-300 ease-out',
-            isExpanded
-              ? 'absolute right-0 top-0 z-50 w-[min(720px,calc(100vw-2rem))] p-5 shadow-2xl lg:p-6 xl:w-[720px]'
-              : 'w-full p-4 lg:p-5',
-          )}
-          style={{
-            transformOrigin: 'right top',
-            transform: isExpanded ? 'translateY(-4px)' : 'translateY(0)',
-          }}
-        >
+        <Card className="relative overflow-visible p-5" style={cardStyle}>
           {renderContent()}
         </Card>
       </div>

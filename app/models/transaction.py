@@ -24,6 +24,9 @@ class TransactionOperationType(str, Enum):
     credit_payment = "credit_payment"
     credit_early_repayment = "credit_early_repayment"
     credit_interest = "credit_interest"
+    # Auto-created when a credit_payment attributes principal to a deferred
+    # purchase category. Linked back to the originating payment via source_payment_id.
+    credit_principal_attribution = "credit_principal_attribution"
     debt = "debt"
     refund = "refund"
     adjustment = "adjustment"
@@ -58,6 +61,26 @@ class Transaction(Base):
     transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     affects_analytics: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true", index=True)
+
+    # --- Deferred / large-purchase accounting ---
+    # True when this is a large credit/installment purchase excluded from
+    # immediate analytics; expense impact flows through future payments instead.
+    is_deferred_purchase: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false", index=True
+    )
+    # Remaining principal not yet attributed to the expense analytics.
+    # Set to amount on creation; decremented as credit_payments attribute principal.
+    deferred_remaining_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # True when this is a large purchase from free (non-credit) funds.
+    # Shown in the "Large Purchases" section; excluded from average expense calculations.
+    is_large_purchase: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    # For credit_principal_attribution and credit_interest expense records:
+    # points back to the credit_payment transaction that generated them.
+    source_payment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     transfer_pair_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True, index=True)
     goal_id: Mapped[int | None] = mapped_column(ForeignKey("goals.id", ondelete="SET NULL"), nullable=True, index=True)

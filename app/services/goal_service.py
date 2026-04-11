@@ -201,6 +201,7 @@ class GoalService:
         name: str,
         target_amount: Decimal,
         deadline: date | None,
+        category_id: int | None = None,
     ) -> Goal:
         goal = Goal(
             user_id=user_id,
@@ -210,6 +211,7 @@ class GoalService:
             status=GoalStatus.active.value,
             is_system=False,
             system_key=None,
+            category_id=category_id,
         )
         self.db.add(goal)
         self.db.commit()
@@ -234,6 +236,7 @@ class GoalService:
         name: str | None = None,
         target_amount: Decimal | None = None,
         deadline: date | None | object = _UNSET,
+        category_id: int | None | object = _UNSET,
     ) -> Goal:
         goal = self._get_goal(goal_id, user_id)
         if goal.is_system:
@@ -247,6 +250,8 @@ class GoalService:
             goal.target_amount = target_amount
         if deadline is not _UNSET:
             goal.deadline = deadline
+        if category_id is not _UNSET:
+            goal.category_id = category_id  # type: ignore[assignment]
 
         self.db.add(goal)
         self.db.commit()

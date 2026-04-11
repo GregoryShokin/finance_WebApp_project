@@ -689,7 +689,7 @@ class FinancialHealthService:
         total = ZERO
         for account in active_accounts:
             is_credit_account = (
-                account.account_type in {"credit", "credit_card"}
+                account.account_type in {"credit", "credit_card", "installment_card"}
                 or bool(account.is_credit)
             )
             if not is_credit_account:
@@ -725,7 +725,7 @@ class FinancialHealthService:
         own_capital = ZERO
         for account in active_accounts:
             balance = self._to_decimal(account.balance)
-            is_credit = bool(account.is_credit) or account.account_type in {"credit", "credit_card"}
+            is_credit = bool(account.is_credit) or account.account_type in {"credit", "credit_card", "installment_card"}
             if is_credit:
                 if balance < 0:
                     total_debt += abs(balance)
@@ -1084,3 +1084,55 @@ class FinancialHealthService:
         if value >= 3:
             return "growth"
         return "start"
+
+    # ── Large purchases ───────────────────────────────────────────────────────
+
+    def get_large_purchases(
+        self,
+        user_id: int,
+        months: int = 6,
+    ) -> dict:
+        """Return large and deferred purchases for the last N months.
+
+        Covers two categories of capital-event transactions:
+        - is_deferred_purchase=True  — bought on credit/installment; impact
+          flows through attribution records when payments are made.
+        - is_large_purchase=True     — bought from free cash; excluded from
+          the regular expense averages, shown separately.
+
+        Returns a dict with:
+            transactions: list[Transaction]  — ordered newest-first
+            total_amount: Decimal            — sum of all matched transactions
+            months: int                      — lookback window used
+        """
+        today = date.today()
+        start_month = self._shift_month(today, -(months - 1))
+        start_dt = datetime(
+            start_month.year, start_month.month, 1, tzinfo=timezone.utc
+        )
+
+        from sqlalchemy import or_
+
+        txns = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.transaction_date >= start_dt,
+                or_(
+                    Transaction.is_deferred_purchase.is_(True),
+                    Transaction.is_large_purchase.is_(True),
+                ),
+            )
+            .order_by(Transaction.transaction_date.desc(), Transaction.id.desc())
+            .all()
+        )
+
+        total_amount = sum(
+            (self._to_decimal(tx.amount) for tx in txns), ZERO
+        ).quantize(TWOPLACES)
+
+        return {
+            "transactions": txns,
+            "total_amount": total_amount,
+            "months": months,
+        }

@@ -10,6 +10,7 @@ export type Goal = {
   status: GoalStatus;
   is_system: boolean;
   system_key: GoalSystemKey | null;
+  category_id: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -25,10 +26,12 @@ export type CreateGoalPayload = {
   name: string;
   target_amount: number;
   deadline?: string | null;
+  category_id?: number | null;
 };
 
 export type UpdateGoalPayload = {
   name?: string;
   target_amount?: number;
   deadline?: string | null;
+  category_id?: number | null;
 };

@@ -10,12 +10,14 @@ class GoalCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     target_amount: Decimal = Field(gt=0)
     deadline: date | None = None
+    category_id: int | None = None
 
 
 class GoalUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     target_amount: Decimal | None = Field(default=None, gt=0)
     deadline: date | None = None
+    category_id: int | None = None
 
 
 class GoalResponse(BaseModel):
@@ -29,6 +31,7 @@ class GoalResponse(BaseModel):
     status: str
     is_system: bool
     system_key: str | None
+    category_id: int | None = None
     created_at: datetime
     updated_at: datetime
 

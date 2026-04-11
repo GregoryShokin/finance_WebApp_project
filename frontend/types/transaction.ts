@@ -11,6 +11,7 @@ export type TransactionOperationType =
   | 'credit_payment'
   | 'credit_early_repayment'
   | 'credit_interest'
+  | 'credit_principal_attribution'
   | 'debt'
   | 'refund'
   | 'adjustment';
@@ -38,6 +39,11 @@ export type Transaction = {
   transaction_date: string;
   needs_review: boolean;
   affects_analytics: boolean;
+  // Deferred/large purchase fields
+  is_deferred_purchase?: boolean;
+  is_large_purchase?: boolean;
+  deferred_remaining_amount?: number | null;
+  source_payment_id?: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -59,6 +65,8 @@ export type CreateTransactionPayload = {
   description?: string | null;
   transaction_date: string;
   needs_review?: boolean;
+  is_deferred_purchase?: boolean;
+  is_large_purchase?: boolean;
 };
 
 export type UpdateTransactionPayload = Partial<CreateTransactionPayload>;
@@ -88,4 +96,16 @@ export type SplitTransactionPayload = {
     amount: number;
     description?: string | null;
   }>;
+};
+
+export type LargePurchaseCheck = {
+  is_large: boolean;
+  threshold_amount: number;
+  avg_monthly_expenses: number;
+};
+
+export type LargePurchasesList = {
+  transactions: Transaction[];
+  total_amount: number;
+  months: number;
 };

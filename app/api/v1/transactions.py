@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from app.api.deps import get_current_user, get_db
 from app.models.user import User
 from app.schemas.category import CategoryPriority
 from app.schemas.transaction import (
+    LargePurchaseCheckResponse,
     TransactionCreateRequest,
     TransactionDeletePeriodRequest,
     TransactionDeletePeriodResponse,
@@ -75,6 +77,17 @@ def create_transaction(
     except TransactionConflictError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.get("/large-purchase-check", response_model=LargePurchaseCheckResponse)
+def large_purchase_check(
+    amount: Decimal = Query(..., gt=0, description="Сумма предполагаемой покупки"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Check whether an amount qualifies as a large purchase for the current user."""
+    service = TransactionService(db)
+    return service.check_large_purchase(user_id=current_user.id, amount=amount)
 
 
 @router.put("/{transaction_id}", response_model=TransactionResponse)

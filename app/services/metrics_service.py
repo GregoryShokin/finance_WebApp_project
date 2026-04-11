@@ -220,3 +220,41 @@ class MetricsService:
             invested=_round2(invested),
             total_income=_round2(total_income),
         )
+
+    # ── 3. Average monthly expenses ───────────────────────────────────────────
+
+    def get_avg_monthly_expenses(self, user_id: int) -> Decimal:
+        """Return the average monthly expense over the last N completed months (max 6).
+
+        Used as the baseline for the large-purchase threshold calculation.
+        Excludes the current (partial) month, consistent with the app-wide
+        current-month exclusion rule.
+        """
+        today = date.today()
+        monthly_totals: list[Decimal] = []
+        n_months = min(
+            6,
+            (today.year - 2000) * 12 + today.month - 1,  # months since Jan 2000 (safety cap)
+        )
+        for n in range(1, n_months + 1):
+            prev = _prev_month(today, n)
+            txns = (
+                self.db.query(Transaction)
+                .filter(
+                    Transaction.user_id == user_id,
+                    Transaction.type == "expense",
+                    Transaction.affects_analytics.is_(True),
+                    Transaction.transaction_date >= _month_start_dt(prev),
+                    Transaction.transaction_date <= _month_end_dt(prev),
+                )
+                .all()
+            )
+            month_total = sum((Decimal(str(tx.amount)) for tx in txns), Decimal("0"))
+            if month_total > Decimal("0"):
+                monthly_totals.append(month_total)
+            if len(monthly_totals) == 6:
+                break
+
+        if not monthly_totals:
+            return Decimal("0")
+        return _round2(sum(monthly_totals, Decimal("0")) / Decimal(str(len(monthly_totals))))

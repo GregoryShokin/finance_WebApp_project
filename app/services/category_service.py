@@ -73,7 +73,32 @@ class CategoryService:
         category = self.repo.get_by_id(category_id=category_id, user_id=user_id)
         if not category:
             raise CategoryNotFoundError("Category not found")
+        if category.is_system:
+            raise CategoryValidationError("Системную категорию нельзя удалить.")
         self.repo.delete(category)
+
+    def get_or_create_interest_category(self, *, user_id: int) -> "Category":
+        """Return the system 'Проценты по кредитам' category, creating it if missing."""
+        from app.models.category import Category
+        existing = (
+            self.repo.db.query(Category)
+            .filter(
+                Category.user_id == user_id,
+                Category.is_system.is_(True),
+                Category.name == "Проценты по кредитам",
+            )
+            .first()
+        )
+        if existing:
+            return existing
+        return self.create_category(
+            user_id=user_id,
+            name="Проценты по кредитам",
+            kind="expense",
+            priority="expense_essential",
+            icon_name="percent",
+            is_system=True,
+        )
 
 
     def ensure_default_categories(self, *, user_id: int) -> list[Category]:

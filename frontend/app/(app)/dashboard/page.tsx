@@ -1,14 +1,13 @@
-﻿'use client';
+'use client';
 
-import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import { AvgDailyExpenseWidget } from '@/components/dashboard/avg-daily-expense-widget';
 import { AvailableFinancesWidget } from '@/components/dashboard/available-finances-widget';
+import { BudgetPaceWidget } from '@/components/dashboard/budget-pace-widget';
 import { CapitalWidget } from '@/components/dashboard/capital-widget';
 import { CreditsWidget } from '@/components/dashboard/credits-widget';
 import { DebtsWidget } from '@/components/dashboard/debts-widget';
-import { FreeNetCapitalWidget } from '@/components/dashboard/free-net-capital-widget';
 import { IncomeStructureWidget } from '@/components/dashboard/income-structure-widget';
 import { MonthlyAvgBalanceCard } from '@/components/dashboard/monthly-avg-balance-card';
 import { SafetyBufferWidget } from '@/components/dashboard/safety-buffer-widget';
@@ -21,13 +20,12 @@ import { getAccounts } from '@/lib/api/accounts';
 import { getCategories } from '@/lib/api/categories';
 import { getCounterparties } from '@/lib/api/counterparties';
 import { getGoals } from '@/lib/api/goals';
+import { getLargePurchases } from '@/lib/api/analytics';
 import { getRealAssets } from '@/lib/api/real-assets';
 import { getTransactions } from '@/lib/api/transactions';
 import { useFinancialHealth } from '@/hooks/use-financial-health';
-import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 
 export default function DashboardPage() {
-  const [activeCard, setActiveCard] = useState<string | null>(null);
   const healthQuery = useFinancialHealth();
   const health = healthQuery.data;
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
@@ -36,6 +34,7 @@ export default function DashboardPage() {
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
   const realAssetsQuery = useQuery({ queryKey: ['real-assets'], queryFn: getRealAssets });
   const transactionsQuery = useQuery({ queryKey: ['transactions', 'dashboard-v2'], queryFn: () => getTransactions() });
+  const largePurchasesQuery = useQuery({ queryKey: ['large-purchases', 6], queryFn: () => getLargePurchases(6), staleTime: 1000 * 60 * 5 });
 
   const isLoading =
     healthQuery.isLoading ||
@@ -55,27 +54,6 @@ export default function DashboardPage() {
       realAssetsQuery.error ||
       transactionsQuery.error,
   );
-
-  useEffect(() => {
-    function handleFiScoreWidget(event: Event) {
-      const customEvent = event as CustomEvent<{ source?: string; open?: boolean }>;
-      if (customEvent.detail?.source !== 'dashboard-card' && customEvent.detail?.open) {
-        setActiveCard(null);
-      }
-    }
-
-    document.addEventListener(FI_SCORE_WIDGET_EVENT, handleFiScoreWidget as EventListener);
-    return () => document.removeEventListener(FI_SCORE_WIDGET_EVENT, handleFiScoreWidget as EventListener);
-  }, []);
-
-  const toggle = (key: string) => {
-    document.dispatchEvent(
-      new CustomEvent(FI_SCORE_WIDGET_EVENT, {
-        detail: { source: 'dashboard-card', open: true },
-      }),
-    );
-    setActiveCard((current) => (current === key ? null : key));
-  };
 
   return (
     <PageShell
@@ -109,22 +87,9 @@ export default function DashboardPage() {
                 transactions={transactionsQuery.data ?? []}
                 categories={categoriesQuery.data ?? []}
                 goals={goalsQuery.data ?? []}
-                isExpanded={activeCard === 'avgBalance'}
-                onToggle={() => toggle('avgBalance')}
               />
-              <FreeNetCapitalWidget
-                accounts={accountsQuery.data ?? []}
-                goals={goalsQuery.data ?? []}
-                counterparties={counterpartiesQuery.data ?? []}
-                transactions={transactionsQuery.data ?? []}
-                isLoading={
-                  accountsQuery.isLoading ||
-                  goalsQuery.isLoading ||
-                  counterpartiesQuery.isLoading ||
-                  transactionsQuery.isLoading
-                }
-              />
-              <SafetyBufferWidget goals={goalsQuery.data ?? []} isLoading={goalsQuery.isLoading} />
+              <BudgetPaceWidget />
+              <SafetyBufferWidget goals={goalsQuery.data ?? []} isLoading={goalsQuery.isLoading} largePurchasesTotal={largePurchasesQuery.data?.total_amount ? Number(largePurchasesQuery.data.total_amount) : 0} />
             </div>
           </section>
 

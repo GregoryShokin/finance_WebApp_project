@@ -1,20 +1,17 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Info, Trash2 } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { deleteCounterparty } from '@/lib/api/counterparties';
 import { formatMoney } from '@/lib/utils/format';
-import { resolveExpandUp } from '@/lib/utils/widget-expand';
+import { useExpandableCard } from '@/hooks/use-expandable-card';
 import type { Counterparty } from '@/types/counterparty';
 import type { FinancialHealth } from '@/types/financial-health';
-
-const SCALE = 1.8;
 
 type Props = {
   counterparties: Counterparty[];
@@ -23,44 +20,17 @@ type Props = {
 };
 
 export function DebtsWidget({ counterparties, health: _health, isLoading = false }: Props) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
-  const [expandUp, setExpandUp] = useState(false);
-
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
 
-  useEffect(() => {
-    if (cardRef.current && !isExpanded) {
-      setCollapsedHeight(cardRef.current.offsetHeight);
-    }
-  }, [isExpanded, counterparties, isLoading]);
-
-  useEffect(() => {
-    if (!isExpanded) return;
-
-    function handleClick(event: MouseEvent) {
-      if (!wrapperRef.current?.contains(event.target as Node)) {
-        setIsExpanded(false);
-      }
-    }
-
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isExpanded]);
-
-  useEffect(() => {
-    function handleExternalToggle(event: Event) {
-      const customEvent = event as CustomEvent<{ source?: string; open?: boolean }>;
-      if (customEvent.detail?.source !== 'debts-widget' && customEvent.detail?.open) {
-        setIsExpanded(false);
-      }
-    }
-
-    document.addEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
-    return () => document.removeEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
-  }, []);
+  const {
+    wrapperRef,
+    cardRef,
+    isExpanded,
+    wrapperStyle,
+    cardStyle,
+    backdrop,
+    toggleButton,
+  } = useExpandableCard({ id: 'debts-widget', expandHeight: 500 });
 
   const metrics = useMemo(() => {
     const totalReceivable = counterparties.reduce((sum, item) => sum + Number(item.receivable_amount), 0);
@@ -81,21 +51,6 @@ export function DebtsWidget({ counterparties, health: _health, isLoading = false
       hasAnyDebt,
     };
   }, [counterparties]);
-
-  function handleToggle() {
-    if (!isExpanded && cardRef.current) {
-      setExpandUp(resolveExpandUp(cardRef.current, 500));
-    }
-    setIsExpanded((current) => {
-      const next = !current;
-      document.dispatchEvent(
-        new CustomEvent(FI_SCORE_WIDGET_EVENT, {
-          detail: { source: 'debts-widget', open: next },
-        }),
-      );
-      return next;
-    });
-  }
 
   async function handleDelete(counterparty: Counterparty) {
     const confirmed = window.confirm(`Удалить "${counterparty.name}" вместе с историей долга?`);
@@ -145,26 +100,10 @@ export function DebtsWidget({ counterparties, health: _health, isLoading = false
       );
     }
 
-    const hideInfoButton = !metrics.hasAnyDebt;
-
     return (
       <>
-        <div className="flex items-start justify-between gap-4">
-          <div className="pr-4">
-            <p className="text-sm font-medium text-slate-500">Долги</p>
-          </div>
-          {!hideInfoButton ? (
-            <button
-              type="button"
-              onClick={handleToggle}
-              className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-              aria-label="Подробнее"
-              aria-expanded={isExpanded}
-            >
-              <Info className="size-3.5" />
-            </button>
-          ) : null}
-        </div>
+        <p className="text-sm font-medium text-slate-500">Долги</p>
+        {metrics.hasAnyDebt ? toggleButton : null}
 
         {!metrics.hasAnyDebt ? (
           <p className="mt-4 text-sm text-slate-400">Долгов нет</p>
@@ -228,33 +167,11 @@ export function DebtsWidget({ counterparties, health: _health, isLoading = false
     <div
       ref={wrapperRef}
       className="relative h-full overflow-visible"
-      style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
+      style={wrapperStyle}
     >
-      {isExpanded ? (
-        <button
-          type="button"
-          aria-label="Закрыть"
-          onClick={handleToggle}
-          className="fixed inset-0 z-40 bg-black/10"
-        />
-      ) : null}
-
+      {backdrop}
       <div ref={cardRef}>
-        <Card
-          className="relative overflow-visible p-5"
-          style={{
-            position: isExpanded ? 'absolute' : 'relative',
-            top: isExpanded && !expandUp ? 0 : 'auto',
-            bottom: isExpanded && expandUp ? 0 : 'auto',
-            left: 0,
-            right: 0,
-            transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: expandUp ? 'center bottom' : 'center center',
-            transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
-            zIndex: isExpanded ? 50 : 1,
-            overflow: 'visible',
-          }}
-        >
+        <Card className="relative overflow-visible p-5" style={cardStyle}>
           {renderContent()}
         </Card>
       </div>

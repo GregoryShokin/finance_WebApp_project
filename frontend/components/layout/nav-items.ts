@@ -10,6 +10,8 @@ import {
   ListTree,
   PiggyBank,
   ReceiptText,
+  Settings,
+  ShoppingCart,
   Target,
   Wallet,
 } from 'lucide-react';
@@ -39,6 +41,7 @@ export const navItems: NavItem[] = [
     children: [
       { href: '/dashboard', label: 'Дашборд', icon: LayoutDashboard },
       { href: '/health', label: 'Финансовое здоровье', icon: HeartPulse },
+      { href: '/large-purchases', label: 'Крупные покупки', icon: ShoppingCart },
     ],
   },
   { href: '/transactions', label: 'Транзакции', icon: ReceiptText },
@@ -55,4 +58,5 @@ export const navItems: NavItem[] = [
   { href: '/rules', label: 'Правила', icon: FolderTree },
   { href: '/accounts', label: 'Активы', icon: Wallet },
   { href: '/bank-connections', label: 'Банковские подключения', icon: Landmark },
+  { href: '/settings', label: 'Настройки', icon: Settings },
 ];

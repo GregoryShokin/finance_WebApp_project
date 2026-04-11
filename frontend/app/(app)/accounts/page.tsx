@@ -5,7 +5,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Landmark, Pencil, PlusCircle, Trash2, Wallet, WalletCards } from 'lucide-react';
 import { toast } from 'sonner';
 import { AccountDialog } from '@/components/accounts/account-dialog';
+import { DepositCard } from '@/components/accounts/deposit-card';
 import { AccountsList } from '@/components/accounts/accounts-list';
+import { RepaymentStrategies } from '@/components/accounts/repayment-strategies';
 import { PageShell } from '@/components/layout/page-shell';
 import { MoneyAmount } from '@/components/shared/money-amount';
 import { StatCard } from '@/components/shared/stat-card';
@@ -238,7 +240,7 @@ export default function AccountsPage() {
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [dialogInitialValues, setDialogInitialValues] = useState<Partial<CreateAccountPayload> | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
-  const [activeTab, setActiveTab] = useState<'accounts' | 'credits' | 'property'>('accounts');
+  const [activeTab, setActiveTab] = useState<'accounts' | 'credits' | 'deposits' | 'property'>('accounts');
   const [assetForm, setAssetForm] = useState<{ id?: number; initial: RealAssetPayload } | null>(null);
 
   const accountsQuery = useQuery({
@@ -326,12 +328,16 @@ export default function AccountsPage() {
   const creditAccounts = accounts.filter((account) => account.account_type === 'credit');
 
   const accountItems = useMemo(
-    () => accounts.filter((account) => account.account_type !== 'credit'),
+    () => accounts.filter((account) => account.account_type !== 'credit' && account.account_type !== 'deposit'),
     [accounts],
   );
 
   const creditItems = useMemo(
     () => accounts.filter((account) => account.account_type === 'credit'),
+    [accounts],
+  );
+  const depositItems = useMemo(
+    () => accounts.filter((account) => account.account_type === 'deposit'),
     [accounts],
   );
 
@@ -357,12 +363,47 @@ export default function AccountsPage() {
     };
   }, [creditItems]);
 
+  const totalRepaymentBudget = useMemo(() => {
+    return creditItems
+      .filter((account) => account.is_active && Math.abs(Number(account.balance)) > 0)
+      .reduce((sum, account) => {
+        const txPayments = transactions
+          .filter((tx) => {
+            if (tx.operation_type !== 'credit_payment') return false;
+            const creditId =
+              (tx as Transaction & { credit_account_id?: number }).credit_account_id ??
+              tx.target_account_id;
+            return creditId === account.id;
+          })
+          .sort(
+            (a, b) =>
+              new Date(b.transaction_date).getTime() -
+              new Date(a.transaction_date).getTime(),
+          );
+
+        if (txPayments[0]) return sum + Number(txPayments[0].amount);
+
+        if (Number(account.monthly_payment ?? 0) > 0) {
+          return sum + Number(account.monthly_payment);
+        }
+
+        return sum + Math.max(1000, Math.abs(Number(account.balance)) * 0.02);
+      }, 0);
+  }, [creditItems, transactions]);
+
   const propertyStats = useMemo(
     () => ({
       total: realAssets.length,
       totalValue: realAssets.reduce((sum, asset) => sum + Number(asset.estimated_value), 0),
     }),
     [realAssets],
+  );
+  const depositStats = useMemo(
+    () => ({
+      total: depositItems.length,
+      totalBalance: depositItems.reduce((sum, account) => sum + Math.abs(Number(account.balance)), 0),
+    }),
+    [depositItems],
   );
 
   function openCreateDialog(initialValues: Partial<CreateAccountPayload>) {
@@ -433,6 +474,25 @@ export default function AccountsPage() {
             label="Суммарная стоимость"
             value={<MoneyAmount value={propertyStats.totalValue} className="text-2xl lg:text-3xl" />}
             hint="Оценочная стоимость всех объектов"
+            icon={<Landmark className="size-5" />}
+          />
+        </div>
+      );
+    }
+
+    if (activeTab === 'deposits') {
+      return (
+        <div className="grid gap-4 md:grid-cols-2">
+          <StatCard
+            label="Вкладов"
+            value={depositStats.total}
+            hint="Активные и завершённые депозитные счета"
+            icon={<Wallet className="size-5" />}
+          />
+          <StatCard
+            label="На вкладах"
+            value={<MoneyAmount value={depositStats.totalBalance} tone="income" className="text-2xl lg:text-3xl" />}
+            hint="Суммарный баланс по всем вкладам"
             icon={<Landmark className="size-5" />}
           />
         </div>
@@ -541,6 +601,44 @@ export default function AccountsPage() {
       return <ErrorState title="Не удалось загрузить счета" description="Проверь доступность backend API и повтори попытку." />;
     }
 
+    if (activeTab === 'deposits') {
+      return (
+        <div className="space-y-4">
+          <div className="mb-4 flex justify-end">
+            <Button onClick={() => openCreateDialog({ account_type: 'deposit', is_credit: false })}>
+              <PlusCircle className="size-4" />
+              Добавить вклад
+            </Button>
+          </div>
+
+          {depositItems.length === 0 ? (
+            <EmptyState
+              title="Вкладов пока нет"
+              description="Добавь первый вклад для отслеживания процентного дохода."
+            />
+          ) : (
+            <div className="space-y-4">
+              {depositItems.map((account) => (
+                <DepositCard
+                  key={account.id}
+                  account={account}
+                  onEdit={openEditDialog}
+                  onDelete={handleDelete}
+                />
+              ))}
+
+              <div className="flex items-center justify-between rounded-3xl border border-white/60 bg-white/85 px-5 py-4 shadow-soft">
+                <p className="text-sm font-medium text-slate-500">Итого на вкладах</p>
+                <p className="text-lg font-semibold text-emerald-700 tabular-nums">
+                  {formatMoney(depositStats.totalBalance)}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     if (activeTab === 'credits') {
       return (
         <div className="space-y-4">
@@ -559,15 +657,18 @@ export default function AccountsPage() {
               description="Добавь ипотеку или кредит чтобы отслеживать остаток и график погашения."
             />
           ) : (
-            <AccountsList
-              accounts={creditItems}
-              onEdit={openEditDialog}
-              onDelete={handleDelete}
-              onCancelDelete={delayedDelete.cancelDelete}
-              deletingId={deletingId}
-              pendingDeleteIds={Object.keys(delayedDelete.pendingIds).map(Number)}
-              transactions={transactions}
-            />
+            <div className="space-y-6">
+              <AccountsList
+                accounts={creditItems}
+                onEdit={openEditDialog}
+                onDelete={handleDelete}
+                onCancelDelete={delayedDelete.cancelDelete}
+                deletingId={deletingId}
+                pendingDeleteIds={Object.keys(delayedDelete.pendingIds).map(Number)}
+                transactions={transactions}
+              />
+              <RepaymentStrategies accounts={creditItems} totalBudget={totalRepaymentBudget} />
+            </div>
           )}
         </div>
       );
@@ -613,6 +714,7 @@ export default function AccountsPage() {
         {[
           { key: 'accounts', label: 'Счета и карты' },
           { key: 'credits', label: 'Кредиты' },
+          { key: 'deposits', label: 'Вклады' },
           { key: 'property', label: 'Имущество' },
         ].map((tab) => (
           <button

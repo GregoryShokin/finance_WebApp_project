@@ -51,5 +51,12 @@ class Goal(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
+    # Expense category that contributions to this goal are recorded under in analytics.
+    # Required for purchase goals (user-created); NULL for system goals (safety buffer).
+    category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="SET NULL"), nullable=True
+    )
+
     user = relationship("User")
     transactions = relationship("Transaction", back_populates="goal", foreign_keys="Transaction.goal_id")
+    category = relationship("Category", foreign_keys=[category_id])

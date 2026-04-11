@@ -6,9 +6,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
+import { cn } from '@/lib/utils/cn';
+import { formatMoney } from '@/lib/utils/format';
+import { checkLargePurchase } from '@/lib/api/transactions';
 import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
-import type { CreateTransactionPayload, Transaction, TransactionKind, TransactionOperationType } from '@/types/transaction';
+import type { CreateTransactionPayload, LargePurchaseCheck, Transaction, TransactionKind, TransactionOperationType } from '@/types/transaction';
 import type { Counterparty } from '@/types/counterparty';
 import type { GoalWithProgress } from '@/types/goal';
 import { operationTypeLabels, transactionTypeLabels } from '@/components/transactions/constants';
@@ -68,8 +71,12 @@ function normalize(value: string) {
 }
 
 
+// Настоящий кредит-займ — денег на нём нет, операции проводятся
+// через отдельный блок «Платёж по кредиту»/«Получение кредита».
+// Кредитные карты и карты рассрочки — обычные платёжные инструменты,
+// ими платят за покупки и они должны быть доступны в списке счетов.
 function isLoanAccount(account: Account) {
-  return account.account_type === 'credit' || account.account_type === 'credit_card' || account.is_credit;
+  return account.account_type === 'credit';
 }
 
 function isSelectableTransactionAccount(account: Account) {
@@ -154,6 +161,7 @@ function getFixedTypeByOperation(operationType: TransactionOperationType): Trans
     credit_payment: 'expense',
     credit_early_repayment: 'expense',
     credit_interest: 'expense',
+    credit_principal_attribution: 'expense',
     debt: null,
     refund: 'income',
     adjustment: null,
@@ -384,6 +392,12 @@ export function TransactionForm({
   const selectedGoalId = watch('goal_id');
   const [goalQuery, setGoalQuery] = useState('');
 
+  // Large-purchase check
+  const [largePurchaseCheck, setLargePurchaseCheck] = useState<LargePurchaseCheck | null>(null);
+  type LargePurchaseKind = 'normal' | 'large' | 'deferred';
+  const [largePurchaseKind, setLargePurchaseKind] = useState<LargePurchaseKind>('normal');
+  const amountValue = watch('amount');
+
   const selectedCounterparty = useMemo(
     () => counterparties.find((item) => String(item.id) === selectedCounterpartyId) ?? null,
     [counterparties, selectedCounterpartyId],
@@ -495,6 +509,30 @@ export function TransactionForm({
   useEffect(() => {
     setValue('operation_type', resolvedOperationType, { shouldValidate: true, shouldDirty: true });
   }, [resolvedOperationType, setValue]);
+
+  // Debounced large-purchase check — only for new regular expenses
+  useEffect(() => {
+    if (mainType !== 'regular' || Boolean(initialData)) {
+      setLargePurchaseCheck(null);
+      setLargePurchaseKind('normal');
+      return;
+    }
+    const num = Number(amountValue);
+    if (!num || num <= 0) {
+      setLargePurchaseCheck(null);
+      setLargePurchaseKind('normal');
+      return;
+    }
+    const timer = setTimeout(() => {
+      checkLargePurchase(num)
+        .then((result) => {
+          setLargePurchaseCheck(result);
+          if (!result.is_large) setLargePurchaseKind('normal');
+        })
+        .catch(() => setLargePurchaseCheck(null));
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [amountValue, mainType, initialData]);
 
   useEffect(() => {
     if (exactMatchedAccount) {
@@ -632,6 +670,8 @@ export function TransactionForm({
     setCategoryQuery('');
     setGoalQuery('');
     setReviewQuery('Нет');
+    setLargePurchaseCheck(null);
+    setLargePurchaseKind('normal');
   }, [initialData, reset, accounts, categories, mainTypeItems]);
 
   function handleCreateAccountClick() {
@@ -677,6 +717,10 @@ export function TransactionForm({
           description: values.description.trim() || null,
           transaction_date: toIso(values.transaction_date),
           needs_review: values.needs_review === 'true',
+          is_deferred_purchase:
+            largePurchaseCheck?.is_large && largePurchaseKind === 'deferred' ? true : undefined,
+          is_large_purchase:
+            largePurchaseCheck?.is_large && largePurchaseKind === 'large' ? true : undefined,
         });
       })}
     >
@@ -943,6 +987,69 @@ export function TransactionForm({
           />
           {errors.amount ? <p className="mt-1 text-xs text-danger">{errors.amount.message}</p> : null}
         </div>
+
+        {/* ── Large-purchase banner ─────────────────────────────────────── */}
+        {largePurchaseCheck?.is_large && mainType === 'regular' && !initialData ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+            <p className="text-sm font-semibold text-amber-800">Крупная покупка</p>
+            <p className="mt-0.5 text-xs text-amber-600">
+              Сумма превышает порог {formatMoney(largePurchaseCheck.threshold_amount)} — как учесть?
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setLargePurchaseKind('normal')}
+                className={cn(
+                  'rounded-lg border px-3 py-1.5 text-xs font-medium transition',
+                  largePurchaseKind === 'normal'
+                    ? 'border-amber-500 bg-amber-100 text-amber-800'
+                    : 'border-amber-200 bg-white text-amber-700 hover:bg-amber-50',
+                )}
+              >
+                В расходы обычно
+              </button>
+              <button
+                type="button"
+                onClick={() => setLargePurchaseKind('large')}
+                className={cn(
+                  'rounded-lg border px-3 py-1.5 text-xs font-medium transition',
+                  largePurchaseKind === 'large'
+                    ? 'border-amber-500 bg-amber-100 text-amber-800'
+                    : 'border-amber-200 bg-white text-amber-700 hover:bg-amber-50',
+                )}
+              >
+                Отдельная строка
+              </button>
+              {selectedAccount &&
+              (selectedAccount.account_type === 'credit' ||
+                selectedAccount.account_type === 'installment_card' ||
+                selectedAccount.is_credit) ? (
+                <button
+                  type="button"
+                  onClick={() => setLargePurchaseKind('deferred')}
+                  className={cn(
+                    'rounded-lg border px-3 py-1.5 text-xs font-medium transition',
+                    largePurchaseKind === 'deferred'
+                      ? 'border-blue-500 bg-blue-100 text-blue-800'
+                      : 'border-blue-200 bg-white text-blue-700 hover:bg-blue-50',
+                  )}
+                >
+                  Откладывать на кредит
+                </button>
+              ) : null}
+            </div>
+            {largePurchaseKind === 'large' && (
+              <p className="mt-2 text-xs text-amber-600">
+                Покупка будет видна в разделе «Крупные покупки» и не войдёт в средние расходы.
+              </p>
+            )}
+            {largePurchaseKind === 'deferred' && (
+              <p className="mt-2 text-xs text-blue-600">
+                Покупка будет учтена в расходах постепенно — по мере платежей по кредиту.
+              </p>
+            )}
+          </div>
+        ) : null}
 
         {showCreditRepaymentFields ? (
           <>

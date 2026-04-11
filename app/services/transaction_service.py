@@ -59,6 +59,11 @@ NON_ANALYTICS_OPERATION_TYPES = {
     "debt",
 }
 
+# Account types that support credit_payment and deferred purchase attribution.
+CREDIT_ACCOUNT_TYPES_WITH_DEFERRED = {"credit", "installment_card"}
+# All credit account types (used for credit_payment validation).
+ALL_CREDIT_ACCOUNT_TYPES = {"credit", "credit_card", "installment_card"}
+
 
 class TransactionService:
     def __init__(self, db: Session):
@@ -114,10 +119,66 @@ class TransactionService:
 
         target_account = self._get_target_account_for_create(user_id=user_id, payload=payload, source_account=account)
 
-        payload["affects_analytics"] = self._affects_analytics(payload.get("operation_type"))
+        is_deferred = bool(payload.get("is_deferred_purchase", False))
+        is_large = bool(payload.get("is_large_purchase", False))
+
+        payload["affects_analytics"] = self._affects_analytics(
+            payload.get("operation_type"),
+            is_deferred_purchase=is_deferred,
+            is_large_purchase=is_large,
+        )
+
+        # Initialise deferred_remaining_amount for deferred purchases.
+        if is_deferred:
+            payload["deferred_remaining_amount"] = payload.get("amount")
+
         payload.pop("user_id", None)
         transaction = self.transaction_repo.create(auto_commit=False, user_id=user_id, **payload)
         self._apply_balance_effect_on_create(transaction=transaction, account=account, target_account=target_account)
+
+        # For credit/installment accounts: process attribution on credit_payment,
+        # and handle early repayment attribution if deferred purchases exist.
+        credit_account_id = transaction.credit_account_id or transaction.target_account_id
+        if credit_account_id is not None:
+            credit_account = self.account_repo.get_by_id_and_user_for_update(credit_account_id, user_id)
+            credit_account_type = getattr(credit_account, "account_type", None) if credit_account else None
+
+            if (
+                transaction.operation_type == "credit_payment"
+                and credit_account_type in CREDIT_ACCOUNT_TYPES_WITH_DEFERRED
+            ):
+                # Exclude the raw credit_payment from analytics; impact flows through attribution records.
+                transaction.affects_analytics = False
+                self.db.add(transaction)
+                self.db.flush()  # Ensure transaction.id is set before creating attribution records.
+
+                deferred = self._get_active_deferred_purchases(credit_account_id)
+                principal = transaction.credit_principal_amount or transaction.amount
+                self._create_principal_attributions(
+                    payment=transaction,
+                    deferred_purchases=deferred,
+                    principal_amount=principal,
+                    user_id=user_id,
+                )
+                self._create_interest_expense(payment=transaction, user_id=user_id)
+
+            elif (
+                transaction.operation_type == "credit_early_repayment"
+                and credit_account_type in CREDIT_ACCOUNT_TYPES_WITH_DEFERRED
+            ):
+                # Early repayment: attribute to deferred purchases if any exist.
+                deferred = self._get_active_deferred_purchases(credit_account_id)
+                if deferred:
+                    self.db.flush()  # Ensure transaction.id is available.
+                    self._create_principal_attributions(
+                        payment=transaction,
+                        deferred_purchases=deferred,
+                        principal_amount=transaction.amount,
+                        user_id=user_id,
+                    )
+                    transaction.is_large_purchase = True
+                    self.db.add(transaction)
+                # If no deferred purchases: already excluded by NON_ANALYTICS_OPERATION_TYPES.
 
         # Check goal achievement after linking transaction to goal
         if _GOALS_AVAILABLE and transaction.goal_id is not None:
@@ -155,7 +216,15 @@ class TransactionService:
 
         effective["user_id"] = user_id
         effective = self._prepare_payload(effective)
-        effective["affects_analytics"] = self._affects_analytics(effective["operation_type"])
+
+        # Preserve deferred/large flags — they are not changeable via update.
+        _is_deferred = bool(getattr(transaction, "is_deferred_purchase", False))
+        _is_large = bool(getattr(transaction, "is_large_purchase", False))
+        effective["affects_analytics"] = self._affects_analytics(
+            effective["operation_type"],
+            is_deferred_purchase=_is_deferred,
+            is_large_purchase=_is_large,
+        )
 
         self._validate_payload(user_id=user_id, payload=effective)
 
@@ -165,10 +234,47 @@ class TransactionService:
 
         new_target_account = self._get_target_account_for_create(user_id=user_id, payload=effective, source_account=new_account)
 
+        # Reverse any existing attribution records before modifying the payment.
+        old_op = transaction.operation_type
+        if old_op in {"credit_payment", "credit_early_repayment"}:
+            self._reverse_payment_attributions(payment_id=transaction.id, user_id=user_id)
+
         self._revert_balance_effect(transaction=transaction, account=old_account, target_account=old_target_account)
         effective.pop("user_id", None)
         updated = self.transaction_repo.update(transaction, auto_commit=False, **effective)
         self._apply_balance_effect_on_create(transaction=updated, account=new_account, target_account=new_target_account)
+
+        # Re-create attributions with the updated payment amounts.
+        new_op = updated.operation_type
+        credit_account_id = updated.credit_account_id or updated.target_account_id
+        if new_op in {"credit_payment", "credit_early_repayment"} and credit_account_id is not None:
+            credit_account = self.account_repo.get_by_id_and_user_for_update(credit_account_id, user_id)
+            credit_account_type = getattr(credit_account, "account_type", None) if credit_account else None
+            if (
+                new_op == "credit_payment"
+                and credit_account_type in CREDIT_ACCOUNT_TYPES_WITH_DEFERRED
+            ):
+                updated.affects_analytics = False
+                self.db.add(updated)
+                self.db.flush()
+                deferred = self._get_active_deferred_purchases(credit_account_id)
+                principal = updated.credit_principal_amount or updated.amount
+                self._create_principal_attributions(
+                    payment=updated, deferred_purchases=deferred,
+                    principal_amount=principal, user_id=user_id,
+                )
+                self._create_interest_expense(payment=updated, user_id=user_id)
+            elif (
+                new_op == "credit_early_repayment"
+                and credit_account_type in CREDIT_ACCOUNT_TYPES_WITH_DEFERRED
+            ):
+                deferred = self._get_active_deferred_purchases(credit_account_id)
+                if deferred:
+                    self.db.flush()
+                    self._create_principal_attributions(
+                        payment=updated, deferred_purchases=deferred,
+                        principal_amount=updated.amount, user_id=user_id,
+                    )
 
         # Check goal achievement after update
         if _GOALS_AVAILABLE and updated.goal_id is not None:
@@ -262,6 +368,10 @@ class TransactionService:
         account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
         if not account:
             raise TransactionValidationError("РЎС‡РµС‚ РЅРµ РЅР°Р№РґРµРЅ")
+
+        # Reverse any attribution/interest records linked to this payment before deleting it.
+        if transaction.operation_type in {"credit_payment", "credit_early_repayment"}:
+            self._reverse_payment_attributions(payment_id=transaction.id, user_id=user_id)
 
         pair_id = getattr(transaction, "transfer_pair_id", None)
         if pair_id is not None:
@@ -505,11 +615,10 @@ class TransactionService:
         target_account = self.account_repo.get_by_id_and_user_for_update(target_account_id, user_id)
         if not target_account:
             raise TransactionValidationError("РЎС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РЅРµ РЅР°Р№РґРµРЅ.")
-        ALLOWED_CREDIT_TYPES = {"credit", "credit_card"}
         if operation_type in {"credit_payment", "credit_early_repayment"}:
             acct_type = getattr(target_account, "account_type", None)
             is_credit = bool(getattr(target_account, "is_credit", False))
-            if acct_type not in ALLOWED_CREDIT_TYPES and not is_credit:
+            if acct_type not in ALL_CREDIT_ACCOUNT_TYPES and not is_credit:
                 raise TransactionValidationError(
                     "Для платежа по кредиту нужно выбрать кредитный счёт или кредитную карту."
                 )
@@ -517,8 +626,190 @@ class TransactionService:
         return target_account
 
     @staticmethod
-    def _affects_analytics(operation_type: str | None) -> bool:
+    def _affects_analytics(
+        operation_type: str | None,
+        *,
+        is_deferred_purchase: bool = False,
+        is_large_purchase: bool = False,
+    ) -> bool:
+        # Deferred and large-purchase transactions are excluded from the normal
+        # expense analytics; their impact is recognized through attribution records
+        # (deferred) or shown only in the Large Purchases section (large).
+        if is_deferred_purchase or is_large_purchase:
+            return False
+        # Attribution expense records are always in analytics (affects_analytics
+        # is set explicitly to True when they are created, not via this method).
         return operation_type not in NON_ANALYTICS_OPERATION_TYPES
+
+    # ------------------------------------------------------------------
+    # Deferred purchase attribution helpers
+    # ------------------------------------------------------------------
+
+    def _get_active_deferred_purchases(self, credit_account_id: int) -> list[Transaction]:
+        """Return deferred purchases with remaining principal > 0 for the account."""
+        from decimal import Decimal as _D
+        return (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.account_id == credit_account_id,
+                Transaction.is_deferred_purchase.is_(True),
+                Transaction.deferred_remaining_amount > _D("0"),
+            )
+            .order_by(Transaction.transaction_date.asc(), Transaction.id.asc())
+            .all()
+        )
+
+    def _create_principal_attributions(
+        self,
+        *,
+        payment: Transaction,
+        deferred_purchases: list[Transaction],
+        principal_amount: Decimal,
+        user_id: int,
+    ) -> None:
+        """Distribute principal proportionally across active deferred purchases.
+
+        For each purchase, creates a credit_principal_attribution expense
+        transaction (affects_analytics=True) and decrements
+        deferred_remaining_amount accordingly.
+        """
+        if not deferred_purchases or principal_amount <= Decimal("0"):
+            return
+
+        total_remaining = sum(
+            (p.deferred_remaining_amount or Decimal("0")) for p in deferred_purchases
+        )
+        if total_remaining <= Decimal("0"):
+            return
+
+        allocated: list[tuple[Transaction, Decimal]] = []
+        running_total = Decimal("0")
+
+        for purchase in deferred_purchases:
+            remaining = purchase.deferred_remaining_amount or Decimal("0")
+            ratio = remaining / total_remaining
+            # Floor to whole rubles
+            share = (principal_amount * ratio).to_integral_value(rounding="ROUND_FLOOR")
+            allocated.append((purchase, share))
+            running_total += share
+
+        # Add rounding remainder to the largest share
+        rounding_diff = principal_amount - running_total
+        if rounding_diff > Decimal("0") and allocated:
+            largest_idx = max(
+                range(len(allocated)), key=lambda i: allocated[i][0].deferred_remaining_amount or Decimal("0")
+            )
+            purchase, share = allocated[largest_idx]
+            allocated[largest_idx] = (purchase, share + rounding_diff)
+
+        for purchase, share in allocated:
+            if share <= Decimal("0"):
+                continue
+            attribution = Transaction(
+                user_id=user_id,
+                account_id=payment.account_id,
+                category_id=purchase.category_id,
+                amount=share,
+                currency=payment.currency,
+                type="expense",
+                operation_type="credit_principal_attribution",
+                affects_analytics=True,
+                transaction_date=payment.transaction_date,
+                source_payment_id=payment.id,
+                description=f"Платёж по кредиту: {purchase.description or 'без описания'}",
+            )
+            self.db.add(attribution)
+            # Decrement remaining amount on the deferred purchase
+            current_remaining = purchase.deferred_remaining_amount or Decimal("0")
+            purchase.deferred_remaining_amount = max(Decimal("0"), current_remaining - share)
+            self.db.add(purchase)
+
+    def _create_interest_expense(
+        self,
+        *,
+        payment: Transaction,
+        user_id: int,
+    ) -> None:
+        """Create an expense record for the interest portion of a credit payment."""
+        interest = payment.credit_interest_amount
+        if not interest or interest <= Decimal("0"):
+            return
+
+        from app.services.category_service import CategoryService
+        interest_category = CategoryService(self.db).get_or_create_interest_category(user_id=user_id)
+
+        interest_tx = Transaction(
+            user_id=user_id,
+            account_id=payment.account_id,
+            category_id=interest_category.id,
+            amount=interest,
+            currency=payment.currency,
+            type="expense",
+            operation_type="credit_interest",
+            affects_analytics=True,
+            transaction_date=payment.transaction_date,
+            source_payment_id=payment.id,
+            description="Проценты по кредиту",
+        )
+        self.db.add(interest_tx)
+
+    def _reverse_payment_attributions(
+        self,
+        *,
+        payment_id: int,
+        user_id: int,
+    ) -> None:
+        """Delete attribution/interest records for a payment and restore remaining amounts."""
+        attributions = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.source_payment_id == payment_id,
+                Transaction.user_id == user_id,
+            )
+            .all()
+        )
+        for attr in attributions:
+            if attr.operation_type == "credit_principal_attribution":
+                # Restore the deferred_remaining_amount on the linked deferred purchase.
+                # The link is via category_id and timing — approximate restoration.
+                # Full integrity: find the deferred purchase by matching account + category
+                # that still has a balance and is within a sensible date range.
+                # Simple approach: add the amount back to any open deferred purchase
+                # with the same category on the same credit account.
+                deferred = (
+                    self.db.query(Transaction)
+                    .filter(
+                        Transaction.account_id == attr.account_id,
+                        Transaction.is_deferred_purchase.is_(True),
+                        Transaction.category_id == attr.category_id,
+                        Transaction.user_id == user_id,
+                    )
+                    .order_by(Transaction.transaction_date.asc())
+                    .first()
+                )
+                if deferred is not None:
+                    current = deferred.deferred_remaining_amount or Decimal("0")
+                    cap = deferred.amount  # cannot exceed original amount
+                    deferred.deferred_remaining_amount = min(current + attr.amount, cap)
+                    self.db.add(deferred)
+            self.db.delete(attr)
+
+    def check_large_purchase(self, *, user_id: int, amount: Decimal) -> dict:
+        """Return whether `amount` exceeds the user's large-purchase threshold."""
+        from app.services.user_settings_service import UserSettingsService
+        from app.services.metrics_service import MetricsService
+
+        settings = UserSettingsService(self.db).get_or_default(user_id)
+        metrics = MetricsService(self.db)
+        avg_expenses = metrics.get_avg_monthly_expenses(user_id=user_id)
+        threshold = (avg_expenses * settings.large_purchase_threshold_pct).quantize(
+            Decimal("0.01")
+        )
+        return {
+            "is_large": amount >= threshold,
+            "threshold_amount": float(threshold),
+            "avg_monthly_expenses": float(avg_expenses),
+        }
 
     def _apply_balance_effect_on_create(
         self,

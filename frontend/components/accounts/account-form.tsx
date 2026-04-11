@@ -7,6 +7,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
+import { Select } from '@/components/ui/select';
 import type { Account, AccountType, CreateAccountPayload } from '@/types/account';
 
 type AccountFormValues = CreateAccountPayload;
@@ -24,6 +25,10 @@ const defaultValues: AccountFormValues = {
   credit_interest_rate: null,
   credit_term_remaining: null,
   monthly_payment: null,
+  deposit_interest_rate: null,
+  deposit_open_date: null,
+  deposit_close_date: null,
+  deposit_capitalization_period: null,
 };
 
 export function AccountForm({
@@ -55,14 +60,20 @@ export function AccountForm({
       { value: 'regular', label: 'Обычный счёт', searchText: 'обычный счет карта наличные regular' },
       { value: 'credit_card', label: 'Кредитная карта', searchText: 'кредитная карта credit card лимит' },
       { value: 'credit', label: 'Кредит', searchText: 'кредит кредитный счет loan credit' },
+      { value: 'deposit', label: 'Вклад', searchText: 'вклад депозит deposit проценты' },
     ],
     [],
   );
 
   useEffect(() => {
-    const resolvedAccountType = initialData?.account_type ?? initialValues?.account_type ?? (initialData?.is_credit ?? initialValues?.is_credit ? 'credit' : 'regular');
+    const resolvedAccountType =
+      initialData?.account_type ??
+      initialValues?.account_type ??
+      (initialData?.is_credit ?? initialValues?.is_credit ? 'credit' : 'regular');
     setAccountType(resolvedAccountType);
-    setAccountTypeQuery(accountTypeItems.find((item) => item.value === resolvedAccountType)?.label ?? 'Обычный счёт');
+    setAccountTypeQuery(
+      accountTypeItems.find((item) => item.value === resolvedAccountType)?.label ?? 'Обычный счёт',
+    );
 
     if (initialData) {
       reset({
@@ -72,11 +83,20 @@ export function AccountForm({
         is_active: initialData.is_active,
         account_type: initialData.account_type ?? (initialData.is_credit ? 'credit' : 'regular'),
         is_credit: initialData.is_credit,
-        credit_limit_original: initialData.credit_limit_original != null ? Number(initialData.credit_limit_original) : null,
-        credit_current_amount: initialData.credit_current_amount != null ? Number(initialData.credit_current_amount) : null,
-        credit_interest_rate: initialData.credit_interest_rate != null ? Number(initialData.credit_interest_rate) : null,
+        credit_limit_original:
+          initialData.credit_limit_original != null ? Number(initialData.credit_limit_original) : null,
+        credit_current_amount:
+          initialData.credit_current_amount != null ? Number(initialData.credit_current_amount) : null,
+        credit_interest_rate:
+          initialData.credit_interest_rate != null ? Number(initialData.credit_interest_rate) : null,
         credit_term_remaining: initialData.credit_term_remaining ?? null,
-        monthly_payment: initialData.monthly_payment != null ? Number(initialData.monthly_payment) : null,
+        monthly_payment:
+          initialData.monthly_payment != null ? Number(initialData.monthly_payment) : null,
+        deposit_interest_rate:
+          initialData.deposit_interest_rate != null ? Number(initialData.deposit_interest_rate) : null,
+        deposit_open_date: initialData.deposit_open_date ?? null,
+        deposit_close_date: initialData.deposit_close_date ?? null,
+        deposit_capitalization_period: initialData.deposit_capitalization_period ?? null,
       });
       return;
     }
@@ -94,11 +114,16 @@ export function AccountForm({
       credit_interest_rate: initialValues?.credit_interest_rate ?? null,
       credit_term_remaining: initialValues?.credit_term_remaining ?? null,
       monthly_payment: initialValues?.monthly_payment ?? null,
+      deposit_interest_rate: initialValues?.deposit_interest_rate ?? null,
+      deposit_open_date: initialValues?.deposit_open_date ?? null,
+      deposit_close_date: initialValues?.deposit_close_date ?? null,
+      deposit_capitalization_period: initialValues?.deposit_capitalization_period ?? null,
     });
   }, [accountTypeItems, initialData, initialValues, reset]);
 
   const isCredit = accountType === 'credit';
   const isCreditCard = accountType === 'credit_card';
+  const isDeposit = accountType === 'deposit';
 
   return (
     <form
@@ -109,11 +134,15 @@ export function AccountForm({
           account_type: accountType,
           is_credit: isCredit,
           balance: isCredit ? 0 : Number(values.balance),
-          credit_limit_original: (isCredit || isCreditCard) ? Number(values.credit_limit_original) : null,
+          credit_limit_original: isCredit || isCreditCard ? Number(values.credit_limit_original) : null,
           credit_current_amount: isCredit ? Number(values.credit_current_amount) : null,
           credit_interest_rate: isCredit ? Number(values.credit_interest_rate) : null,
           credit_term_remaining: isCredit ? Number(values.credit_term_remaining) : null,
           monthly_payment: isCredit || isCreditCard ? (values.monthly_payment || null) : null,
+          deposit_interest_rate: isDeposit ? (values.deposit_interest_rate || null) : null,
+          deposit_open_date: isDeposit ? (values.deposit_open_date || null) : null,
+          deposit_close_date: isDeposit ? (values.deposit_close_date || null) : null,
+          deposit_capitalization_period: isDeposit ? (values.deposit_capitalization_period || null) : null,
         };
         onSubmit(payload);
       })}
@@ -225,6 +254,37 @@ export function AccountForm({
             <Label htmlFor="credit-card-balance">Текущий баланс</Label>
             <Input id="credit-card-balance" type="number" step="0.01" placeholder="0" {...register('balance', { required: 'Укажи текущий баланс', valueAsNumber: true, validate: (value) => Number.isFinite(value) || 'Введите корректное число' })} />
             {errors.balance ? <p className="mt-1 text-sm text-danger">{errors.balance.message}</p> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {isDeposit ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <Label htmlFor="deposit-interest-rate">Процентная ставка, % годовых</Label>
+            <Input id="deposit-interest-rate" type="number" step="0.01" placeholder="0" {...register('deposit_interest_rate', { valueAsNumber: true })} />
+          </div>
+          <div>
+            <Label htmlFor="deposit-open-date">Дата открытия</Label>
+            <Input id="deposit-open-date" type="date" {...register('deposit_open_date')} />
+          </div>
+          <div>
+            <Label htmlFor="deposit-close-date">Дата закрытия</Label>
+            <Input id="deposit-close-date" type="date" {...register('deposit_close_date')} />
+          </div>
+          <div className="sm:col-span-2">
+            <Label htmlFor="deposit-capitalization-period">Капитализация процентов</Label>
+            <Select
+              id="deposit-capitalization-period"
+              defaultValue=""
+              {...register('deposit_capitalization_period')}
+            >
+              <option value="">Нет (проценты выплачиваются отдельно)</option>
+              <option value="daily">Ежедневная</option>
+              <option value="monthly">Ежемесячная</option>
+              <option value="quarterly">Ежеквартальная</option>
+              <option value="yearly">Ежегодная</option>
+            </Select>
           </div>
         </div>
       ) : null}

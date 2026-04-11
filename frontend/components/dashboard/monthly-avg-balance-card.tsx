@@ -1,17 +1,16 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Info } from 'lucide-react';
+import { useMemo } from 'react';
 
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
+import { useExpandableCard } from '@/hooks/use-expandable-card';
 import type { Category } from '@/types/category';
 import type { FinancialHealth } from '@/types/financial-health';
 import type { GoalWithProgress } from '@/types/goal';
 import type { Transaction } from '@/types/transaction';
 
-const SCALE = 1.8;
 const MAX_MONTHS = 6;
 
 type Props = {
@@ -19,8 +18,6 @@ type Props = {
   transactions: Transaction[];
   categories: Category[];
   goals: GoalWithProgress[];
-  isExpanded: boolean;
-  onToggle: () => void;
 };
 
 type ScenarioKey = 'deficit' | 'dti' | 'buffer' | 'investments';
@@ -285,33 +282,19 @@ function buildMetrics(health: FinancialHealth, transactions: Transaction[], cate
   };
 }
 
-export function MonthlyAvgBalanceCard({ health, transactions, categories, goals, isExpanded, onToggle }: Props) {
-  const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
-
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
+export function MonthlyAvgBalanceCard({ health, transactions, categories, goals }: Props) {
+  const {
+    wrapperRef,
+    cardRef,
+    isExpanded,
+    wrapperStyle,
+    cardStyle,
+    backdrop,
+    toggleButton,
+  } = useExpandableCard({ id: 'monthly-avg-balance-card', expandHeight: 520 });
 
   const metrics = useMemo(() => buildMetrics(health, transactions, categories, goals), [health, transactions, categories, goals]);
   const scenario = useMemo(() => getScenario(health, metrics.safetyBufferMonths), [health, metrics.safetyBufferMonths]);
-
-  useEffect(() => {
-    if (cardRef.current && !isExpanded) {
-      setCollapsedHeight(cardRef.current.offsetHeight);
-    }
-  }, [isExpanded, metrics, scenario]);
-
-  useEffect(() => {
-    if (!isExpanded) return;
-
-    function handleClick(event: MouseEvent) {
-      if (!wrapperRef.current?.contains(event.target as Node)) {
-        onToggle();
-      }
-    }
-
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isExpanded, onToggle]);
 
   const dtiFreed = Math.max(0, health.dti_total_payments - health.dti_income * 0.4);
   const bufferProgress = health.avg_monthly_expenses && health.avg_monthly_expenses > 0 ? (metrics.safetyBufferMonths / 3) * 100 : 0;
@@ -524,46 +507,13 @@ export function MonthlyAvgBalanceCard({ health, transactions, categories, goals,
     <div
       ref={wrapperRef}
       className="relative h-full overflow-visible"
-      style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
+      style={wrapperStyle}
     >
-      {isExpanded ? (
-        <button
-          type="button"
-          aria-label="Закрыть"
-          onClick={onToggle}
-          className="fixed inset-0 z-40 bg-black/10"
-        />
-      ) : null}
-
+      {backdrop}
       <div ref={cardRef}>
-        <Card
-          className="relative overflow-visible p-5"
-          style={{
-            position: isExpanded ? 'absolute' : 'relative',
-            top: 0,
-            left: 0,
-            right: 0,
-            transform: isExpanded ? `scale(${SCALE})` : 'scale(1)',
-            transformOrigin: 'center center',
-            transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1)',
-            zIndex: isExpanded ? 50 : 1,
-            overflow: 'visible',
-          }}
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div className="pr-4">
-              <p className="text-sm font-medium text-slate-500">Среднемесячный остаток</p>
-            </div>
-            <button
-              type="button"
-              onClick={onToggle}
-              className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-              aria-label="Подробнее"
-              aria-expanded={isExpanded}
-            >
-              <Info className="size-3.5" />
-            </button>
-          </div>
+        <Card className="relative overflow-visible p-5" style={cardStyle}>
+          <p className="text-sm font-medium text-slate-500">Среднемесячный остаток</p>
+          {toggleButton}
 
           <div className="mt-4">
             <p className={cn('text-2xl font-semibold lg:text-3xl', health.monthly_avg_balance >= 0 ? 'text-slate-950' : 'text-rose-600')}>

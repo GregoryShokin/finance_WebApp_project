@@ -21,6 +21,7 @@ class TransactionOperationType(str, Enum):
     credit_payment = "credit_payment"
     credit_early_repayment = "credit_early_repayment"
     credit_interest = "credit_interest"
+    credit_principal_attribution = "credit_principal_attribution"
     debt = "debt"
     refund = "refund"
     adjustment = "adjustment"
@@ -43,6 +44,9 @@ class TransactionCreateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     transaction_date: datetime
     needs_review: bool = False
+    # Deferred/large purchase flags — set by the client after large-purchase-check
+    is_deferred_purchase: bool = False
+    is_large_purchase: bool = False
 
     @model_validator(mode="after")
     def validate_credit_payment(self):
@@ -106,6 +110,18 @@ class TransactionDeletePeriodResponse(BaseModel):
     deleted_count: int
 
 
+class LargePurchaseCheckResponse(BaseModel):
+    is_large: bool
+    threshold_amount: float
+    avg_monthly_expenses: float
+
+
+class LargePurchasesListResponse(BaseModel):
+    transactions: list["TransactionResponse"]
+    total_amount: Decimal
+    months: int
+
+
 class TransactionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -132,5 +148,10 @@ class TransactionResponse(BaseModel):
     transaction_date: datetime
     needs_review: bool
     affects_analytics: bool
+    # Deferred/large purchase fields
+    is_deferred_purchase: bool = False
+    is_large_purchase: bool = False
+    deferred_remaining_amount: Decimal | None = None
+    source_payment_id: int | None = None
     created_at: datetime
     updated_at: datetime

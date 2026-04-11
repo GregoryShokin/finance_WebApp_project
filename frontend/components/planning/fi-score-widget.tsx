@@ -1,8 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { ShoppingCart } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
+import { formatMoney } from '@/lib/utils/format';
 import { resolveExpandUp } from '@/lib/utils/widget-expand';
 import type { FIScoreComponents, FinancialHealth } from '@/types/financial-health';
 
@@ -12,6 +14,7 @@ export const FI_SCORE_WIDGET_EVENT = 'financeapp:fi-score-widget-toggle';
 type Props = {
   data: FinancialHealth | null | undefined;
   isLoading?: boolean;
+  largePurchasesTotal?: number;
 };
 
 type ScoreComponentRow = {
@@ -42,7 +45,7 @@ function buildComponents(components: FIScoreComponents): ScoreComponentRow[] {
   ];
 }
 
-export function FiScoreWidget({ data, isLoading = false }: Props) {
+export function FiScoreWidget({ data, isLoading = false, largePurchasesTotal = 0 }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
   const [expandUp, setExpandUp] = useState(false);
@@ -206,9 +209,23 @@ export function FiScoreWidget({ data, isLoading = false }: Props) {
 
             {history ? (
               <div className="mt-2.5 grid gap-2 text-xs text-slate-500 sm:grid-cols-3">
-                <div className="rounded-lg bg-slate-50 px-3 py-2">Р‘Р°Р·Р°: <span className="font-semibold text-slate-900">{history.baseline.toFixed(1)}</span></div>
+                <div className="rounded-lg bg-slate-50 px-3 py-2">Р’Р°Р·Р°: <span className="font-semibold text-slate-900">{history.baseline.toFixed(1)}</span></div>
                 <div className="rounded-lg bg-slate-50 px-3 py-2">РџСЂРѕС€Р»С‹Р№: <span className="font-semibold text-slate-900">{history.previous.toFixed(1)}</span></div>
                 <div className="rounded-lg bg-slate-50 px-3 py-2">РЎРµР№С‡Р°СЃ: <span className="font-semibold text-slate-900">{history.current.toFixed(1)}</span></div>
+              </div>
+            ) : null}
+
+            {largePurchasesTotal > 0 ? (
+              <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+                <ShoppingCart className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
+                <p className="text-xs text-amber-700">
+                  Показатели рассчитаны без крупных покупок на{' '}
+                  <span className="font-medium">{formatMoney(largePurchasesTotal)}</span> за 6 месяцев.{' '}
+                  <a href="/large-purchases" className="underline underline-offset-2 hover:text-amber-900">
+                    Подробнее
+                  </a>
+                  .
+                </p>
               </div>
             ) : null}
           </>

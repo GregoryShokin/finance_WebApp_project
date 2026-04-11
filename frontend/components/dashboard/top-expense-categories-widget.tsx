@@ -1,14 +1,13 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { TooltipProps } from 'recharts';
 
-import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
-import { resolveExpandDirection, resolveExpandUp } from '@/lib/utils/widget-expand';
+import { useExpandableCard } from '@/hooks/use-expandable-card';
 import type { Category, CategoryPriority } from '@/types/category';
 import type { Transaction } from '@/types/transaction';
 
@@ -112,7 +111,6 @@ function detectCategoryStatus(
   currentMonthAmount: number,
   transactions: Transaction[],
   referenceMonthKey: string,
-  today: Date,
 ): { status: CategoryStatus; avgAmount: number; monthsGrowing: number } {
   const refDate = new Date(`${referenceMonthKey}-01`);
   const historicalAmounts: number[] = [];
@@ -203,47 +201,19 @@ function renderTooltip({ active, payload }: TooltipProps<number, string>) {
 }
 
 export function TopExpenseCategoriesWidget({ transactions, categories, isLoading = false }: Props) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
   const [categoryType, setCategoryType] = useState<CategoryType>('essential');
   const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
   const [selectedMonthKey, setSelectedMonthKey] = useState<string>('');
-  const [expandDirection, setExpandDirection] = useState<'left' | 'right'>('right');
-  const [expandUp, setExpandUp] = useState(false);
 
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (cardRef.current && !isExpanded) {
-      setCollapsedHeight(cardRef.current.offsetHeight);
-    }
-  }, [isExpanded, isLoading, transactions, categories]);
-
-  useEffect(() => {
-    if (!isExpanded) return;
-
-    function handleClick(event: MouseEvent) {
-      if (!wrapperRef.current?.contains(event.target as Node)) {
-        setIsExpanded(false);
-      }
-    }
-
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isExpanded]);
-
-  useEffect(() => {
-    function handleExternalToggle(event: Event) {
-      const customEvent = event as CustomEvent<{ source?: string; open?: boolean }>;
-      if (customEvent.detail?.source !== 'top-expense-categories-widget' && customEvent.detail?.open) {
-        setIsExpanded(false);
-      }
-    }
-
-    document.addEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
-    return () => document.removeEventListener(FI_SCORE_WIDGET_EVENT, handleExternalToggle as EventListener);
-  }, []);
+  const {
+    wrapperRef,
+    cardRef,
+    isExpanded,
+    wrapperStyle,
+    cardStyle,
+    backdrop,
+    toggleButton,
+  } = useExpandableCard({ id: 'top-expense-categories-widget', expandHeight: 600 });
 
   const metrics = useMemo<Metrics | null>(() => {
     const analyticsExpenses = transactions.filter(
@@ -295,7 +265,6 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
           item.amount,
           analyticsExpenses,
           currentMonthReferenceKey,
-          today,
         );
 
         return {
@@ -322,7 +291,6 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
         item.amount,
         analyticsExpenses,
         selectedMonthKey,
-        today,
       );
 
       return {
@@ -370,27 +338,10 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
 
   const monthsForSelectedYear = (metrics?.monthOptions ?? []).filter((option) => option.year === selectedYear);
 
-  function handleToggle() {
-    if (!isExpanded && cardRef.current) {
-      setExpandDirection(resolveExpandDirection(cardRef.current, 860));
-      setExpandUp(resolveExpandUp(cardRef.current, 600));
-    }
-
-    setIsExpanded((current) => {
-      const next = !current;
-      document.dispatchEvent(
-        new CustomEvent(FI_SCORE_WIDGET_EVENT, {
-          detail: { source: 'top-expense-categories-widget', open: next },
-        }),
-      );
-      return next;
-    });
-  }
-
   function renderCollapsedList() {
     if (!metrics || metrics.topFiveCurrentMonth.length === 0) {
       return (
-        <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
+        <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
           В этом месяце пока нет аналитических расходов по категориям.
         </div>
       );
@@ -418,7 +369,7 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
 
   function renderExpandedControls() {
     return (
-      <div className="mt-5 space-y-3">
+      <div className="mt-4 space-y-3">
         <div className="inline-flex rounded-full bg-slate-100 p-1 text-xs text-slate-500">
           {CATEGORY_TYPE_OPTIONS.map((option) => (
             <button
@@ -440,26 +391,26 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
             <select
               value={String(selectedYear)}
               onChange={(event) => setSelectedYear(Number(event.target.value))}
-              className="h-10 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-4 pr-9 text-sm text-slate-700 outline-none transition focus:border-slate-400"
+              className="h-9 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-3 pr-8 text-xs text-slate-700 outline-none transition focus:border-slate-400"
             >
               {metrics?.availableYears.map((year) => (
                 <option key={year} value={year}>{year}</option>
               ))}
             </select>
-            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">▼</span>
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-400">▼</span>
           </label>
 
           <label className="relative block">
             <select
               value={selectedMonthKey}
               onChange={(event) => setSelectedMonthKey(event.target.value)}
-              className="h-10 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-4 pr-9 text-sm text-slate-700 outline-none transition focus:border-slate-400"
+              className="h-9 w-full appearance-none rounded-2xl border border-slate-200 bg-slate-50 px-3 pr-8 text-xs text-slate-700 outline-none transition focus:border-slate-400"
             >
               {monthsForSelectedYear.map((option) => (
                 <option key={option.key} value={option.key}>{MONTH_OPTIONS[option.monthIndex]}</option>
               ))}
             </select>
-            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">▼</span>
+            <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-400">▼</span>
           </label>
         </div>
       </div>
@@ -469,14 +420,14 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
   function renderExpandedChart() {
     if (!metrics || metrics.selectedPeriodItems.length === 0) {
       return (
-        <div className="mt-5 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
+        <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-3 text-xs text-slate-500">
           Для выбранного периода и типа категорий данных пока нет.
         </div>
       );
     }
 
     return (
-      <div className="mt-5 h-[320px] rounded-[28px] bg-slate-50/70 px-3 py-4 sm:px-4">
+      <div className="mt-4 h-[220px] rounded-[20px] bg-slate-50/70 px-2 py-3">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={metrics.selectedPeriodItems} barCategoryGap="18%">
             <CartesianGrid vertical={false} stroke="#E2E8F0" strokeDasharray="3 3" />
@@ -484,21 +435,21 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
               dataKey="name"
               tickLine={false}
               axisLine={false}
-              tick={{ fill: '#64748B', fontSize: 12 }}
+              tick={{ fill: '#64748B', fontSize: 9 }}
               interval={0}
               angle={-20}
               textAnchor="end"
-              height={64}
+              height={48}
             />
             <YAxis
               tickLine={false}
               axisLine={false}
-              tick={{ fill: '#94A3B8', fontSize: 12 }}
+              tick={{ fill: '#94A3B8', fontSize: 9 }}
               tickFormatter={formatYAxisValue}
-              width={56}
+              width={36}
             />
             <Tooltip content={renderTooltip} cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }} />
-            <Bar dataKey="amount" radius={[6, 6, 0, 0]} maxBarSize={48}>
+            <Bar dataKey="amount" radius={[6, 6, 0, 0]} maxBarSize={32}>
               {metrics.selectedPeriodItems.map((item, index) => (
                 <Cell key={`cell-${index}`} fill={BAR_COLORS[item.status]} />
               ))}
@@ -518,9 +469,9 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
                     <g>
                       <text
                         x={cx}
-                        y={Number(y) - (icon ? 18 : 6)}
+                        y={Number(y) - (icon ? 14 : 4)}
                         textAnchor="middle"
-                        fontSize={11}
+                        fontSize={8}
                         fill="#64748B"
                       >
                         {formatMoney(Number(value))}
@@ -528,9 +479,9 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
                       {icon ? (
                         <text
                           x={cx}
-                          y={Number(y) - 6}
+                          y={Number(y) - 4}
                           textAnchor="middle"
-                          fontSize={12}
+                          fontSize={9}
                           fontWeight="600"
                           fill={iconColor}
                         >
@@ -548,32 +499,7 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
     );
   }
 
-  function renderHeader() {
-    return (
-      <div className="flex items-start justify-between gap-4">
-        <div className="pr-4">
-          <h4 className="text-base font-semibold text-slate-900">
-            {isExpanded ? 'Категории расходов' : 'Топ 5 категорий расходов'}
-          </h4>
-          <p className="mt-1 text-sm text-slate-500">
-            {isExpanded ? 'Анализ расходов по категориям' : 'за текущий месяц'}
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={handleToggle}
-          className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
-          aria-label="Подробнее"
-          aria-expanded={isExpanded}
-        >
-          i
-        </button>
-      </div>
-    );
-  }
-
-  function renderBaseContent() {
+  function renderContent() {
     if (isLoading) {
       return (
         <>
@@ -591,10 +517,8 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
     if (!metrics) {
       return (
         <>
-          <div className="pr-10">
-            <p className="text-sm font-semibold text-slate-900">Топ 5 категорий расходов</p>
-            <p className="mt-1 text-sm text-slate-500">за текущий месяц</p>
-          </div>
+          <p className="text-sm font-semibold text-slate-900">Топ 5 категорий расходов</p>
+          <p className="mt-1 text-sm text-slate-500">за текущий месяц</p>
           <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/80 p-4 text-sm text-slate-500">
             Недостаточно данных по расходам для построения аналитики.
           </div>
@@ -604,8 +528,22 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
 
     return (
       <>
-        {renderHeader()}
-        {renderCollapsedList()}
+        <p className="text-sm font-semibold text-slate-900">
+          {isExpanded ? 'Категории расходов' : 'Топ 5 категорий расходов'}
+        </p>
+        <p className="mt-1 text-sm text-slate-500">
+          {isExpanded ? 'Анализ расходов по категориям' : 'за текущий месяц'}
+        </p>
+        {toggleButton}
+
+        {isExpanded ? (
+          <>
+            {renderExpandedControls()}
+            {renderExpandedChart()}
+          </>
+        ) : (
+          renderCollapsedList()
+        )}
       </>
     );
   }
@@ -613,53 +551,15 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
   return (
     <div
       ref={wrapperRef}
-      className="relative self-start overflow-visible"
-      style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
+      className="relative h-full overflow-visible"
+      style={wrapperStyle}
     >
-      {isExpanded ? (
-        <button
-          type="button"
-          aria-label="Закрыть"
-          onClick={handleToggle}
-          className="fixed inset-0 z-40 bg-black/10"
-        />
-      ) : null}
-
+      {backdrop}
       <div ref={cardRef}>
-        <Card className="relative overflow-visible p-4 lg:p-5">
-          {renderBaseContent()}
+        <Card className="relative overflow-visible p-5" style={cardStyle}>
+          {renderContent()}
         </Card>
       </div>
-
-      <Card
-        className="absolute overflow-visible p-4 lg:p-5"
-        style={{
-          position: isExpanded ? 'absolute' : 'relative',
-          top: isExpanded && !expandUp ? 0 : 'auto',
-          bottom: isExpanded && expandUp ? 0 : 'auto',
-          left: isExpanded && expandDirection === 'right' ? 0 : 'auto',
-          right: isExpanded && expandDirection === 'left' ? 0 : 'auto',
-          transform: isExpanded ? 'scale(1)' : 'scale(0.6)',
-          width: isExpanded ? 'min(860px, calc(100vw - 2rem))' : '100%',
-          transformOrigin: expandUp
-            ? (expandDirection === 'right' ? 'bottom left' : 'bottom right')
-            : (expandDirection === 'right' ? 'top left' : 'top right'),
-          transition: 'transform 400ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 300ms ease',
-          opacity: isExpanded ? 1 : 0,
-          zIndex: isExpanded ? 50 : 1,
-          overflow: 'visible',
-          boxShadow: isExpanded ? '0 8px 40px rgba(0,0,0,0.12)' : 'none',
-          pointerEvents: isExpanded ? 'auto' : 'none',
-        }}
-      >
-        {renderHeader()}
-        {isExpanded ? (
-          <>
-            {renderExpandedControls()}
-            {renderExpandedChart()}
-          </>
-        ) : null}
-      </Card>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from typing import Literal
@@ -6,7 +6,15 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-AccountType = Literal['regular', 'credit', 'credit_card']
+AccountType = Literal[
+    'regular',
+    'credit',
+    'credit_card',
+    'installment_card',
+    'cash',
+    'broker',
+    'deposit',
+]
 
 
 class AccountCreateRequest(BaseModel):
@@ -22,6 +30,12 @@ class AccountCreateRequest(BaseModel):
     credit_interest_rate: Decimal | None = None
     credit_term_remaining: int | None = None
     monthly_payment: Decimal | None = None
+    deposit_interest_rate: Decimal | None = None
+    deposit_open_date: date | None = None
+    deposit_close_date: date | None = None
+    deposit_capitalization_period: str | None = None
+    contract_number: str | None = None
+    statement_account_number: str | None = None
 
 
 class AccountUpdateRequest(BaseModel):
@@ -37,6 +51,12 @@ class AccountUpdateRequest(BaseModel):
     credit_interest_rate: Decimal | None = None
     credit_term_remaining: int | None = None
     monthly_payment: Decimal | None = None
+    deposit_interest_rate: Decimal | None = None
+    deposit_open_date: date | None = None
+    deposit_close_date: date | None = None
+    deposit_capitalization_period: str | None = None
+    contract_number: str | None = None
+    statement_account_number: str | None = None
 
 
 class AccountResponse(BaseModel):
@@ -55,5 +75,11 @@ class AccountResponse(BaseModel):
     credit_interest_rate: Decimal | None = None
     credit_term_remaining: int | None = None
     monthly_payment: Decimal | None = None
+    deposit_interest_rate: Decimal | None = None
+    deposit_open_date: date | None = None
+    deposit_close_date: date | None = None
+    deposit_capitalization_period: str | None = None
+    contract_number: str | None = None
+    statement_account_number: str | None = None
     created_at: datetime
     updated_at: datetime
