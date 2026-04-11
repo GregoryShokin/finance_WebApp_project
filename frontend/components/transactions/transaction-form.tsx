@@ -650,7 +650,6 @@ export function TransactionForm({
     setTargetAccountQuery('');
     setCategoryQuery('');
     setGoalQuery('');
-    setReviewQuery('Нет');
     setLargePurchaseCheck(null);
     setLargePurchaseKind('normal');
   }, [initialData, reset, accounts, categories, mainTypeItems]);
@@ -697,7 +696,6 @@ export function TransactionForm({
           operation_type: values.operation_type,
           description: values.description.trim() || null,
           transaction_date: toIso(values.transaction_date),
-          needs_review: values.needs_review === 'true',
           is_deferred_purchase:
             largePurchaseCheck?.is_large && largePurchaseKind === 'deferred' ? true : undefined,
           is_large_purchase:

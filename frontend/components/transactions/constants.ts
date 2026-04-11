@@ -14,6 +14,7 @@ export const operationTypeLabels: Record<TransactionOperationType, string> = {
   credit_payment: 'Кредитная операция: ежемесячный платёж',
   credit_early_repayment: 'Кредитная операция: досрочное погашение',
   credit_interest: 'Кредитная операция: проценты',
+  credit_principal_attribution: 'Кредитная операция: погашение основного долга',
   debt: 'Долг',
   refund: 'Возврат',
   adjustment: 'Корректировка',
