@@ -60,6 +60,13 @@ class ImportUploadResponse(BaseModel):
     total_rows: int
     extraction: dict
     detection: ImportDetectionResponse
+    suggested_account_id: int | None = None
+    contract_number: str | None = None
+    contract_match_reason: str | None = None
+    contract_match_confidence: float | None = None
+    statement_account_number: str | None = None
+    statement_account_match_reason: str | None = None
+    statement_account_match_confidence: float | None = None
 
 
 class ImportMappingRequest(BaseModel):
@@ -180,6 +187,26 @@ class ImportReviewQueueItem(BaseModel):
 class ImportReviewQueueResponse(BaseModel):
     items: list[ImportReviewQueueItem] = Field(default_factory=list)
     total: int = 0
+
+
+class ImportSessionListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    filename: str
+    source_type: str
+    status: str
+    account_id: int | None
+    created_at: datetime
+    updated_at: datetime
+    row_count: int
+    ready_count: int
+    error_count: int
+
+
+class ImportSessionListResponse(BaseModel):
+    sessions: list[ImportSessionListItem]
+    total: int
 
 
 class ImportRowLabelRequest(BaseModel):

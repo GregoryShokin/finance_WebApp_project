@@ -10,6 +10,7 @@ from app.schemas.imports import (
     ImportCommitResponse,
     ImportMappingRequest,
     ImportPreviewResponse,
+    ImportSessionListResponse,
     ImportReviewQueueResponse,
     ImportRowLabelRequest,
     ImportRowLabelResponse,
@@ -30,6 +31,16 @@ def get_import_review_queue(
 ):
     service = ImportService(db)
     return service.list_review_queue(user_id=current_user.id)
+
+
+@router.get("/sessions", response_model=ImportSessionListResponse)
+def list_import_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Список незавершённых сессий импорта текущего пользователя."""
+    service = ImportService(db)
+    return service.list_active_sessions(user_id=current_user.id)
 
 
 @router.post("/upload", response_model=ImportUploadResponse, status_code=status.HTTP_201_CREATED)
@@ -102,6 +113,20 @@ def get_import_session(
     try:
         return service.get_session(user_id=current_user.id, session_id=session_id)
     except ImportNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_import_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        service.delete_session(user_id=current_user.id, session_id=session_id)
+    except ImportNotFoundError as exc:
+        db.rollback()
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 

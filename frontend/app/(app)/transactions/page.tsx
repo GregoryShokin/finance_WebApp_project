@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronUp, PlusCircle, ReceiptText, Search, ShieldAlert, Trash2, TrendingDown } from 'lucide-react';
+import { ChevronUp, PlusCircle, ReceiptText, Search, Trash2, TrendingDown } from 'lucide-react';
 import { toast } from 'sonner';
 import { PageShell } from '@/components/layout/page-shell';
 import { ErrorState, EmptyState, LoadingState } from '@/components/states/page-state';
@@ -39,7 +39,6 @@ type FiltersState = {
   date_to: string;
   min_amount: string;
   max_amount: string;
-  needs_review: 'all' | 'true' | 'false';
 };
 
 const defaultFilters: FiltersState = {
@@ -53,15 +52,12 @@ const defaultFilters: FiltersState = {
   date_to: '',
   min_amount: '',
   max_amount: '',
-  needs_review: 'all',
 };
 
 const defaultCategoryPriorityByKind: Record<CategoryKind, CategoryPriority> = {
   expense: 'expense_secondary',
   income: 'income_active',
 };
-
-const reviewLabels = { true: 'требует проверки', false: 'подтверждена' } as const;
 
 function normalizeSearchValue(value: unknown) {
   return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -107,7 +103,6 @@ export default function TransactionsPage() {
       date_to: filters.date_to ? toIsoEnd(filters.date_to) : undefined,
       min_amount: filters.min_amount ? Number(filters.min_amount) : undefined,
       max_amount: filters.max_amount ? Number(filters.max_amount) : undefined,
-      needs_review: filters.needs_review === 'all' ? 'all' : filters.needs_review === 'true',
     }),
     enabled: accountsQuery.isSuccess && categoriesQuery.isSuccess && counterpartiesQuery.isSuccess,
   });
@@ -162,7 +157,6 @@ export default function TransactionsPage() {
         item.currency,
         item.amount,
         item.transaction_date,
-        item.needs_review ? reviewLabels.true : reviewLabels.false,
       ].join(' '));
       return haystack.includes(search);
     });
@@ -174,7 +168,6 @@ export default function TransactionsPage() {
       total: list.length,
       income: list.filter((item) => item.type === 'income' && item.affects_analytics).reduce((acc, item) => acc + Number(item.amount), 0),
       expense: list.filter((item) => item.type === 'expense' && item.affects_analytics).reduce((acc, item) => acc + Number(item.amount), 0),
-      review: list.filter((item) => item.needs_review).length,
     };
   }, [filteredTransactions]);
 
@@ -201,7 +194,6 @@ export default function TransactionsPage() {
         <StatCard label="Операций найдено" value={stats.total} hint="С учётом текущих фильтров" icon={<ReceiptText className="size-5" />} />
         <StatCard label="Доходы в аналитике" value={<MoneyAmount value={stats.income} tone="income" className="text-2xl lg:text-3xl" />} hint="Только влияющие на аналитику" icon={<PlusCircle className="size-5" />} />
         <StatCard label="Расходы в аналитике" value={<MoneyAmount value={stats.expense} tone="expense" className="text-2xl lg:text-3xl" />} hint="Только влияющие на аналитику" icon={<TrendingDown className="size-5" />} />
-        <StatCard label="Требуют проверки" value={stats.review} hint="Полезно для review flow" icon={<ShieldAlert className="size-5" />} />
       </div>
 
       <Card className="rounded-2xl bg-white p-4 shadow-soft">

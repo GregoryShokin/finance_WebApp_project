@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
+from app.models.transaction import Transaction
 
 
 class AccountRepository:
@@ -51,6 +53,47 @@ class AccountRepository:
 
     def list_by_user(self, user_id: int) -> list[Account]:
         return self.db.query(Account).filter(Account.user_id == user_id).order_by(Account.id.desc()).all()
+
+    def list_by_user_with_last_transaction(self, user_id: int) -> list[Account]:
+        rows = (
+            self.db.query(
+                Account,
+                func.max(Transaction.transaction_date).label("last_transaction_date"),
+            )
+            .outerjoin(Transaction, Transaction.account_id == Account.id)
+            .filter(Account.user_id == user_id)
+            .group_by(Account.id)
+            .order_by(Account.id.desc())
+            .all()
+        )
+
+        accounts: list[Account] = []
+        for account, last_transaction_date in rows:
+            setattr(account, "last_transaction_date", last_transaction_date)
+            accounts.append(account)
+        return accounts
+
+    def find_by_contract_number(self, user_id: int, contract_number: str) -> Account | None:
+        return (
+            self.db.query(Account)
+            .filter(
+                Account.user_id == user_id,
+                Account.contract_number == contract_number,
+                Account.is_active == True,
+            )
+            .first()
+        )
+
+    def find_by_statement_account_number(self, user_id: int, statement_account_number: str) -> Account | None:
+        return (
+            self.db.query(Account)
+            .filter(
+                Account.user_id == user_id,
+                Account.statement_account_number == statement_account_number,
+                Account.is_active == True,
+            )
+            .first()
+        )
 
     def get_by_id_and_user(self, account_id: int, user_id: int) -> Account | None:
         return self.db.query(Account).filter(Account.id == account_id, Account.user_id == user_id).first()

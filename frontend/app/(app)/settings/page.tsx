@@ -1,10 +1,30 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Settings } from 'lucide-react';
+import {
+  Bot,
+  Copy,
+  ExternalLink,
+  KeyRound,
+  Link2,
+  MessageCircle,
+  Settings,
+  ShieldCheck,
+  Unlink,
+} from 'lucide-react';
 import { toast } from 'sonner';
+
+import { PageShell } from '@/components/layout/page-shell';
+import { Button } from '@/components/ui/button';
+import {
+  createTelegramLinkCode,
+  disconnectTelegram,
+  getTelegramStatus,
+} from '@/lib/api/telegram';
 import { getUserSettings, updateUserSettings } from '@/lib/api/user-settings';
+
+const TELEGRAM_BOT_NAME = process.env.NEXT_PUBLIC_TELEGRAM_BOT_NAME ?? 'financeapp_import_bot';
 
 const MIN_PCT = 5;
 const MAX_PCT = 50;
@@ -20,10 +40,74 @@ function formatRub(value: number) {
   }).format(value);
 }
 
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-100 bg-white px-4 py-3">
+      <span className="text-sm text-slate-500">{label}</span>
+      <span className="text-sm font-medium text-slate-900">{value}</span>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const queryClient = useQueryClient();
 
-  const { data: settings, isLoading } = useQuery({
+  // ---- Telegram integration ----
+  const statusQuery = useQuery({
+    queryKey: ['telegram', 'status'],
+    queryFn: getTelegramStatus,
+  });
+
+  const linkCodeMutation = useMutation({
+    mutationFn: createTelegramLinkCode,
+    onSuccess: async (data) => {
+      toast.success(`Код привязки готов: ${data.code}`);
+      await queryClient.invalidateQueries({ queryKey: ['telegram', 'status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Не удалось создать код привязки');
+    },
+  });
+
+  const disconnectMutation = useMutation({
+    mutationFn: disconnectTelegram,
+    onSuccess: async () => {
+      toast.success('Telegram отвязан');
+      await queryClient.invalidateQueries({ queryKey: ['telegram', 'status'] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Не удалось отвязать Telegram');
+    },
+  });
+
+  const status = statusQuery.data;
+  const pendingCode = status?.pending_code ?? null;
+  const pendingCodeExpiresAt = status?.pending_code_expires_at ?? null;
+
+  const expiresLabel = useMemo(() => {
+    if (!pendingCodeExpiresAt) return 'Код ещё не создан';
+    const date = new Date(pendingCodeExpiresAt);
+    if (Number.isNaN(date.getTime())) return 'Код действует ограниченное время';
+    return `Действует до ${date.toLocaleString('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })}`;
+  }, [pendingCodeExpiresAt]);
+
+  async function handleCopyCode() {
+    if (!pendingCode) return;
+    try {
+      await navigator.clipboard.writeText(pendingCode);
+      toast.success('Код скопирован');
+    } catch {
+      toast.error('Не удалось скопировать код');
+    }
+  }
+
+  // ---- Large-purchase threshold setting ----
+  const { data: settings, isLoading: settingsLoading } = useQuery({
     queryKey: ['user-settings'],
     queryFn: getUserSettings,
     staleTime: 1000 * 60 * 5,
@@ -38,7 +122,7 @@ export default function SettingsPage() {
     }
   }, [settings]);
 
-  const saveMutation = useMutation({
+  const saveSettingsMutation = useMutation({
     mutationFn: () =>
       updateUserSettings({ large_purchase_threshold_pct: sliderValue / 100 }),
     onSuccess: () => {
@@ -50,44 +134,214 @@ export default function SettingsPage() {
     },
   });
 
-  const isDirty =
+  const isSettingsDirty =
     settings !== undefined &&
     sliderValue !== Math.round(settings.large_purchase_threshold_pct * 100);
 
   const exampleThreshold = Math.round((sliderValue / 100) * EXAMPLE_EXPENSES);
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-8">
-      {/* Header */}
-      <div className="mb-8 flex items-center gap-3">
-        <div className="flex size-10 items-center justify-center rounded-2xl bg-slate-100">
-          <Settings className="size-5 text-slate-600" />
-        </div>
-        <div>
-          <h1 className="text-xl font-semibold text-slate-900">Настройки</h1>
-          <p className="text-sm text-slate-500">Параметры учёта</p>
-        </div>
+    <PageShell
+      title="Настройки"
+      description="Управляй подключениями, параметрами учёта и включай удобные способы загрузки выписок."
+    >
+      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+        <section className="rounded-3xl border border-white/60 bg-white/80 p-5 shadow-soft backdrop-blur lg:p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Интеграции
+              </p>
+              <div className="flex items-center gap-3">
+                <div className="flex size-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
+                  <Bot className="size-6" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-semibold text-slate-950">Telegram</h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Подключи Telegram по одноразовому коду, чтобы отправлять выписки прямо боту.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div
+              className={[
+                'rounded-full px-3 py-1 text-xs font-medium',
+                status?.connected ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500',
+              ].join(' ')}
+            >
+              {status?.connected ? 'Подключён' : 'Не подключён'}
+            </div>
+          </div>
+
+          <div className="mt-6 space-y-3">
+            <InfoRow label="Бот" value={`@${TELEGRAM_BOT_NAME}`} />
+            <InfoRow
+              label="Статус"
+              value={
+                statusQuery.isLoading
+                  ? 'Проверяем...'
+                  : status?.connected
+                    ? 'Аккаунт привязан'
+                    : 'Ждёт подключения'
+              }
+            />
+            <InfoRow
+              label="Username"
+              value={status?.telegram_username ? `@${status.telegram_username}` : 'Ещё не указан'}
+            />
+            <InfoRow
+              label="Telegram ID"
+              value={status?.telegram_id ? String(status.telegram_id) : 'Ещё не привязан'}
+            />
+          </div>
+
+          <div className="mt-6 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            {status?.connected ? (
+              <div className="space-y-4">
+                <div className="flex items-start gap-3">
+                  <ShieldCheck className="mt-0.5 size-5 text-emerald-600" />
+                  <div>
+                    <p className="text-sm font-medium text-slate-900">Telegram уже подключён</p>
+                    <p className="mt-1 text-sm text-slate-500">
+                      Теперь можно открыть бота, отправить PDF, XLSX, XLS или CSV, и затем проверить выписку в приложении.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-3">
+                  <a
+                    href={`https://t.me/${TELEGRAM_BOT_NAME}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-medium text-white transition hover:opacity-90"
+                  >
+                    <MessageCircle className="size-4" />
+                    Открыть бота
+                    <ExternalLink className="size-4" />
+                  </a>
+                  <Button
+                    variant="secondary"
+                    onClick={() => disconnectMutation.mutate()}
+                    disabled={disconnectMutation.isPending}
+                  >
+                    <Unlink className="size-4" />
+                    Отвязать Telegram
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-start gap-3">
+                  <KeyRound className="mt-0.5 size-5 text-sky-600" />
+                  <div>
+                    <p className="text-sm font-medium text-slate-900">Подключение по одноразовому коду</p>
+                    <p className="mt-1 text-sm text-slate-500">
+                      Получи код привязки, отправь его боту и после подтверждения Telegram подключится к текущему профилю.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-3">
+                  <Button
+                    onClick={() => linkCodeMutation.mutate()}
+                    disabled={linkCodeMutation.isPending}
+                  >
+                    <KeyRound className="size-4" />
+                    {pendingCode ? 'Обновить код' : 'Получить код привязки'}
+                  </Button>
+
+                  <a
+                    href={`https://t.me/${TELEGRAM_BOT_NAME}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                  >
+                    <Link2 className="size-4" />
+                    Открыть бота
+                    <ExternalLink className="size-4" />
+                  </a>
+                </div>
+
+                {pendingCode ? (
+                  <div className="rounded-2xl border border-sky-100 bg-white p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+                          Код привязки
+                        </p>
+                        <p className="mt-2 font-mono text-3xl font-semibold tracking-[0.22em] text-slate-950">
+                          {pendingCode}
+                        </p>
+                        <p className="mt-2 text-xs text-slate-500">{expiresLabel}</p>
+                      </div>
+                      <Button variant="secondary" onClick={handleCopyCode}>
+                        <Copy className="size-4" />
+                        Скопировать
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <aside className="rounded-3xl border border-white/60 bg-white/80 p-5 shadow-soft backdrop-blur lg:p-6">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+            Как это работает
+          </p>
+          <h3 className="text-xl font-semibold text-slate-950">Импорт через Telegram</h3>
+          <div className="mt-5 space-y-4 text-sm text-slate-600">
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <p className="font-medium text-slate-900">1. Получи код</p>
+              <p className="mt-1">
+                Нажми «Получить код привязки» и дождись появления одноразового кода на этой странице.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <p className="font-medium text-slate-900">2. Отправь код боту</p>
+              <p className="mt-1">
+                Можно отправить код обычным сообщением или командой вида <span className="font-mono">/start КОД</span>.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <p className="font-medium text-slate-900">3. Загрузи выписку</p>
+              <p className="mt-1">
+                После привязки бот принимает PDF, CSV, XLSX и XLS, а выписка уходит в систему импорта.
+              </p>
+            </div>
+          </div>
+        </aside>
       </div>
 
-      {/* Card */}
-      <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 className="text-base font-semibold text-slate-800">Порог крупной покупки</h2>
-        <p className="mt-1 text-sm leading-relaxed text-slate-500">
-          Если сумма разовой покупки превышает этот процент от среднемесячных расходов, приложение
-          предложит учесть её отдельно — чтобы она не исказила средние показатели.
-        </p>
+      <section className="mt-6 rounded-3xl border border-white/60 bg-white/80 p-5 shadow-soft backdrop-blur lg:p-6">
+        <div className="flex items-start gap-3">
+          <div className="flex size-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
+            <Settings className="size-6" />
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Параметры учёта
+            </p>
+            <h3 className="text-xl font-semibold text-slate-950">Порог крупной покупки</h3>
+            <p className="mt-1 max-w-xl text-sm text-slate-500">
+              Если сумма разовой покупки превышает этот процент от среднемесячных расходов, приложение
+              предложит учесть её отдельно — чтобы она не исказила средние показатели.
+            </p>
+          </div>
+        </div>
 
-        {isLoading ? (
+        {settingsLoading ? (
           <div className="mt-6 h-10 animate-pulse rounded-lg bg-slate-100" />
         ) : (
-          <div className="mt-6">
-            {/* Value display */}
+          <div className="mt-6 max-w-2xl">
             <div className="mb-4">
               <span className="text-4xl font-bold text-slate-900">{sliderValue}%</span>
               <span className="ml-2 text-sm text-slate-400">от среднемесячных расходов</span>
             </div>
 
-            {/* Slider */}
             <input
               type="range"
               min={MIN_PCT}
@@ -98,7 +352,6 @@ export default function SettingsPage() {
               className="w-full accent-slate-900"
             />
 
-            {/* Tick labels */}
             <div className="mt-1 flex justify-between text-xs text-slate-400">
               {Array.from(
                 { length: (MAX_PCT - MIN_PCT) / STEP + 1 },
@@ -108,27 +361,24 @@ export default function SettingsPage() {
               ))}
             </div>
 
-            {/* Explanation */}
             <div className="mt-5 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
               <strong>Например:</strong> при среднемесячных расходах {formatRub(EXAMPLE_EXPENSES)}{' '}
               крупной считается покупка от{' '}
               <strong className="text-slate-800">{formatRub(exampleThreshold)}</strong>.
             </div>
 
-            {/* Save button */}
             <div className="mt-6 flex justify-end">
-              <button
+              <Button
                 type="button"
-                disabled={!isDirty || saveMutation.isPending}
-                onClick={() => saveMutation.mutate()}
-                className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={!isSettingsDirty || saveSettingsMutation.isPending}
+                onClick={() => saveSettingsMutation.mutate()}
               >
-                {saveMutation.isPending ? 'Сохраняем...' : 'Сохранить'}
-              </button>
+                {saveSettingsMutation.isPending ? 'Сохраняем...' : 'Сохранить'}
+              </Button>
             </div>
           </div>
         )}
-      </div>
-    </div>
+      </section>
+    </PageShell>
   );
 }

@@ -81,5 +81,6 @@ class AccountResponse(BaseModel):
     deposit_capitalization_period: str | None = None
     contract_number: str | None = None
     statement_account_number: str | None = None
+    last_transaction_date: datetime | None = None
     created_at: datetime
     updated_at: datetime

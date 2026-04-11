@@ -50,18 +50,23 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
       (account) =>
         account.account_type !== 'credit' &&
         account.account_type !== 'credit_card' &&
-        account.account_type !== 'broker',
+        account.account_type !== 'installment_card' &&
+        account.account_type !== 'broker' &&
+        account.account_type !== 'deposit',
     );
+    const depositAccounts = accounts.filter((account) => account.account_type === 'deposit');
     const brokerAccounts = accounts.filter((account) => account.account_type === 'broker');
 
     const liquidTotal = liquidAccounts.reduce((sum, account) => sum + Math.max(0, toNumber(account.balance)), 0);
+    const depositTotal = depositAccounts.reduce((sum, account) => sum + Math.max(0, toNumber(account.balance)), 0);
     const realAssetsTotal = realAssets.reduce((sum, asset) => sum + Math.max(0, toNumber(asset.estimated_value)), 0);
     const brokerTotal = brokerAccounts.reduce((sum, account) => sum + Math.max(0, toNumber(account.balance)), 0);
-    const totalAssets = liquidTotal + realAssetsTotal + brokerTotal;
+    const totalAssets = liquidTotal + depositTotal + realAssetsTotal + brokerTotal;
     const netCapital = health.leverage_own_capital - health.leverage_total_debt;
 
     return {
       liquidTotal,
+      depositTotal,
       realAssetsTotal,
       brokerTotal,
       totalAssets,
@@ -98,6 +103,12 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
                 <span className="text-slate-500">Активы</span>
                 <span className="font-medium text-slate-700">{formatMoney(metrics.totalAssets)}</span>
               </div>
+              {metrics.depositTotal > 0 ? (
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-slate-500">Вклады</span>
+                  <span className="font-medium text-emerald-600">{formatMoney(metrics.depositTotal)}</span>
+                </div>
+              ) : null}
               <div className="flex items-center justify-between gap-3">
                 <span className="text-slate-500">Долги</span>
                 <span className="font-medium text-rose-600">{formatMoney(health.leverage_total_debt)}</span>
@@ -119,6 +130,12 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
                   <span className="text-slate-600">Ликвидные средства</span>
                   <span className="font-medium text-slate-900">{formatMoney(metrics.liquidTotal)}</span>
                 </div>
+                {metrics.depositTotal > 0 ? (
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="text-slate-600">Вклады</span>
+                    <span className="font-medium text-emerald-600">{formatMoney(metrics.depositTotal)}</span>
+                  </div>
+                ) : null}
                 <div className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-slate-600">Реальные активы</span>
                   <span className="font-medium text-slate-900">{formatMoney(metrics.realAssetsTotal)}</span>

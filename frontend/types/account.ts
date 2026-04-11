@@ -21,7 +21,7 @@ export type Account = {
   monthly_payment?: string | number | null;
   contract_number?: string | null;
   statement_account_number?: string | null;
-  last_transaction_date?: string | null;
+  last_transaction_date: string | null;
   created_at: string;
   updated_at: string;
 };

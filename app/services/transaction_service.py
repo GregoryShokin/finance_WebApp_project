@@ -107,7 +107,7 @@ class TransactionService:
     def create_transaction(self, *, user_id: int, payload: dict[str, Any]) -> Transaction:
         account_id = payload.get("account_id")
         if account_id is None:
-            raise TransactionValidationError("РќРµ СѓРєР°Р·Р°РЅ СЃС‡РµС‚ СЃРїРёСЃР°РЅРёСЏ/Р·Р°С‡РёСЃР»РµРЅРёСЏ.")
+            raise TransactionValidationError("Р В РЎСљР В Р’Вµ Р РЋРЎвЂњР В РЎвЂќР В Р’В°Р В Р’В·Р В Р’В°Р В Р вЂ¦ Р РЋР С“Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р РЋР С“Р В РЎвЂ”Р В РЎвЂР РЋР С“Р В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋР РЏ/Р В Р’В·Р В Р’В°Р РЋРІР‚РЋР В РЎвЂР РЋР С“Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ.")
 
         payload["user_id"] = user_id
         payload = self._prepare_payload(payload)
@@ -115,7 +115,7 @@ class TransactionService:
 
         account = self.account_repo.get_by_id_and_user_for_update(account_id, user_id)
         if not account:
-            raise TransactionValidationError("РЎС‡РµС‚ РЅРµ РЅР°Р№РґРµРЅ.")
+            raise TransactionValidationError("Р В Р Р‹Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦.")
 
         target_account = self._get_target_account_for_create(user_id=user_id, payload=payload, source_account=account)
 
@@ -192,11 +192,11 @@ class TransactionService:
     def update_transaction(self, *, user_id: int, transaction_id: int, updates: dict[str, Any]) -> Transaction:
         transaction = self.transaction_repo.get_by_id_for_update(transaction_id=transaction_id, user_id=user_id)
         if not transaction:
-            raise TransactionNotFoundError("РўСЂР°РЅР·Р°РєС†РёСЏ РЅРµ РЅР°Р№РґРµРЅР°")
+            raise TransactionNotFoundError("Р В РЎС›Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР РЋР РЏ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦Р В Р’В°")
 
         old_account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
         if not old_account:
-            raise TransactionValidationError("РЎС‡РµС‚ С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ РЅР°Р№РґРµРЅ.")
+            raise TransactionValidationError("Р В Р Р‹Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦.")
 
         old_target_account = None
         if transaction.target_account_id is not None:
@@ -204,10 +204,10 @@ class TransactionService:
 
         effective = self._build_effective_update_payload(transaction=transaction, updates=updates)
 
-        # Р›СЋР±РѕРµ СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ СѓР¶Рµ РїРѕРґС‚РІРµСЂР¶РґС‘РЅРЅРѕР№ С‚СЂР°РЅР·Р°РєС†РёРё РґРѕР»Р¶РЅРѕ СЃРЅРѕРІР° РѕС‚РїСЂР°РІР»СЏС‚СЊ РµС‘
-        # РЅР° РїСЂРѕРІРµСЂРєСѓ. РћР±СЂР°С‚РЅС‹Р№ РїРµСЂРµРІРѕРґ РІ "Р“РѕС‚РѕРІРѕ" СЂР°Р·СЂРµС€Р°РµРј С‚РѕР»СЊРєРѕ РґР»СЏ С‚СЂР°РЅР·Р°РєС†РёР№,
-        # РєРѕС‚РѕСЂС‹Рµ СѓР¶Рµ РЅР°С…РѕРґСЏС‚СЃСЏ РІ СЃС‚Р°С‚СѓСЃРµ needs_review=True, РЅР°РїСЂРёРјРµСЂ С‡РµСЂРµР· РєРЅРѕРїРєСѓ
-        # РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ РЅР° СЃС‚СЂР°РЅРёС†Рµ review.
+        # Р В РІР‚С”Р РЋР вЂ№Р В Р’В±Р В РЎвЂўР В Р’Вµ Р РЋР вЂљР В Р’ВµР В РўвЂР В Р’В°Р В РЎвЂќР РЋРІР‚С™Р В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ Р РЋРЎвЂњР В Р’В¶Р В Р’Вµ Р В РЎвЂ”Р В РЎвЂўР В РўвЂР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р’В¶Р В РўвЂР РЋРІР‚ВР В Р вЂ¦Р В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ Р В РўвЂР В РЎвЂўР В Р’В»Р В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋР С“Р В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В Р’В° Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р РЋР РЏР РЋРІР‚С™Р РЋР Р‰ Р В Р’ВµР РЋРІР‚В
+        # Р В Р вЂ¦Р В Р’В° Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’ВµР РЋР вЂљР В РЎвЂќР РЋРЎвЂњ. Р В РЎвЂєР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В Р вЂ Р В РЎвЂўР В РўвЂ Р В Р вЂ  "Р В РІР‚СљР В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В РЎвЂў" Р РЋР вЂљР В Р’В°Р В Р’В·Р РЋР вЂљР В Р’ВµР РЋРІвЂљВ¬Р В Р’В°Р В Р’ВµР В РЎВ Р РЋРІР‚С™Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р В РўвЂР В Р’В»Р РЋР РЏ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РІвЂћвЂ“,
+        # Р В РЎвЂќР В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР РЋР вЂљР РЋРІР‚в„–Р В Р’Вµ Р РЋРЎвЂњР В Р’В¶Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋР РЏР РЋРІР‚С™Р РЋР С“Р РЋР РЏ Р В Р вЂ  Р РЋР С“Р РЋРІР‚С™Р В Р’В°Р РЋРІР‚С™Р РЋРЎвЂњР РЋР С“Р В Р’Вµ needs_review=True, Р В Р вЂ¦Р В Р’В°Р В РЎвЂ”Р РЋР вЂљР В РЎвЂР В РЎВР В Р’ВµР РЋР вЂљ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р’ВµР В Р’В· Р В РЎвЂќР В Р вЂ¦Р В РЎвЂўР В РЎвЂ”Р В РЎвЂќР РЋРЎвЂњ
+        # Р В РЎвЂ”Р В РЎвЂўР В РўвЂР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р’В¶Р В РўвЂР В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В Р вЂ¦Р В Р’В° Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚В Р В Р’Вµ review.
         if transaction.needs_review:
             if "needs_review" not in updates:
                 effective["needs_review"] = True
@@ -230,7 +230,7 @@ class TransactionService:
 
         new_account = self.account_repo.get_by_id_and_user_for_update(effective["account_id"], user_id)
         if not new_account:
-            raise TransactionValidationError("РќРѕРІС‹Р№ СЃС‡РµС‚ С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ РЅР°Р№РґРµРЅ.")
+            raise TransactionValidationError("Р В РЎСљР В РЎвЂўР В Р вЂ Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋР С“Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦.")
 
         new_target_account = self._get_target_account_for_create(user_id=user_id, payload=effective, source_account=new_account)
 
@@ -305,10 +305,10 @@ class TransactionService:
         )
 
     def _build_effective_update_payload(self, *, transaction: Transaction, updates: dict[str, Any]) -> dict[str, Any]:
-        """РЎРѕР±РёСЂР°РµС‚ РёС‚РѕРіРѕРІС‹Р№ payload РґР»СЏ update Р±РµР· Р·Р°С‚РёСЂР°РЅРёСЏ РѕР±СЏР·Р°С‚РµР»СЊРЅС‹С… РїРѕР»РµР№ РІ None.
+        """Р В Р Р‹Р В РЎвЂўР В Р’В±Р В РЎвЂР РЋР вЂљР В Р’В°Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂР РЋРІР‚С™Р В РЎвЂўР В РЎвЂ“Р В РЎвЂўР В Р вЂ Р РЋРІР‚в„–Р В РІвЂћвЂ“ payload Р В РўвЂР В Р’В»Р РЋР РЏ update Р В Р’В±Р В Р’ВµР В Р’В· Р В Р’В·Р В Р’В°Р РЋРІР‚С™Р В РЎвЂР РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В РЎвЂўР В Р’В±Р РЋР РЏР В Р’В·Р В Р’В°Р РЋРІР‚С™Р В Р’ВµР В Р’В»Р РЋР Р‰Р В Р вЂ¦Р РЋРІР‚в„–Р РЋРІР‚В¦ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р’ВµР В РІвЂћвЂ“ Р В Р вЂ  None.
 
-        Р’ review/import frontend РёРЅРѕРіРґР° РѕС‚РїСЂР°РІР»СЏРµС‚ explicit null РґР»СЏ РїРѕР»РµР№, РєРѕС‚РѕСЂС‹Рµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ
-        С„Р°РєС‚РёС‡РµСЃРєРё РЅРµ РјРµРЅСЏР». Р”Р»СЏ NOT NULL РїРѕР»РµР№ СЌС‚Рѕ РїСЂРёРІРѕРґРёР»Рѕ Рє IntegrityError РЅР° flush.
+        Р В РІР‚в„ў review/import frontend Р В РЎвЂР В Р вЂ¦Р В РЎвЂўР В РЎвЂ“Р В РўвЂР В Р’В° Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р РЋР РЏР В Р’ВµР РЋРІР‚С™ explicit null Р В РўвЂР В Р’В»Р РЋР РЏ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р’ВµР В РІвЂћвЂ“, Р В РЎвЂќР В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР РЋР вЂљР РЋРІР‚в„–Р В Р’Вµ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В Р’В·Р В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р В Р’ВµР В Р’В»Р РЋР Р‰
+        Р РЋРІР‚С›Р В Р’В°Р В РЎвЂќР РЋРІР‚С™Р В РЎвЂР РЋРІР‚РЋР В Р’ВµР РЋР С“Р В РЎвЂќР В РЎвЂ Р В Р вЂ¦Р В Р’Вµ Р В РЎВР В Р’ВµР В Р вЂ¦Р РЋР РЏР В Р’В». Р В РІР‚СњР В Р’В»Р РЋР РЏ NOT NULL Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р’ВµР В РІвЂћвЂ“ Р РЋР РЉР РЋРІР‚С™Р В РЎвЂў Р В РЎвЂ”Р РЋР вЂљР В РЎвЂР В Р вЂ Р В РЎвЂўР В РўвЂР В РЎвЂР В Р’В»Р В РЎвЂў Р В РЎвЂќ IntegrityError Р В Р вЂ¦Р В Р’В° flush.
         """
 
         def pick(key: str, current: Any, *, allow_none: bool = False) -> Any:
@@ -321,8 +321,8 @@ class TransactionService:
 
         operation_type = pick("operation_type", transaction.operation_type)
 
-        # credit_account_id вЂ” РєР°РЅРѕРЅРёС‡РµСЃРєРѕРµ РїРѕР»Рµ РґР»СЏ РєСЂРµРґРёС‚РѕРІ. Р”Р»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
-        # РїРѕРґРґРµСЂР¶РёРІР°РµРј target_account_id, РїРѕС‚РѕРјСѓ С‡С‚Рѕ С‡Р°СЃС‚СЊ СЃС‚Р°СЂРѕРіРѕ UI СЂР°Р±РѕС‚Р°Р»Р° С‚РѕР»СЊРєРѕ СЃ РЅРёРј.
+        # credit_account_id Р Р†Р вЂљРІР‚Сњ Р В РЎвЂќР В Р’В°Р В Р вЂ¦Р В РЎвЂўР В Р вЂ¦Р В РЎвЂР РЋРІР‚РЋР В Р’ВµР РЋР С“Р В РЎвЂќР В РЎвЂўР В Р’Вµ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р’Вµ Р В РўвЂР В Р’В»Р РЋР РЏ Р В РЎвЂќР РЋР вЂљР В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В РЎвЂўР В Р вЂ . Р В РІР‚СњР В Р’В»Р РЋР РЏ Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“ Р РЋР С“Р В РЎвЂўР В Р вЂ Р В РЎВР В Р’ВµР РЋР С“Р РЋРІР‚С™Р В РЎвЂР В РЎВР В РЎвЂўР РЋР С“Р РЋРІР‚С™Р В РЎвЂ
+        # Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В РўвЂР В Р’ВµР РЋР вЂљР В Р’В¶Р В РЎвЂР В Р вЂ Р В Р’В°Р В Р’ВµР В РЎВ target_account_id, Р В РЎвЂ”Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В РЎВР РЋРЎвЂњ Р РЋРІР‚РЋР РЋРІР‚С™Р В РЎвЂў Р РЋРІР‚РЋР В Р’В°Р РЋР С“Р РЋРІР‚С™Р РЋР Р‰ Р РЋР С“Р РЋРІР‚С™Р В Р’В°Р РЋР вЂљР В РЎвЂўР В РЎвЂ“Р В РЎвЂў UI Р РЋР вЂљР В Р’В°Р В Р’В±Р В РЎвЂўР РЋРІР‚С™Р В Р’В°Р В Р’В»Р В Р’В° Р РЋРІР‚С™Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р РЋР С“ Р В Р вЂ¦Р В РЎвЂР В РЎВ.
         explicit_credit_account_id = updates.get("credit_account_id") if "credit_account_id" in updates else None
         explicit_target_account_id = updates.get("target_account_id") if "target_account_id" in updates else None
 
@@ -363,59 +363,13 @@ class TransactionService:
     def delete_transaction(self, *, transaction_id: int, user_id: int) -> dict[str, str]:
         transaction = self.transaction_repo.get_by_id_for_update(transaction_id=transaction_id, user_id=user_id)
         if not transaction:
-            raise TransactionNotFoundError("РўСЂР°РЅР·Р°РєС†РёСЏ РЅРµ РЅР°Р№РґРµРЅР°")
-
-        account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
-        if not account:
-            raise TransactionValidationError("РЎС‡РµС‚ РЅРµ РЅР°Р№РґРµРЅ")
+            raise TransactionNotFoundError("Р В РЎС›Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР РЋР РЏ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦Р В Р’В°")
 
         # Reverse any attribution/interest records linked to this payment before deleting it.
         if transaction.operation_type in {"credit_payment", "credit_early_repayment"}:
             self._reverse_payment_attributions(payment_id=transaction.id, user_id=user_id)
 
-        pair_id = getattr(transaction, "transfer_pair_id", None)
-        if pair_id is not None:
-            # Paired transfer: each record owns only its own side of the balance effect.
-            pair_tx = self.transaction_repo.get_by_id_for_update(transaction_id=pair_id, user_id=user_id)
-            pair_account = (
-                self.account_repo.get_by_id_and_user_for_update(pair_tx.account_id, user_id)
-                if pair_tx is not None
-                else None
-            )
-
-            # Revert own balance side
-            if transaction.type == "expense":
-                account.balance += transaction.amount
-            else:
-                account.balance -= transaction.amount
-            self.db.add(account)
-
-            # Revert pair balance side
-            if pair_tx is not None and pair_account is not None:
-                if pair_tx.type == "expense":
-                    pair_account.balance += pair_tx.amount
-                else:
-                    pair_account.balance -= pair_tx.amount
-                self.db.add(pair_account)
-
-            # Null out cross-references before deleting to avoid FK conflicts
-            transaction.transfer_pair_id = None
-            if pair_tx is not None:
-                pair_tx.transfer_pair_id = None
-                self.db.add(pair_tx)
-            self.db.flush()
-
-            self.transaction_repo.delete(transaction, auto_commit=False)
-            if pair_tx is not None:
-                self.transaction_repo.delete(pair_tx, auto_commit=False)
-        else:
-            target_account = None
-            if transaction.target_account_id is not None:
-                target_account = self.account_repo.get_by_id_and_user_for_update(transaction.target_account_id, user_id)
-                if target_account is None:
-                    raise TransactionValidationError("РЎС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РЅРµ РЅР°Р№РґРµРЅ")
-            self._revert_balance_effect(transaction=transaction, account=account, target_account=target_account)
-            self.transaction_repo.delete(transaction, auto_commit=False)
+        self._delete_transaction_with_balance_revert(transaction=transaction, user_id=user_id)
 
         self.db.commit()
         return {"status": "success"}
@@ -424,31 +378,31 @@ class TransactionService:
     def split_transaction(self, *, user_id: int, transaction_id: int, items: list[dict[str, Any]]) -> list[Transaction]:
         transaction = self.transaction_repo.get_by_id_for_update(transaction_id=transaction_id, user_id=user_id)
         if not transaction:
-            raise TransactionNotFoundError("РўСЂР°РЅР·Р°РєС†РёСЏ РЅРµ РЅР°Р№РґРµРЅР°")
+            raise TransactionNotFoundError("Р В РЎС›Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР РЋР РЏ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦Р В Р’В°")
 
         if transaction.operation_type != "regular":
-            raise TransactionValidationError("Р Р°Р·Р±РёРІР°С‚СЊ РјРѕР¶РЅРѕ С‚РѕР»СЊРєРѕ РѕР±С‹С‡РЅС‹Рµ С‚СЂР°РЅР·Р°РєС†РёРё.")
+            raise TransactionValidationError("Р В Р’В Р В Р’В°Р В Р’В·Р В Р’В±Р В РЎвЂР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В РЎВР В РЎвЂўР В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋРІР‚С™Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р В РЎвЂўР В Р’В±Р РЋРІР‚в„–Р РЋРІР‚РЋР В Р вЂ¦Р РЋРІР‚в„–Р В Р’Вµ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ.")
 
         if len(items) < 2:
-            raise TransactionValidationError("РќСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РјРёРЅРёРјСѓРј РґРІРµ С‡Р°СЃС‚Рё РґР»СЏ СЂР°Р·Р±РёРІРєРё.")
+            raise TransactionValidationError("Р В РЎСљР РЋРЎвЂњР В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋРЎвЂњР В РЎвЂќР В Р’В°Р В Р’В·Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В РЎВР В РЎвЂР В Р вЂ¦Р В РЎвЂР В РЎВР РЋРЎвЂњР В РЎВ Р В РўвЂР В Р вЂ Р В Р’Вµ Р РЋРІР‚РЋР В Р’В°Р РЋР С“Р РЋРІР‚С™Р В РЎвЂ Р В РўвЂР В Р’В»Р РЋР РЏ Р РЋР вЂљР В Р’В°Р В Р’В·Р В Р’В±Р В РЎвЂР В Р вЂ Р В РЎвЂќР В РЎвЂ.")
 
         account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
         if not account:
-            raise TransactionValidationError("РЎС‡РµС‚ С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ РЅР°Р№РґРµРЅ.")
+            raise TransactionValidationError("Р В Р Р‹Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦.")
 
         original_amount = transaction.amount
         total_amount = sum(item.get("amount", 0) for item in items)
         if total_amount != original_amount:
-            raise TransactionValidationError("РЎСѓРјРјР° С‡Р°СЃС‚РµР№ РґРѕР»Р¶РЅР° Р±С‹С‚СЊ СЂР°РІРЅР° СЃСѓРјРјРµ РёСЃС…РѕРґРЅРѕР№ С‚СЂР°РЅР·Р°РєС†РёРё.")
+            raise TransactionValidationError("Р В Р Р‹Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В° Р РЋРІР‚РЋР В Р’В°Р РЋР С“Р РЋРІР‚С™Р В Р’ВµР В РІвЂћвЂ“ Р В РўвЂР В РЎвЂўР В Р’В»Р В Р’В¶Р В Р вЂ¦Р В Р’В° Р В Р’В±Р РЋРІР‚в„–Р РЋРІР‚С™Р РЋР Р‰ Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р вЂ¦Р В Р’В° Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’Вµ Р В РЎвЂР РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ.")
 
         prepared_items: list[dict[str, Any]] = []
         for item in items:
             category_id = item.get("category_id")
             amount = item.get("amount")
             if category_id is None:
-                raise TransactionValidationError("Р”Р»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё СЂР°Р·Р±РёРІРєРё РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РєР°С‚РµРіРѕСЂРёСЋ.")
+                raise TransactionValidationError("Р В РІР‚СњР В Р’В»Р РЋР РЏ Р В РЎвЂќР В Р’В°Р В Р’В¶Р В РўвЂР В РЎвЂўР В РІвЂћвЂ“ Р РЋРІР‚РЋР В Р’В°Р РЋР С“Р РЋРІР‚С™Р В РЎвЂ Р РЋР вЂљР В Р’В°Р В Р’В·Р В Р’В±Р В РЎвЂР В Р вЂ Р В РЎвЂќР В РЎвЂ Р В Р вЂ¦Р РЋРЎвЂњР В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋРЎвЂњР В РЎвЂќР В Р’В°Р В Р’В·Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂќР В Р’В°Р РЋРІР‚С™Р В Р’ВµР В РЎвЂ“Р В РЎвЂўР РЋР вЂљР В РЎвЂР РЋР вЂ№.")
             if amount is None or amount <= 0:
-                raise TransactionValidationError("РЎСѓРјРјР° РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё СЂР°Р·Р±РёРІРєРё РґРѕР»Р¶РЅР° Р±С‹С‚СЊ Р±РѕР»СЊС€Рµ РЅСѓР»СЏ.")
+                raise TransactionValidationError("Р В Р Р‹Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В° Р В РЎвЂќР В Р’В°Р В Р’В¶Р В РўвЂР В РЎвЂўР В РІвЂћвЂ“ Р РЋРІР‚РЋР В Р’В°Р РЋР С“Р РЋРІР‚С™Р В РЎвЂ Р РЋР вЂљР В Р’В°Р В Р’В·Р В Р’В±Р В РЎвЂР В Р вЂ Р В РЎвЂќР В РЎвЂ Р В РўвЂР В РЎвЂўР В Р’В»Р В Р’В¶Р В Р вЂ¦Р В Р’В° Р В Р’В±Р РЋРІР‚в„–Р РЋРІР‚С™Р РЋР Р‰ Р В Р’В±Р В РЎвЂўР В Р’В»Р РЋР Р‰Р РЋРІвЂљВ¬Р В Р’Вµ Р В Р вЂ¦Р РЋРЎвЂњР В Р’В»Р РЋР РЏ.")
 
             payload = {
                 "account_id": transaction.account_id,
@@ -492,7 +446,7 @@ class TransactionService:
         account_id: int | None = None,
     ) -> int:
         if date_to < date_from:
-            raise TransactionValidationError("РљРѕРЅРµС‡РЅР°СЏ РґР°С‚Р° РїРµСЂРёРѕРґР° РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ СЂР°РЅСЊС€Рµ РЅР°С‡Р°Р»СЊРЅРѕР№.")
+            raise TransactionValidationError("Р В РЎв„ўР В РЎвЂўР В Р вЂ¦Р В Р’ВµР РЋРІР‚РЋР В Р вЂ¦Р В Р’В°Р РЋР РЏ Р В РўвЂР В Р’В°Р РЋРІР‚С™Р В Р’В° Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В РЎвЂР В РЎвЂўР В РўвЂР В Р’В° Р В Р вЂ¦Р В Р’Вµ Р В РЎВР В РЎвЂўР В Р’В¶Р В Р’ВµР РЋРІР‚С™ Р В Р’В±Р РЋРІР‚в„–Р РЋРІР‚С™Р РЋР Р‰ Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р РЋР Р‰Р РЋРІвЂљВ¬Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“.")
 
         transactions = self.transaction_repo.get_for_period_for_update(
             user_id=user_id,
@@ -508,16 +462,89 @@ class TransactionService:
         accounts = self.account_repo.get_many_by_ids_and_user_for_update(account_ids=list(account_ids), user_id=user_id)
         accounts_by_id = {account.id: account for account in accounts}
 
+        processed_ids: set[int] = set()
+        deleted_count = 0
+
         for transaction in transactions:
-            source_account = accounts_by_id.get(transaction.account_id)
-            if source_account is None:
-                raise TransactionValidationError(f"РќРµ РЅР°Р№РґРµРЅ СЃС‡С‘С‚ {transaction.account_id} РґР»СЏ СѓРґР°Р»РµРЅРёСЏ РїРµСЂРёРѕРґР°.")
-            target_account = accounts_by_id.get(transaction.target_account_id) if transaction.target_account_id is not None else None
-            self._revert_balance_effect(transaction=transaction, account=source_account, target_account=target_account)
-            self.transaction_repo.delete(transaction, auto_commit=False)
+            if transaction.id in processed_ids:
+                continue
+            deleted_ids = self._delete_transaction_with_balance_revert(
+                transaction=transaction,
+                user_id=user_id,
+                accounts_by_id=accounts_by_id,
+            )
+            processed_ids.update(deleted_ids)
+            deleted_count += len(deleted_ids)
 
         self.db.commit()
-        return len(transactions)
+        return deleted_count
+
+    def _delete_transaction_with_balance_revert(
+        self,
+        *,
+        transaction: Transaction,
+        user_id: int,
+        accounts_by_id: dict[int, Account] | None = None,
+    ) -> set[int]:
+        account = (accounts_by_id or {}).get(transaction.account_id)
+        if account is None:
+            account = self.account_repo.get_by_id_and_user_for_update(transaction.account_id, user_id)
+            if account is not None and accounts_by_id is not None:
+                accounts_by_id[account.id] = account
+        if not account:
+            raise TransactionValidationError("Account not found")
+
+        deleted_ids = {transaction.id}
+        pair_id = getattr(transaction, "transfer_pair_id", None)
+        if pair_id is not None:
+            pair_tx = self.transaction_repo.get_by_id_for_update(transaction_id=pair_id, user_id=user_id)
+            pair_account = None
+            if pair_tx is not None:
+                deleted_ids.add(pair_tx.id)
+                pair_account = (accounts_by_id or {}).get(pair_tx.account_id)
+                if pair_account is None:
+                    pair_account = self.account_repo.get_by_id_and_user_for_update(pair_tx.account_id, user_id)
+                    if pair_account is not None and accounts_by_id is not None:
+                        accounts_by_id[pair_account.id] = pair_account
+
+            if transaction.type == "expense":
+                account.balance += transaction.amount
+            else:
+                account.balance -= transaction.amount
+            self.db.add(account)
+
+            if pair_tx is not None and pair_account is not None:
+                if pair_tx.type == "expense":
+                    pair_account.balance += pair_tx.amount
+                else:
+                    pair_account.balance -= pair_tx.amount
+                self.db.add(pair_account)
+
+            transaction.transfer_pair_id = None
+            self.db.add(transaction)
+            if pair_tx is not None:
+                pair_tx.transfer_pair_id = None
+                self.db.add(pair_tx)
+            self.db.flush()
+
+            self.transaction_repo.delete(transaction, auto_commit=False)
+            if pair_tx is not None:
+                self.transaction_repo.delete(pair_tx, auto_commit=False)
+            return deleted_ids
+
+        target_account = None
+        if transaction.target_account_id is not None:
+            target_account = (accounts_by_id or {}).get(transaction.target_account_id)
+            if target_account is None:
+                target_account = self.account_repo.get_by_id_and_user_for_update(transaction.target_account_id, user_id)
+                if target_account is not None and accounts_by_id is not None:
+                    accounts_by_id[target_account.id] = target_account
+            if target_account is None:
+                raise TransactionValidationError("Target account not found")
+
+        self._revert_balance_effect(transaction=transaction, account=account, target_account=target_account)
+        self.transaction_repo.delete(transaction, auto_commit=False)
+        return deleted_ids
 
     def _prepare_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         prepared = dict(payload)
@@ -552,40 +579,39 @@ class TransactionService:
 
         if operation_type == "transfer":
             if target_account_id is None and not allow_incomplete_transfer:
-                raise TransactionValidationError("Р”Р»СЏ РїРµСЂРµРІРѕРґР° РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ СЃС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ.")
+                raise TransactionValidationError("Для перевода нужно указать счёт назначения.")
             if category_id is not None:
-                raise TransactionValidationError("Р”Р»СЏ РїРµСЂРµРІРѕРґР° РЅРµР»СЊР·СЏ СѓРєР°Р·С‹РІР°С‚СЊ РєР°С‚РµРіРѕСЂРёСЋ.")
+                raise TransactionValidationError("Для перевода нельзя указывать категорию.")
         elif operation_type in {"credit_payment", "credit_early_repayment"}:
             if target_account_id is None and not allow_incomplete_transfer:
                 raise TransactionValidationError("Для платежа по кредиту нужно указать кредит.")
             if category_id is not None:
                 raise TransactionValidationError("Для платежа по кредиту нельзя указывать категорию.")
         elif target_account_id is not None:
-            raise TransactionValidationError("РЎС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РјРѕР¶РЅРѕ СѓРєР°Р·С‹РІР°С‚СЊ С‚РѕР»СЊРєРѕ РґР»СЏ РїРµСЂРµРІРѕРґР° Рё РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ.")
+            raise TransactionValidationError("Счёт назначения можно указывать только для перевода и платежа по кредиту.")
 
         if operation_type == "debt":
             if counterparty_id in (None, "", 0):
-                raise TransactionValidationError("Р”Р»СЏ РґРѕР»РіР° РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РєРѕРЅС‚СЂР°РіРµРЅС‚Р°.")
+                raise TransactionValidationError("Для долга нужно указать контрагента.")
             if debt_direction not in {"lent", "borrowed", "repaid", "collected"}:
-                raise TransactionValidationError("Р”Р»СЏ РґРѕР»РіР° РЅСѓР¶РЅРѕ РІС‹Р±СЂР°С‚СЊ РєРѕСЂСЂРµРєС‚РЅРѕРµ РЅР°РїСЂР°РІР»РµРЅРёРµ.")
+                raise TransactionValidationError("Для долга нужно выбрать корректное направление.")
         elif counterparty_id not in (None, "", 0):
-            raise TransactionValidationError("РљРѕРЅС‚СЂР°РіРµРЅС‚Р° РјРѕР¶РЅРѕ СѓРєР°Р·С‹РІР°С‚СЊ С‚РѕР»СЊРєРѕ РґР»СЏ РѕРїРµСЂР°С†РёР№ С‚РёРїР° РґРѕР»Рі.")
+            raise TransactionValidationError("Контрагента можно указывать только для операций типа долг.")
 
         if counterparty_id not in (None, "", 0):
             counterparty = self.counterparty_repo.get_by_id_and_user(int(counterparty_id), user_id)
             if counterparty is None:
-                raise TransactionValidationError("РљРѕРЅС‚СЂР°РіРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ.")
+                raise TransactionValidationError("Контрагент не найден.")
 
         if category_id is None:
             return
 
         category = self._get_category(category_id=category_id, user_id=user_id)
         if category is None:
-            raise TransactionValidationError("РљР°С‚РµРіРѕСЂРёСЏ РЅРµ РЅР°Р№РґРµРЅР°.")
+            raise TransactionValidationError("Категория не найдена.")
 
         if transaction_type is not None and category.kind != transaction_type and operation_type != "refund":
-            raise TransactionValidationError("РўРёРї С‚СЂР°РЅР·Р°РєС†РёРё РЅРµ СЃРѕРІРїР°РґР°РµС‚ СЃ С‚РёРїРѕРј РІС‹Р±СЂР°РЅРЅРѕР№ РєР°С‚РµРіРѕСЂРёРё.")
-
+            raise TransactionValidationError("Тип транзакции не совпадает с типом выбранной категории.")
     def _get_category(self, *, category_id: int, user_id: int) -> Category | None:
         return self.category_repo.get_by_id(category_id=category_id, user_id=user_id)
 
@@ -606,11 +632,11 @@ class TransactionService:
             if payload.get("needs_review"):
                 return None
             if operation_type in {"credit_payment", "credit_early_repayment"}:
-                raise TransactionValidationError("Для платежа по кредиту нужно указать кредит.")
-            raise TransactionValidationError("Р”Р»СЏ РїРµСЂРµРІРѕРґР° РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ СЃС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ.")
+                raise TransactionValidationError("Р вЂќР В»РЎРЏ Р С—Р В»Р В°РЎвЂљР ВµР В¶Р В° Р С—Р С• Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљРЎС“ Р Р…РЎС“Р В¶Р Р…Р С• РЎС“Р С”Р В°Р В·Р В°РЎвЂљРЎРЉ Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљ.")
+            raise TransactionValidationError("Р В РІР‚СњР В Р’В»Р РЋР РЏ Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В Р вЂ Р В РЎвЂўР В РўвЂР В Р’В° Р В Р вЂ¦Р РЋРЎвЂњР В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋРЎвЂњР В РЎвЂќР В Р’В°Р В Р’В·Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р РЋР С“Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р В Р вЂ¦Р В Р’В°Р В Р’В·Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ.")
 
         if target_account_id == source_account.id:
-            raise TransactionValidationError("РЎС‡РµС‚ СЃРїРёСЃР°РЅРёСЏ Рё СЃС‡РµС‚ РЅР°Р·РЅР°С‡РµРЅРёСЏ РЅРµ РґРѕР»Р¶РЅС‹ СЃРѕРІРїР°РґР°С‚СЊ.")
+            raise TransactionValidationError("Р В Р Р‹Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р РЋР С“Р В РЎвЂ”Р В РЎвЂР РЋР С“Р В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В РЎвЂ Р РЋР С“Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р В Р вЂ¦Р В Р’В°Р В Р’В·Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В Р вЂ¦Р В Р’Вµ Р В РўвЂР В РЎвЂўР В Р’В»Р В Р’В¶Р В Р вЂ¦Р РЋРІР‚в„– Р РЋР С“Р В РЎвЂўР В Р вЂ Р В РЎвЂ”Р В Р’В°Р В РўвЂР В Р’В°Р РЋРІР‚С™Р РЋР Р‰.")
 
         target_account = self.account_repo.get_by_id_and_user_for_update(target_account_id, user_id)
         if not target_account:
@@ -620,7 +646,7 @@ class TransactionService:
             is_credit = bool(getattr(target_account, "is_credit", False))
             if acct_type not in ALL_CREDIT_ACCOUNT_TYPES and not is_credit:
                 raise TransactionValidationError(
-                    "Для платежа по кредиту нужно выбрать кредитный счёт или кредитную карту."
+                    "Р вЂќР В»РЎРЏ Р С—Р В»Р В°РЎвЂљР ВµР В¶Р В° Р С—Р С• Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљРЎС“ Р Р…РЎС“Р В¶Р Р…Р С• Р Р†РЎвЂ№Р В±РЎР‚Р В°РЎвЂљРЎРЉ Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљР Р…РЎвЂ№Р в„– РЎРѓРЎвЂЎРЎвЂРЎвЂљ Р С‘Р В»Р С‘ Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљР Р…РЎС“РЎР‹ Р С”Р В°РЎР‚РЎвЂљРЎС“."
                 )
 
         return target_account

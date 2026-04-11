@@ -29,6 +29,17 @@ services:
       - redis
     command: celery -A app.core.celery_app.celery_app worker --loglevel=info
 
+  bot:
+    build: ./bot
+    container_name: finance_bot
+    env_file:
+      - .env
+    environment:
+      - API_BASE_URL=http://api:8000/api/v1
+    depends_on:
+      - api
+    restart: unless-stopped
+
   db:
     image: postgres:16
     container_name: finance_db

@@ -1,11 +1,12 @@
 "use client";
 
-import { CalendarDays, LogOut, ShieldCheck } from 'lucide-react';
+import { CalendarDays, LogOut, Settings, ShieldCheck } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
+
 import { Button } from '@/components/ui/button';
 import { removeAccessToken } from '@/lib/auth/token';
 import type { User } from '@/types/auth';
-import { useEffect, useMemo, useState } from 'react';
 
 export function Header({ user }: { user: User | null }) {
   const router = useRouter();
@@ -30,6 +31,10 @@ export function Header({ user }: { user: User | null }) {
     router.replace('/login');
   }
 
+  function handleSettings() {
+    router.push('/settings');
+  }
+
   return (
     <header className="sticky top-0 z-20 border-b border-white/60 bg-white/75 backdrop-blur">
       <div className="mx-auto flex h-20 w-full max-w-7xl items-center justify-between gap-4 px-4 lg:px-8">
@@ -49,8 +54,15 @@ export function Header({ user }: { user: User | null }) {
               <CalendarDays className="size-4" />
               <span className="capitalize">{todayLabel}</span>
             </div>
-            <p className="mt-0.5 max-w-56 truncate text-sm font-medium text-slate-700">{mounted ? user?.email ?? 'Нет данных' : '...'}</p>
+            <p className="mt-0.5 max-w-56 truncate text-sm font-medium text-slate-700">
+              {mounted ? user?.email ?? 'Нет данных' : '...'}
+            </p>
           </div>
+
+          <Button variant="secondary" onClick={handleSettings}>
+            <Settings className="size-4" />
+            Настройки
+          </Button>
 
           <Button variant="secondary" onClick={handleLogout}>
             <LogOut className="size-4" />

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -31,18 +33,39 @@ class AccountService:
                 current_amount = Decimal(str(current_amount))
                 data["credit_current_amount"] = current_amount
                 data["balance"] = -current_amount
+            data["deposit_interest_rate"] = None
+            data["deposit_open_date"] = None
+            data["deposit_close_date"] = None
+            data["deposit_capitalization_period"] = None
         elif account_type == "credit_card":
             if "balance" in data and data.get("balance") is not None:
                 data["balance"] = Decimal(str(data["balance"]))
             data["credit_current_amount"] = None
             data["credit_interest_rate"] = None
             data["credit_term_remaining"] = None
+            data["deposit_interest_rate"] = None
+            data["deposit_open_date"] = None
+            data["deposit_close_date"] = None
+            data["deposit_capitalization_period"] = None
+        elif account_type == "deposit":
+            data["is_credit"] = False
+            if "balance" in data and data.get("balance") is not None:
+                data["balance"] = Decimal(str(data["balance"]))
+            data["credit_current_amount"] = None
+            data["credit_interest_rate"] = None
+            data["credit_term_remaining"] = None
+            data["credit_limit_original"] = None
+            data["monthly_payment"] = None
         else:
             data["credit_current_amount"] = None
             data["credit_interest_rate"] = None
             data["credit_term_remaining"] = None
             data["credit_limit_original"] = None
             data["monthly_payment"] = None
+            data["deposit_interest_rate"] = None
+            data["deposit_open_date"] = None
+            data["deposit_close_date"] = None
+            data["deposit_capitalization_period"] = None
 
         return data
 
@@ -51,6 +74,9 @@ class AccountService:
 
     def list(self, *, user_id: int) -> list[Account]:
         return self.repo.list_by_user(user_id)
+
+    def list_with_last_transaction(self, *, user_id: int) -> list[Account]:
+        return self.repo.list_by_user_with_last_transaction(user_id)
 
     def get(self, *, account_id: int, user_id: int) -> Account:
         account = self.repo.get_by_id_and_user(account_id, user_id)

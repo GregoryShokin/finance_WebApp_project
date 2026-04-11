@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     ALGORITHM: str = "HS256"
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_BOT_NAME: str = "financeapp_import_bot"
 
     BACKEND_CORS_ORIGINS: list[str] | str = ["http://localhost:3000"]
     TRUSTED_HOSTS: list[str] | str = ["localhost", "127.0.0.1"]

@@ -105,6 +105,29 @@ class ImportService:
 
         primary_table = self._pick_primary_table(extraction)
         detection = self.recognition_service.recognize(table=primary_table)
+        contract_number = extraction.meta.get("contract_number")
+        contract_match_reason = extraction.meta.get("contract_match_reason")
+        contract_match_confidence = extraction.meta.get("contract_match_confidence")
+        statement_account_number = extraction.meta.get("statement_account_number")
+        statement_account_match_reason = extraction.meta.get("statement_account_match_reason")
+        statement_account_match_confidence = extraction.meta.get("statement_account_match_confidence")
+        suggested_account_id = None
+
+        if contract_number and user_id:
+            matched_account = self.account_repo.find_by_contract_number(
+                user_id=user_id,
+                contract_number=contract_number,
+            )
+            if matched_account:
+                suggested_account_id = matched_account.id
+
+        if suggested_account_id is None and statement_account_number and user_id:
+            matched_account = self.account_repo.find_by_statement_account_number(
+                user_id=user_id,
+                statement_account_number=statement_account_number,
+            )
+            if matched_account:
+                suggested_account_id = matched_account.id
 
         storage_payload = self._encode_source(raw_bytes=raw_bytes, source_type=extension)
         parse_settings = {
@@ -117,6 +140,8 @@ class ImportService:
             "table_row_counts": {table.name: len(table.rows) for table in extraction.tables},
             "tables": self._serialize_tables(extraction.tables),
             "detection": detection,
+            "contract_number": contract_number,
+            "statement_account_number": statement_account_number,
         }
 
         session = self.import_repo.create_session(
@@ -150,6 +175,13 @@ class ImportService:
                 "primary_table": primary_table.name,
             },
             "detection": detection,
+            "suggested_account_id": suggested_account_id,
+            "contract_number": contract_number,
+            "contract_match_reason": contract_match_reason,
+            "contract_match_confidence": contract_match_confidence,
+            "statement_account_number": statement_account_number,
+            "statement_account_match_reason": statement_account_match_reason,
+            "statement_account_match_confidence": statement_account_match_confidence,
         }
 
     def get_session(self, *, user_id: int, session_id: int) -> ImportSession:
@@ -157,6 +189,32 @@ class ImportService:
         if session is None:
             raise ImportNotFoundError("РЎРµСЃСЃРёСЏ РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
         return session
+
+    def list_active_sessions(self, *, user_id: int) -> dict[str, Any]:
+        sessions = self.import_repo.list_active_sessions(user_id=user_id)
+        items = []
+        for session in sessions:
+            rows = self.import_repo.list_rows(session_id=session.id)
+            items.append({
+                "id": session.id,
+                "filename": session.filename,
+                "source_type": session.source_type,
+                "status": session.status,
+                "account_id": session.account_id,
+                "created_at": session.created_at,
+                "updated_at": session.updated_at,
+                "row_count": len(rows),
+                "ready_count": sum(1 for r in rows if r.status == "ready"),
+                "error_count": sum(1 for r in rows if r.status == "error"),
+            })
+        return {"sessions": items, "total": len(items)}
+
+    def delete_session(self, *, user_id: int, session_id: int) -> None:
+        session = self.import_repo.get_session(session_id=session_id, user_id=user_id)
+        if session is None:
+            raise ImportNotFoundError("РЎРµСЃСЃРёСЏ РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
+        self.import_repo.delete_session(session)
+        self.db.commit()
 
 
     def send_row_to_review(self, *, user_id: int, row_id: int) -> dict[str, Any]:
@@ -764,6 +822,8 @@ class ImportService:
             status="preview_ready",
             mapping_json=merged_detection,
             summary_json=summary,
+            account_id=payload.account_id,
+            currency=payload.currency,
         )
         self.db.commit()
         self.db.refresh(session)
@@ -936,6 +996,18 @@ class ImportService:
             "error_count": error_count,
             "review_count": review_count,
         }
+        parse_settings = session.parse_settings or {}
+        contract_number = parse_settings.get("contract_number")
+        statement_account_number = parse_settings.get("statement_account_number")
+        if session.account_id and (contract_number or statement_account_number):
+            account = self.account_repo.get_by_id_and_user(session.account_id, user_id)
+            updates: dict[str, Any] = {}
+            if account and contract_number and not account.contract_number:
+                updates["contract_number"] = contract_number
+            if account and statement_account_number and not account.statement_account_number:
+                updates["statement_account_number"] = statement_account_number
+            if account and updates:
+                self.account_repo.update(account, auto_commit=False, **updates)
         self.db.add(session)
         self.db.commit()
         self.db.refresh(session)

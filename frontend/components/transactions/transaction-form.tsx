@@ -29,7 +29,6 @@ type TransactionFormValues = {
   operation_type: TransactionOperationType;
   description: string;
   transaction_date: string;
-  needs_review: string;
 };
 
 type MainTypeValue = 'regular' | 'refund' | 'transfer' | 'investment' | 'credit_operation' | 'debt';
@@ -50,7 +49,6 @@ const defaultValues: TransactionFormValues = {
   operation_type: 'regular',
   description: '',
   transaction_date: '',
-  needs_review: 'false',
 };
 
 function toDatetimeLocal(value?: string | null) {
@@ -251,7 +249,6 @@ export function TransactionForm({
   const selectedCategoryId = watch('category_id');
   const selectedCreditAccountId = watch('credit_account_id');
   const selectedCounterpartyId = watch('counterparty_id');
-  const needsReviewValue = watch('needs_review');
 
   const [mainType, setMainType] = useState<MainTypeValue>('regular');
   const [mainTypeQuery, setMainTypeQuery] = useState('Обычный');
@@ -266,7 +263,6 @@ export function TransactionForm({
   const [categoryQuery, setCategoryQuery] = useState('');
   const [creditAccountQuery, setCreditAccountQuery] = useState('');
   const [counterpartyQuery, setCounterpartyQuery] = useState('');
-  const [reviewQuery, setReviewQuery] = useState('Нет');
 
   const mainTypeItems = useMemo<SearchSelectItem[]>(
     () => [
@@ -344,14 +340,6 @@ export function TransactionForm({
           badgeClassName: Number(item.receivable_amount) > 0 ? 'text-emerald-600' : Number(item.payable_amount) > 0 ? 'text-amber-600' : undefined,
         })),
     [counterparties],
-  );
-
-  const reviewItems = useMemo<SearchSelectItem[]>(
-    () => [
-      { value: 'false', label: 'Нет', searchText: 'нет false' },
-      { value: 'true', label: 'Да', searchText: 'да true' },
-    ],
-    [],
   );
 
   const goalItems = useMemo<SearchSelectItem[]>(
@@ -461,11 +449,6 @@ export function TransactionForm({
   const selectedCounterpartyItem = useMemo(
     () => counterpartyItems.find((item) => item.value === selectedCounterpartyId) ?? null,
     [counterpartyItems, selectedCounterpartyId],
-  );
-
-  const selectedReviewItem = useMemo(
-    () => reviewItems.find((item) => item.value === needsReviewValue) ?? null,
-    [reviewItems, needsReviewValue],
   );
 
   const showTransferTarget = mainType === 'transfer';
@@ -636,7 +619,6 @@ export function TransactionForm({
         operation_type: initialData.operation_type,
         description: initialData.description ?? '',
         transaction_date: toDatetimeLocal(initialData.transaction_date),
-        needs_review: String(initialData.needs_review),
       });
 
       setMainType(mapped.mainType);
@@ -651,7 +633,6 @@ export function TransactionForm({
       setTargetAccountQuery(initialTargetAccount?.name ?? '');
       setCategoryQuery(initialCategory?.name ?? '');
       setCounterpartyQuery(initialData.counterparty_name ?? '');
-      setReviewQuery(initialData.needs_review ? 'Да' : 'Нет');
       return;
     }
 
@@ -761,7 +742,6 @@ export function TransactionForm({
           },
         })}
       />
-      <input type="hidden" {...register('needs_review')} />
 
       <div className="grid gap-4 xl:grid-cols-6">
         <SearchSelect
@@ -1123,21 +1103,6 @@ export function TransactionForm({
           {errors.transaction_date ? <p className="mt-1 text-xs text-danger">{errors.transaction_date.message}</p> : null}
         </div>
 
-        <SearchSelect
-          id="tx-review"
-          label="Проверка"
-          placeholder="Выбери"
-          widthClassName="w-full"
-          query={reviewQuery}
-          setQuery={setReviewQuery}
-          items={reviewItems}
-          selectedValue={selectedReviewItem?.value}
-          showAllOnFocus
-          onSelect={(item) => {
-            setValue('needs_review', item.value, { shouldValidate: true, shouldDirty: true });
-            setReviewQuery(item.label);
-          }}
-        />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">

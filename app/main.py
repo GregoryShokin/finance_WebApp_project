@@ -21,6 +21,7 @@ from app.api.v1.metrics import router as metrics_router
 from app.api.v1.counterparties import router as counterparties_router
 from app.api.v1.health import router as health_router
 from app.api.v1.imports import router as imports_router
+from app.api.v1.telegram import router as telegram_router
 from app.api.v1.transactions import router as transactions_router
 from app.api.v1.user_settings import router as user_settings_router
 from app.core.config import settings
@@ -53,6 +54,7 @@ app.include_router(categories_router, prefix=settings.API_V1_PREFIX)
 app.include_router(counterparties_router, prefix=settings.API_V1_PREFIX)
 app.include_router(transactions_router, prefix=settings.API_V1_PREFIX)
 app.include_router(imports_router, prefix=settings.API_V1_PREFIX)
+app.include_router(telegram_router, prefix=settings.API_V1_PREFIX)
 app.include_router(budget_router, prefix=settings.API_V1_PREFIX)
 app.include_router(financial_health_router, prefix=settings.API_V1_PREFIX)
 app.include_router(goals_router, prefix=settings.API_V1_PREFIX)

@@ -4,6 +4,8 @@ import type {
   ImportMappingPayload,
   ImportPreviewResponse,
   ImportPreviewRow,
+  ImportSessionResponse,
+  ImportSessionListItem,
   ImportReviewQueueResponse,
   ImportRowUpdatePayload,
   ImportRowUpdateResponse,
@@ -32,6 +34,20 @@ export function commitImport(sessionId: number, importReadyOnly = true) {
   return apiClient<ImportCommitResponse>(`/imports/${sessionId}/commit`, {
     method: 'POST',
     body: JSON.stringify({ import_ready_only: importReadyOnly }),
+  });
+}
+
+export function getImportSessions() {
+  return apiClient<{ sessions: ImportSessionListItem[]; total: number }>('/imports/sessions');
+}
+
+export function getImportSession(sessionId: number) {
+  return apiClient<ImportSessionResponse>(`/imports/${sessionId}`);
+}
+
+export function deleteImportSession(sessionId: number) {
+  return apiClient<void>(`/imports/${sessionId}`, {
+    method: 'DELETE',
   });
 }
 

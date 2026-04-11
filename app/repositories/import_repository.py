@@ -45,6 +45,25 @@ class ImportRepository:
             .first()
         )
 
+    def list_active_sessions(self, *, user_id: int) -> list[ImportSession]:
+        """
+        Возвращает все сессии пользователя со статусом НЕ 'committed',
+        отсортированные по дате создания (новые сначала).
+        """
+        return (
+            self.db.query(ImportSession)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.status != "committed",
+            )
+            .order_by(ImportSession.created_at.desc())
+            .all()
+        )
+
+    def delete_session(self, session: ImportSession) -> None:
+        self.db.delete(session)
+        self.db.flush()
+
     def update_session(self, session: ImportSession, **updates) -> ImportSession:
         json_fields = {"detected_columns", "parse_settings", "mapping_json", "summary_json"}
         for key, value in updates.items():

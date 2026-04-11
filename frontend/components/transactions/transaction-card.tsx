@@ -86,7 +86,6 @@ export function TransactionCard({
                 </StatusBadge>
                 <StatusBadge>{operationTypeLabels[transaction.operation_type]}</StatusBadge>
                 {priority ? <StatusBadge tone={getPriorityTone(priority)}>{priorityLabels[priority]}</StatusBadge> : null}
-                {transaction.needs_review ? <StatusBadge tone="warning">Требует проверки</StatusBadge> : null}
                 {!transaction.affects_analytics ? <StatusBadge tone="info">Не входит в аналитику</StatusBadge> : null}
               </div>
             </div>
