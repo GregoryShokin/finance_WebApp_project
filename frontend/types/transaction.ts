@@ -26,6 +26,10 @@ export type Transaction = {
   counterparty_id: number | null;
   category_priority?: CategoryPriority | null;
   is_regular: boolean;
+  converted_to_installment: boolean;
+  installment_term_months?: number | null;
+  installment_monthly_payment?: number | null;
+  installment_description?: string | null;
   amount: number;
   credit_principal_amount?: number | null;
   credit_interest_amount?: number | null;

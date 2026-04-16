@@ -176,6 +176,7 @@ class TransactionService:
                 status="active",
             )
             self.db.add(purchase)
+            transaction.converted_to_installment = True
 
         self.db.commit()
         self.db.refresh(transaction)
@@ -320,6 +321,7 @@ class TransactionService:
                 status="active",
             )
             self.db.add(purchase)
+        transaction.converted_to_installment = True
 
     def _upsert_category_rule_from_payload(self, *, user_id: int, payload: dict[str, Any]) -> None:
         category_id = payload.get("category_id")

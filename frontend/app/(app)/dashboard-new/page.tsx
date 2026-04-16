@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import { PageShell } from '@/components/layout/page-shell';
@@ -22,7 +22,9 @@ import {
   computeAvgDailyExpense,
   computeCapital,
   computeDebts,
+  computeInstallments,
   getTransactionYears,
+  getTransactionMonths,
   toNum,
 } from '@/components/dashboard-new/dashboard-data';
 import type { FlowType } from '@/components/dashboard-new/dashboard-data';
@@ -95,6 +97,23 @@ export default function DashboardNewPage() {
     return years;
   }, [transactions]);
 
+  const availableMonths = useMemo(() => {
+    const months = getTransactionMonths(transactions, trendYear);
+    // Always include current month for the current year
+    const cy = now.getFullYear();
+    const cm = now.getMonth();
+    if (trendYear === cy && !months.includes(cm)) months.push(cm);
+    months.sort((a, b) => a - b);
+    return months.length > 0 ? months : [now.getMonth()];
+  }, [transactions, trendYear]);
+
+  // Snap trendMonth to an available month when year changes
+  useEffect(() => {
+    if (availableMonths.length > 0 && !availableMonths.includes(trendMonth)) {
+      setTrendMonth(availableMonths[availableMonths.length - 1]);
+    }
+  }, [availableMonths, trendMonth]);
+
   const installmentCardIds = useMemo(
     () => new Set(accounts.filter((a) => a.account_type === 'installment_card').map((a) => a.id)),
     [accounts],
@@ -147,17 +166,7 @@ export default function DashboardNewPage() {
   );
   const debtsData = useMemo(() => computeDebts(counterparties), [counterparties]);
 
-  const installmentCards = useMemo(
-    () =>
-      accounts
-        .filter((a) => a.account_type === 'installment_card' && Math.abs(toNum(a.balance)) > 0)
-        .map((a) => ({
-          name: a.name,
-          monthlyPayment: toNum(a.monthly_payment),
-          remaining: a.credit_term_remaining ?? null,
-        })),
-    [accounts],
-  );
+  const installmentCards = useMemo(() => computeInstallments(transactions), [transactions]);
 
   return (
     <PageShell
@@ -199,6 +208,7 @@ export default function DashboardNewPage() {
             trendYear={trendYear}
             trendMonth={trendMonth}
             flowType={flowType}
+            availableMonths={availableMonths}
             onTrendYearChange={setTrendYear}
             onTrendMonthChange={setTrendMonth}
             onFlowTypeChange={setFlowType}

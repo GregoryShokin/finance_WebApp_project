@@ -84,6 +84,7 @@ export function computeFlow(transactions: Transaction[]): FlowMetric {
     const amount = toNum(tx.amount);
     if (tx.type === 'income') income += amount;
     if (tx.type === 'expense') {
+      if (tx.converted_to_installment) continue;
       if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') {
         creditPayments += amount;
       } else {
@@ -208,28 +209,28 @@ export function computeMonthProgress(budget: BudgetProgress[]): MonthProgressDat
     (b) => b.category_kind === 'expense' && b.category_priority === 'expense_secondary' && !b.exclude_from_planning,
   );
 
-  const essentialSpent = essentialItems.reduce((s, b) => s + b.spent_amount, 0);
-  const essentialPlanned = essentialItems.reduce((s, b) => s + b.planned_amount, 0);
-  const secondarySpent = secondaryItems.reduce((s, b) => s + b.spent_amount, 0);
-  const secondaryPlanned = secondaryItems.reduce((s, b) => s + b.planned_amount, 0);
+  const essentialSpent = essentialItems.reduce((s, b) => s + Number(b.spent_amount), 0);
+  const essentialPlanned = essentialItems.reduce((s, b) => s + Number(b.planned_amount), 0);
+  const secondarySpent = secondaryItems.reduce((s, b) => s + Number(b.spent_amount), 0);
+  const secondaryPlanned = secondaryItems.reduce((s, b) => s + Number(b.planned_amount), 0);
 
   const essentialPercent = essentialPlanned > 0 ? Math.round((essentialSpent / essentialPlanned) * 100) : 0;
   const secondaryPercent = secondaryPlanned > 0 ? Math.round((secondarySpent / secondaryPlanned) * 100) : 0;
 
   const essentialCategories = essentialItems
-    .filter((b) => b.planned_amount > 0)
-    .sort((a, b) => b.spent_amount - a.spent_amount)
+    .filter((b) => Number(b.planned_amount) > 0)
+    .sort((a, b) => Number(b.spent_amount) - Number(a.spent_amount))
     .slice(0, 4)
-    .map((b) => ({ name: b.category_name, spent: b.spent_amount, planned: b.planned_amount }));
+    .map((b) => ({ name: b.category_name, spent: Number(b.spent_amount), planned: Number(b.planned_amount) }));
 
   let topOverspend: MonthProgressData['topOverspend'] = null;
   const allOverspent = [...essentialItems, ...secondaryItems]
-    .filter((b) => b.spent_amount > b.planned_amount && b.planned_amount > 0)
-    .sort((a, b) => (b.spent_amount - b.planned_amount) - (a.spent_amount - a.planned_amount));
+    .filter((b) => Number(b.spent_amount) > Number(b.planned_amount) && Number(b.planned_amount) > 0)
+    .sort((a, b) => (Number(b.spent_amount) - Number(b.planned_amount)) - (Number(a.spent_amount) - Number(a.planned_amount)));
 
   if (allOverspent.length > 0) {
     const top = allOverspent[0];
-    topOverspend = { name: top.category_name, overage: top.spent_amount - top.planned_amount };
+    topOverspend = { name: top.category_name, overage: Number(top.spent_amount) - Number(top.planned_amount) };
   }
 
   const maxPercent = Math.max(essentialPercent, secondaryPercent);
@@ -299,6 +300,8 @@ export type TrendPoint = {
 
 export type TrendData = {
   points: TrendPoint[];
+  /** Data for the specific selected month (end month) */
+  selected: TrendPoint;
   avgIncome: number;
   avgExpense: number;
   avgCreditPayments: number;
@@ -364,8 +367,9 @@ export function computeTrend(
       bucket.income += amount;
     }
     if (tx.type === 'expense') {
-      // Both flows: exclude installment card expenses
+      // Exclude installment card expenses and purchases converted to installments
       if (installmentCardIds.has(tx.account_id)) continue;
+      if (tx.converted_to_installment) continue;
 
       if (tx.operation_type === 'credit_payment') {
         bucket.creditPayments += amount;
@@ -387,8 +391,11 @@ export function computeTrend(
 
   const forAvg = completed.length > 0 ? completed : points.filter((p) => p.income > 0 || p.expense > 0);
 
+  const selected = points.find((p) => p.key === endKey) ?? points[points.length - 1];
+
   return {
     points,
+    selected,
     avgIncome: mean(forAvg.map((p) => p.income)),
     avgExpense: mean(forAvg.map((p) => p.expense)),
     avgCreditPayments: mean(forAvg.map((p) => p.creditPayments)),
@@ -406,6 +413,18 @@ export function getTransactionYears(transactions: Transaction[]): number[] {
   return [...years].sort((a, b) => b - a);
 }
 
+/** Get 0-indexed months that have transaction data for the given year */
+export function getTransactionMonths(transactions: Transaction[], year: number): number[] {
+  const months = new Set<number>();
+  const prefix = String(year);
+  for (const tx of transactions) {
+    if (!tx.transaction_date.startsWith(prefix)) continue;
+    const m = parseInt(tx.transaction_date.slice(5, 7), 10);
+    if (!isNaN(m)) months.add(m - 1); // 0-indexed
+  }
+  return [...months].sort((a, b) => a - b);
+}
+
 // ── Top Expense Categories ──────────────────────────────────────
 
 export type CategoryStatus = 'spike' | 'drift' | 'normal';
@@ -415,6 +434,7 @@ export type TopExpenseItem = {
   amount: number;
   status: CategoryStatus;
   isRegular: boolean;
+  priority: string | null;
   avgAmount: number;
   deviation: number;
   monthsGrowing: number;
@@ -428,6 +448,7 @@ export function computeTopExpenses(
     (tx) =>
       tx.affects_analytics &&
       tx.type === 'expense' &&
+      !tx.converted_to_installment &&
       tx.operation_type !== 'credit_payment' &&
       tx.operation_type !== 'credit_early_repayment',
   );
@@ -439,7 +460,7 @@ export function computeTopExpenses(
   const currentKey = monthKey(now);
 
   // Group current month by category
-  const grouped = new Map<string, { name: string; amount: number; categoryId: number | null; isRegular: boolean }>();
+  const grouped = new Map<string, { name: string; amount: number; categoryId: number | null; isRegular: boolean; priority: string | null }>();
 
   for (const tx of analytics) {
     const d = new Date(tx.transaction_date);
@@ -456,6 +477,7 @@ export function computeTopExpenses(
         amount: toNum(tx.amount),
         categoryId: tx.category_id,
         isRegular: cat?.regularity === 'regular',
+        priority: cat?.priority ?? null,
       });
     }
   }
@@ -508,6 +530,7 @@ export function computeExpenseTotals(transactions: Transaction[]) {
 
   for (const tx of transactions) {
     if (!tx.affects_analytics || tx.type !== 'expense') continue;
+    if (tx.converted_to_installment) continue;
     if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
     if (txMonthKey(tx) !== key) continue;
     total += toNum(tx.amount);
@@ -558,6 +581,7 @@ export function computeIncomeStructure(
       const amount = toNum(tx.amount);
       if (tx.type === 'income') { income += amount; continue; }
       if (tx.type !== 'expense') continue;
+      if (tx.converted_to_installment) continue;
       if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
       const priority = categoriesById.get(tx.category_id ?? -1)?.priority ?? tx.category_priority ?? null;
       if (priority === 'expense_essential') essential += amount;
@@ -601,6 +625,7 @@ export function computeIncomeStructure(
     }
 
     if (tx.type === 'expense') {
+      if (tx.converted_to_installment) continue;
       if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
       const priority = categoriesById.get(tx.category_id ?? -1)?.priority ?? tx.category_priority ?? null;
       if (priority === 'expense_essential') curEssential += amount;
@@ -629,6 +654,7 @@ export function computeAvgDailyExpense(transactions: Transaction[]) {
     (tx) =>
       tx.affects_analytics &&
       tx.type === 'expense' &&
+      !tx.converted_to_installment &&
       tx.operation_type !== 'credit_payment' &&
       tx.operation_type !== 'credit_early_repayment',
   );
@@ -756,4 +782,33 @@ export function computeDebts(counterparties: Counterparty[]): DebtsData {
     receivables,
     payables,
   };
+}
+
+// ── Installments (from transactions) ──────────────────────────
+
+export type InstallmentItem = {
+  name: string;
+  monthlyPayment: number;
+  remaining: number | null;
+  totalAmount: number;
+};
+
+export function computeInstallments(transactions: Transaction[]): InstallmentItem[] {
+  const now = new Date();
+  return transactions
+    .filter((tx) => tx.converted_to_installment && toNum(tx.installment_monthly_payment) > 0)
+    .map((tx) => {
+      const termMonths = tx.installment_term_months ?? 0;
+      const txDate = new Date(tx.transaction_date);
+      const monthsElapsed =
+        (now.getFullYear() - txDate.getFullYear()) * 12 + (now.getMonth() - txDate.getMonth());
+      const remaining = termMonths > 0 ? Math.max(0, termMonths - monthsElapsed) : null;
+      return {
+        name: tx.installment_description || tx.description || 'Рассрочка',
+        monthlyPayment: toNum(tx.installment_monthly_payment),
+        remaining,
+        totalAmount: toNum(tx.amount),
+      };
+    })
+    .filter((item) => item.remaining === null || item.remaining > 0);
 }
