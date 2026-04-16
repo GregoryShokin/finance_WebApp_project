@@ -1,4 +1,4 @@
-export type AccountType = 'regular' | 'credit' | 'credit_card' | 'cash' | 'broker' | 'deposit';
+export type AccountType = 'regular' | 'credit' | 'credit_card' | 'cash' | 'broker' | 'deposit' | 'installment_card';
 
 export type Account = {
   id: number;

@@ -32,7 +32,7 @@ function daysInMonth(date: Date) {
 export function AvgDailyExpenseWidget({ transactions, isLoading = false }: Props) {
   const avgDailyExpense = useMemo(() => {
     const analyticsExpenses = transactions.filter(
-      (transaction) => transaction.affects_analytics && transaction.type === 'expense',
+      (transaction) => transaction.affects_analytics && transaction.type === 'expense' && transaction.operation_type !== 'credit_payment' && transaction.operation_type !== 'credit_early_repayment',
     );
 
     if (analyticsExpenses.length === 0) {

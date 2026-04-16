@@ -64,6 +64,7 @@ function buildBar(
   const spentAmount = transactions
     .filter((tx) => {
       if (!tx.affects_analytics || tx.type !== 'expense') return false;
+      if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') return false;
       if (!tx.category_id || !categoryIds.has(tx.category_id)) return false;
       const txMonth = tx.transaction_date.slice(0, 7);
       return txMonth === currentMonthKey;

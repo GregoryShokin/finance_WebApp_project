@@ -47,6 +47,7 @@ def create_category(
             name=payload.name,
             kind=payload.kind.value,
             priority=payload.priority.value,
+            regularity=payload.regularity.value,
             is_system=payload.is_system,
         )
     except CategoryValidationError as exc:
@@ -66,6 +67,8 @@ def update_category(
         updates["kind"] = updates["kind"].value
     if "priority" in updates and updates["priority"] is not None:
         updates["priority"] = updates["priority"].value
+    if "regularity" in updates and updates["regularity"] is not None:
+        updates["regularity"] = updates["regularity"].value
 
     try:
         return service.update_category(user_id=current_user.id, category_id=category_id, updates=updates)

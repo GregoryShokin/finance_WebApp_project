@@ -7,6 +7,8 @@ export type CategoryPriority =
   | 'income_active'
   | 'income_passive';
 
+export type CategoryRegularity = 'regular' | 'irregular' | 'project';
+
 export type IncomeType = 'active' | 'passive';
 
 export type Category = {
@@ -19,6 +21,7 @@ export type Category = {
   icon_name: string;
   is_system: boolean;
   exclude_from_planning: boolean;
+  regularity: CategoryRegularity;
   income_type: IncomeType | null;
   created_at: string;
   updated_at: string;
@@ -28,6 +31,7 @@ export type CreateCategoryPayload = {
   name: string;
   kind: CategoryKind;
   priority: CategoryPriority;
+  regularity?: CategoryRegularity;
   is_system?: boolean;
   exclude_from_planning?: boolean;
   income_type?: IncomeType | null;

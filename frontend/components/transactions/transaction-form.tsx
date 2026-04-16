@@ -3,14 +3,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
 import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
 import type { CreateTransactionPayload, Transaction, TransactionKind, TransactionOperationType } from '@/types/transaction';
+import type { CreateInstallmentPurchasePayload } from '@/types/installment-purchase';
 import type { Counterparty } from '@/types/counterparty';
 import type { GoalWithProgress } from '@/types/goal';
+import { getInstallmentPurchases, createInstallmentPurchase, updateInstallmentPurchase } from '@/lib/api/installment-purchases';
 import { operationTypeLabels, transactionTypeLabels } from '@/components/transactions/constants';
 
 type TransactionFormValues = {
@@ -67,10 +70,11 @@ function normalize(value: string) {
 
 
 function isLoanAccount(account: Account) {
-  return account.account_type === 'credit' || (account.is_credit && account.account_type !== 'credit_card');
+  return account.account_type === 'credit' || account.account_type === 'installment_card' || (account.is_credit && account.account_type !== 'credit_card');
 }
 
 function isSelectableTransactionAccount(account: Account) {
+  if (account.account_type === 'installment_card') return true;
   return !isLoanAccount(account);
 }
 
@@ -139,6 +143,7 @@ function mapUiToOperation(mainType: MainTypeValue, investmentDirection: Investme
 function getCreditOperationKindLabel(kind: CreditOperationKind) {
   if (kind === 'disbursement') return 'Получение кредита';
   if (kind === 'payment') return 'Платёж по кредиту';
+  if (kind === 'early_repayment') return 'Досрочное погашение';
   return 'Вид кредитной операции не выбран';
 }
 
@@ -220,7 +225,7 @@ export function TransactionForm({
   counterparties?: Counterparty[];
   goals?: GoalWithProgress[];
   isSubmitting?: boolean;
-  onSubmit: (values: CreateTransactionPayload) => void;
+  onSubmit: (values: CreateTransactionPayload, installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string; existingPurchaseId?: number | null } | null) => void;
   onCancel: () => void;
   onCreateCategoryRequest?: (payload: { name: string; kind: CategoryKind }) => void;
   onCreateAccountRequest?: (payload: { name: string }) => void;
@@ -256,6 +261,13 @@ export function TransactionForm({
   const [creditAccountQuery, setCreditAccountQuery] = useState('');
   const [counterpartyQuery, setCounterpartyQuery] = useState('');
 
+  const [isInstallmentPurchase, setIsInstallmentPurchase] = useState(false);
+  const [installmentTermMonths, setInstallmentTermMonths] = useState('');
+  const [installmentMonthlyPayment, setInstallmentMonthlyPayment] = useState('');
+  const [installmentDescription, setInstallmentDescription] = useState('');
+  const [existingInstallmentPurchaseId, setExistingInstallmentPurchaseId] = useState<number | null>(null);
+  const [installmentSaving, setInstallmentSaving] = useState(false);
+
   const mainTypeItems = useMemo<SearchSelectItem[]>(
     () => [
       { value: 'regular', label: 'Обычный', searchText: 'обычный обычная regular' },
@@ -280,6 +292,7 @@ export function TransactionForm({
     () => [
       { value: 'disbursement', label: 'Получение кредита', searchText: 'получение кредита выдача кредита disbursement' },
       { value: 'payment', label: 'Платёж по кредиту', searchText: 'платеж по кредиту погашение кредита payment' },
+      { value: 'early_repayment', label: 'Досрочное погашение', searchText: 'досрочное погашение early repayment' },
     ],
     [],
   );
@@ -451,6 +464,8 @@ export function TransactionForm({
     goals.length > 0 &&
     (mainType === 'investment' ||
       (showCategory && selectedCategory?.priority === 'expense_target'));
+  const isInstallmentCardAccount = selectedAccount?.account_type === 'installment_card';
+  const showInstallmentSection = isInstallmentCardAccount && mainType === 'regular';
   const hasValidInvestmentDirection = mainType !== 'investment' || Boolean(investmentDirection);
   const hasValidCreditOperationKind = mainType !== 'credit_operation' || Boolean(creditOperationKind);
   const hasValidDebtDirection = mainType !== 'debt' || Boolean(debtDirection);
@@ -612,7 +627,41 @@ export function TransactionForm({
     setTargetAccountQuery('');
     setCategoryQuery('');
     setGoalQuery('');
+    setIsInstallmentPurchase(false);
+    setInstallmentTermMonths('');
+    setInstallmentMonthlyPayment('');
+    setInstallmentDescription('');
+    setExistingInstallmentPurchaseId(null);
   }, [initialData, reset, accounts, categories, mainTypeItems]);
+
+  useEffect(() => {
+    if (!initialData || !isInstallmentCardAccount) {
+      return;
+    }
+    let cancelled = false;
+    getInstallmentPurchases(initialData.account_id).then((res) => {
+      if (cancelled) return;
+      const linked = res.items.find((p) => p.transaction_id === initialData.id);
+      if (linked) {
+        setIsInstallmentPurchase(true);
+        setInstallmentTermMonths(String(linked.term_months));
+        setInstallmentMonthlyPayment(String(linked.monthly_payment));
+        setInstallmentDescription(linked.description);
+        setExistingInstallmentPurchaseId(linked.id);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [initialData, isInstallmentCardAccount]);
+
+  useEffect(() => {
+    if (!showInstallmentSection) {
+      setIsInstallmentPurchase(false);
+      setInstallmentTermMonths('');
+      setInstallmentMonthlyPayment('');
+      setInstallmentDescription('');
+      setExistingInstallmentPurchaseId(null);
+    }
+  }, [showInstallmentSection]);
 
   function handleCreateAccountClick() {
     const name = accountQuery.trim() || 'Новый счёт';
@@ -636,6 +685,18 @@ export function TransactionForm({
       onSubmit={handleSubmit((values) => {
         if (!hasValidDirection) return;
 
+        const txDate = toIso(values.transaction_date);
+        const installmentData = showInstallmentSection && isInstallmentPurchase && installmentTermMonths && installmentMonthlyPayment && installmentDescription.trim()
+          ? {
+              description: installmentDescription.trim(),
+              term_months: Number(installmentTermMonths),
+              monthly_payment: Number(installmentMonthlyPayment),
+              original_amount: Number(values.amount),
+              start_date: txDate.split('T')[0],
+              existingPurchaseId: existingInstallmentPurchaseId,
+            }
+          : null;
+
         onSubmit({
           account_id: Number(values.account_id),
           target_account_id: showTransferTarget && values.target_account_id ? Number(values.target_account_id) : null,
@@ -655,9 +716,9 @@ export function TransactionForm({
           ),
           operation_type: values.operation_type,
           description: values.description.trim() || null,
-          transaction_date: toIso(values.transaction_date),
+          transaction_date: txDate,
           needs_review: false,
-        });
+        }, installmentData);
       })}
     >
       <input type="hidden" {...register('operation_type', { required: true })} />
@@ -996,6 +1057,58 @@ export function TransactionForm({
         </div>
 
       </div>
+
+      {showInstallmentSection ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-4 space-y-3">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <Checkbox
+              checked={isInstallmentPurchase}
+              onChange={(e) => setIsInstallmentPurchase(e.target.checked)}
+              className="text-amber-600 focus:ring-amber-500"
+            />
+            <span className="text-sm font-medium text-slate-700">Куплена в рассрочку</span>
+          </label>
+
+          {isInstallmentPurchase ? (
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <Label htmlFor="tx-installment-description">Что куплено</Label>
+                <Input
+                  id="tx-installment-description"
+                  className="h-9"
+                  placeholder="Телефон, ноутбук..."
+                  value={installmentDescription}
+                  onChange={(e) => setInstallmentDescription(e.target.value)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="tx-installment-term">Срок (мес.)</Label>
+                <Input
+                  id="tx-installment-term"
+                  className="h-9"
+                  type="number"
+                  min="1"
+                  placeholder="12"
+                  value={installmentTermMonths}
+                  onChange={(e) => setInstallmentTermMonths(e.target.value)}
+                />
+              </div>
+              <div>
+                <Label htmlFor="tx-installment-payment">Ежемесячный платёж</Label>
+                <Input
+                  id="tx-installment-payment"
+                  className="h-9"
+                  type="number"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={installmentMonthlyPayment}
+                  onChange={(e) => setInstallmentMonthlyPayment(e.target.value)}
+                />
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div>

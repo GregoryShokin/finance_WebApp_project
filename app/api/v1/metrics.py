@@ -9,8 +9,15 @@ from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.models.user import User
 from app.schemas.metrics import (
+    CapitalMetricResponse,
+    DTIMetricResponse,
     FinancialIndependenceMetricResponse,
+    FlowMetricResponse,
+    HealthRecommendation,
+    HealthSummaryResponse,
     MetricsResponse,
+    MetricsSummaryResponse,
+    ReserveMetricResponse,
     SavingsRateMetricResponse,
 )
 from app.services.metrics_service import MetricsService
@@ -60,4 +67,45 @@ def get_metrics(
             invested=sr.invested,
             total_income=sr.total_income,
         ),
+    )
+
+
+@router.get("/summary", response_model=MetricsSummaryResponse)
+def get_metrics_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns all four metrics (Flow, Capital, DTI, Reserve) plus FI-score."""
+    svc = MetricsService(db)
+    data = svc.calculate_metrics_summary(current_user.id)
+    return MetricsSummaryResponse(
+        flow=FlowMetricResponse(**data["flow"]),
+        capital=CapitalMetricResponse(**data["capital"]),
+        dti=DTIMetricResponse(**data["dti"]),
+        reserve=ReserveMetricResponse(**data["reserve"]),
+        fi_score=data["fi_score"],
+    )
+
+
+@router.get("/health", response_model=HealthSummaryResponse)
+def get_health_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Returns health summary with metrics, FI-score, weakest metric, and recommendations."""
+    svc = MetricsService(db)
+    data = svc.calculate_health_summary(current_user.id)
+    metrics = data["metrics"]
+    return HealthSummaryResponse(
+        metrics=MetricsSummaryResponse(
+            flow=FlowMetricResponse(**metrics["flow"]),
+            capital=CapitalMetricResponse(**metrics["capital"]),
+            dti=DTIMetricResponse(**metrics["dti"]),
+            reserve=ReserveMetricResponse(**metrics["reserve"]),
+            fi_score=metrics["fi_score"],
+        ),
+        fi_score=data["fi_score"],
+        fi_zone=data["fi_zone"],
+        weakest_metric=data["weakest_metric"],
+        recommendations=[HealthRecommendation(**r) for r in data["recommendations"]],
     )

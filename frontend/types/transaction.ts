@@ -25,6 +25,7 @@ export type Transaction = {
   category_id: number | null;
   counterparty_id: number | null;
   category_priority?: CategoryPriority | null;
+  is_regular: boolean;
   amount: number;
   credit_principal_amount?: number | null;
   credit_interest_amount?: number | null;

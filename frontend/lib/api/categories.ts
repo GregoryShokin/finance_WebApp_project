@@ -1,6 +1,6 @@
 
 import { apiClient } from '@/lib/api/client';
-import type { Category, CategoryKind, CategoryPriority, CreateCategoryPayload, UpdateCategoryPayload } from '@/types/category';
+import type { Category, CategoryKind, CategoryPriority, CategoryRegularity, CreateCategoryPayload, UpdateCategoryPayload } from '@/types/category';
 
 export type CategoriesQuery = {
   kind?: CategoryKind | 'all';

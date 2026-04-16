@@ -19,10 +19,17 @@ class CategoryPriority(str, Enum):
     income_passive = "income_passive"
 
 
+class CategoryRegularity(str, Enum):
+    regular = "regular"
+    irregular = "irregular"
+    project = "project"
+
+
 class CategoryCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     kind: CategoryKind
     priority: CategoryPriority
+    regularity: CategoryRegularity = CategoryRegularity.regular
     is_system: bool = False
     exclude_from_planning: bool = False
     income_type: Literal["active", "passive"] | None = None
@@ -32,6 +39,7 @@ class CategoryUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     kind: CategoryKind | None = None
     priority: CategoryPriority | None = None
+    regularity: CategoryRegularity | None = None
     is_system: bool | None = None
     exclude_from_planning: bool | None = None
     income_type: Literal["active", "passive"] | None = None
@@ -49,6 +57,7 @@ class CategoryResponse(BaseModel):
     icon_name: str
     is_system: bool
     exclude_from_planning: bool
+    regularity: CategoryRegularity
     income_type: Literal["active", "passive"] | None
     created_at: datetime
     updated_at: datetime

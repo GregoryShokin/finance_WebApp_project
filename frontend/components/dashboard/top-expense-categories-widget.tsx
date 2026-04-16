@@ -9,6 +9,7 @@ import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils/cn';
 import { formatMoney } from '@/lib/utils/format';
 import { resolveExpandDirection, resolveExpandUp } from '@/lib/utils/widget-expand';
+import type { Account } from '@/types/account';
 import type { Category, CategoryPriority } from '@/types/category';
 import type { Transaction } from '@/types/transaction';
 
@@ -23,7 +24,9 @@ type CategoryType = (typeof CATEGORY_TYPE_OPTIONS)[number]['key'];
 type Props = {
   transactions: Transaction[];
   categories: Category[];
+  accounts?: Account[];
   isLoading?: boolean;
+  className?: string;
 };
 
 type ExpenseItem = {
@@ -124,6 +127,7 @@ function detectCategoryStatus(
       .filter((tx) =>
         tx.affects_analytics &&
         tx.type === 'expense' &&
+        tx.operation_type !== 'credit_payment' && tx.operation_type !== 'credit_early_repayment' &&
         (tx.category_id === categoryId || (categoryId === null && tx.category_id === null)) &&
         monthKey(new Date(tx.transaction_date)) === key,
       )
@@ -202,7 +206,11 @@ function renderTooltip({ active, payload }: TooltipProps<number, string>) {
   );
 }
 
-export function TopExpenseCategoriesWidget({ transactions, categories, isLoading = false }: Props) {
+function toNumber(value: number | string | null | undefined) {
+  return Number(value ?? 0);
+}
+
+export function TopExpenseCategoriesWidget({ transactions, categories, accounts = [], isLoading = false, className }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
   const [categoryType, setCategoryType] = useState<CategoryType>('essential');
@@ -247,7 +255,7 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
 
   const metrics = useMemo<Metrics | null>(() => {
     const analyticsExpenses = transactions.filter(
-      (transaction) => transaction.affects_analytics && transaction.type === 'expense',
+      (transaction) => transaction.affects_analytics && transaction.type === 'expense' && transaction.operation_type !== 'credit_payment' && transaction.operation_type !== 'credit_early_repayment',
     );
     if (analyticsExpenses.length === 0) return null;
 
@@ -369,6 +377,47 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
   }, [metrics, selectedYear, selectedMonthKey]);
 
   const monthsForSelectedYear = (metrics?.monthOptions ?? []).filter((option) => option.year === selectedYear);
+
+  const activeInstallmentCards = useMemo(
+    () =>
+      accounts.filter(
+        (account) =>
+          account.account_type === 'installment_card' &&
+          Math.abs(toNumber(account.balance)) > 0,
+      ),
+    [accounts],
+  );
+
+  function renderInstallmentAnnotation() {
+    if (activeInstallmentCards.length === 0) return null;
+
+    return (
+      <div className="mt-4 rounded-xl border border-orange-200 bg-orange-50 px-3.5 py-2.5">
+        <div className="mb-1 flex items-center gap-1.5">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#EA580C" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span className="text-xs font-semibold text-orange-900">Рассрочки</span>
+        </div>
+        <div className="space-y-0.5">
+          {activeInstallmentCards.map((card) => {
+            const monthly = toNumber(card.monthly_payment);
+            const remaining = card.credit_term_remaining;
+            const parts: string[] = [card.name];
+            if (monthly > 0) parts.push(`${formatMoney(monthly)}/мес`);
+            if (remaining != null && remaining > 0) parts.push(`(ещё ${remaining} мес)`);
+            return (
+              <p key={card.id} className="text-xs text-orange-950">
+                {parts.join(': ')}
+              </p>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
 
   function handleToggle() {
     if (!isExpanded && cardRef.current) {
@@ -606,6 +655,7 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
       <>
         {renderHeader()}
         {renderCollapsedList()}
+        {renderInstallmentAnnotation()}
       </>
     );
   }
@@ -613,7 +663,7 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
   return (
     <div
       ref={wrapperRef}
-      className="relative self-start overflow-visible"
+      className={`relative self-start overflow-visible${className ? ` ${className}` : ''}`}
       style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
     >
       {isExpanded ? (
@@ -657,6 +707,7 @@ export function TopExpenseCategoriesWidget({ transactions, categories, isLoading
           <>
             {renderExpandedControls()}
             {renderExpandedChart()}
+            {renderInstallmentAnnotation()}
           </>
         ) : null}
       </Card>

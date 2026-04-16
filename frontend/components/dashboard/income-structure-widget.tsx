@@ -204,6 +204,7 @@ export function IncomeStructureWidget({ transactions, categories, isLoading = fa
       }
 
       if (transaction.type !== 'expense') continue;
+      if (transaction.operation_type === 'credit_payment' || transaction.operation_type === 'credit_early_repayment') continue;
 
       const priority = categoriesById.get(transaction.category_id ?? -1)?.priority ?? transaction.category_priority ?? null;
       if (priority === 'expense_essential') {

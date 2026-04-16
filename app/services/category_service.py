@@ -37,7 +37,7 @@ class CategoryService:
     def list_categories(self, *, user_id: int, kind: str | None = None, priority: str | None = None, search: str | None = None) -> list[Category]:
         return self.repo.list(user_id=user_id, kind=kind, priority=priority, search=search)
 
-    def create_category(self, *, user_id: int, name: str, kind: str, priority: str, color: str | None = None, icon_name: str | None = None, is_system: bool = False) -> Category:
+    def create_category(self, *, user_id: int, name: str, kind: str, priority: str, regularity: str = "regular", color: str | None = None, icon_name: str | None = None, is_system: bool = False) -> Category:
         validate_category_priority(kind, priority)
         selected_color = color or resolve_next_category_color(self.repo.list_used_colors(user_id=user_id))
         selected_icon_name = (icon_name or resolve_category_icon_name(name)).strip() or 'tag'
@@ -46,6 +46,7 @@ class CategoryService:
             name=name,
             kind=kind,
             priority=priority,
+            regularity=regularity,
             color=selected_color,
             icon_name=selected_icon_name,
             is_system=is_system,

@@ -7,12 +7,13 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
-import type { Category, CategoryKind, CategoryPriority, CreateCategoryPayload } from '@/types/category';
+import type { Category, CategoryKind, CategoryPriority, CategoryRegularity, CreateCategoryPayload } from '@/types/category';
 
 type CategoryFormValues = {
   name: string;
   kind: CategoryKind;
   priority: CategoryPriority;
+  regularity: CategoryRegularity;
   exclude_from_planning: boolean;
 };
 
@@ -20,8 +21,15 @@ const defaultValues: CategoryFormValues = {
   name: '',
   kind: 'expense',
   priority: 'expense_essential',
+  regularity: 'regular',
   exclude_from_planning: false,
 };
+
+const regularityOptions: { value: CategoryRegularity; label: string }[] = [
+  { value: 'regular', label: 'Регулярная' },
+  { value: 'irregular', label: 'Нерегулярная' },
+  { value: 'project', label: 'Проект' },
+];
 
 const expenseOptions: { value: CategoryPriority; label: string }[] = [
   { value: 'expense_essential', label: 'Основной' },
@@ -81,6 +89,7 @@ export function CategoryForm({
         name: initialData.name,
         kind: initialData.kind,
         priority: initialData.priority,
+        regularity: initialData.regularity ?? 'regular',
         exclude_from_planning: initialData.exclude_from_planning ?? false,
       });
       return;
@@ -93,6 +102,7 @@ export function CategoryForm({
       priority:
         initialValues?.priority ??
         (initialValues?.kind === 'income' ? 'income_active' : 'expense_essential'),
+      regularity: initialValues?.regularity ?? 'regular',
       exclude_from_planning: initialValues?.exclude_from_planning ?? false,
     });
   }, [initialData, initialValues, reset]);
@@ -105,6 +115,7 @@ export function CategoryForm({
           name: values.name,
           kind: values.kind,
           priority: values.priority,
+          regularity: values.regularity,
           exclude_from_planning: values.exclude_from_planning,
         };
         onSubmit(payload);
@@ -142,6 +153,17 @@ export function CategoryForm({
             ))}
           </Select>
         </div>
+      </div>
+
+      <div>
+        <Label htmlFor="category-regularity">Регулярность</Label>
+        <Select id="category-regularity" {...register('regularity')}>
+          {regularityOptions.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+        </Select>
       </div>
 
       <div className="flex items-center gap-2">

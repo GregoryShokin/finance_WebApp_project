@@ -94,10 +94,15 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
 
     const creditAccounts = accounts.filter((account) => account.account_type === 'credit');
     const creditCards = accounts
-      .filter((account) => account.account_type === 'credit_card')
+      .filter((account) => account.account_type === 'credit_card' || account.account_type === 'installment_card')
       .map((account) => {
         const limit = toNumber(account.credit_limit_original);
-        const used = account.credit_limit_original != null ? Math.max(0, limit - toNumber(account.balance)) : 0;
+        const balance = toNumber(account.balance);
+        // For negative balance (debt, e.g. installment cards like Яндекс.Сплит): used = abs(balance)
+        // For positive balance (available credit on credit cards): used = limit - balance
+        const used = account.credit_limit_original != null
+          ? (balance < 0 ? Math.abs(balance) : Math.max(0, limit - balance))
+          : 0;
         const utilization = limit > 0 ? (used / limit) * 100 : 0;
         return {
           ...account,
@@ -204,7 +209,7 @@ export function CreditsWidget({ accounts, transactions, health, isLoading = fals
 
             {metrics.creditCards.length > 0 ? (
               <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Кредитные карты</p>
+                <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Кредитные карты и рассрочки</p>
                 <div className="mt-3 space-y-3">
                   {metrics.creditCards.map((card) => (
                     <div key={card.id} className="rounded-2xl bg-slate-50 px-4 py-3">

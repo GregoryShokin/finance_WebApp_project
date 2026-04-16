@@ -116,9 +116,11 @@ class FinancialHealthService:
             monthly_totals.get(window.key, {"income": ZERO, "expense": ZERO})["income"]
             for window in tracked_windows
         ]) if tracked_windows else ZERO
+        prev_month_window = self._last_completed_month_windows(today, count=1)
         dti_total_payments = self._calc_dti_payments(
             active_accounts=active_accounts,
             transactions=transactions,
+            prev_month_window=prev_month_window[0] if prev_month_window else None,
         )
         dti = self._percent(dti_total_payments, average_income)
         dti_zone = self._dti_zone(dti)
@@ -662,23 +664,50 @@ class FinancialHealthService:
         *,
         active_accounts: list[Account],
         transactions: list[Transaction],
+        prev_month_window: MonthWindow | None = None,
     ) -> Decimal:
         """
-        Р В Р Р‹Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°Р РЋР вЂљР В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В Р’ВµР В Р’В¶Р В Р’ВµР В РЎВР В Р’ВµР РЋР С“Р РЋР РЏР РЋРІР‚РЋР В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂ”Р В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋРІР‚ВР В Р’В¶ Р В РЎвЂ”Р В РЎвЂў Р В РЎвЂќР РЋР вЂљР В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’В°Р В РЎВ Р В РўвЂР В Р’В»Р РЋР РЏ DTI.
+        Calculate monthly credit payments for DTI.
 
-        Р В РІР‚СњР В Р’В»Р РЋР РЏ Р В РЎвЂќР В Р’В°Р В Р’В¶Р В РўвЂР В РЎвЂўР В РЎвЂ“Р В РЎвЂў Р В РЎвЂќР РЋР вЂљР В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р вЂ¦Р В РЎвЂўР В РЎвЂ“Р В РЎвЂў Р РЋР С“Р РЋРІР‚РЋР РЋРІР‚ВР РЋРІР‚С™Р В Р’В°:
-        1. Р В РЎСџР В РЎвЂўР РЋР С“Р В Р’В»Р В Р’ВµР В РўвЂР В Р вЂ¦Р В РЎвЂР В РІвЂћвЂ“ Р РЋРІР‚С›Р В Р’В°Р В РЎвЂќР РЋРІР‚С™Р В РЎвЂР РЋРІР‚РЋР В Р’ВµР РЋР С“Р В РЎвЂќР В РЎвЂР В РІвЂћвЂ“ credit_payment Р В РЎвЂР В Р’В· Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РІвЂћвЂ“
-        2. Р В РІР‚СћР РЋР С“Р В Р’В»Р В РЎвЂ Р В Р’ВµР В РЎвЂ“Р В РЎвЂў Р В Р вЂ¦Р В Р’ВµР РЋРІР‚С™ Р Р†Р вЂљРІР‚Сњ monthly_payment Р В Р вЂ  Р В РЎвЂќР В Р’В°Р РЋР вЂљР РЋРІР‚С™Р В РЎвЂўР РЋРІР‚РЋР В РЎвЂќР В Р’Вµ Р РЋР С“Р РЋРІР‚РЋР РЋРІР‚ВР РЋРІР‚С™Р В Р’В°
-        3. Р В РІР‚СћР РЋР С“Р В Р’В»Р В РЎвЂ Р В Р вЂ¦Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂ Р В Р’ВµР В РЎвЂ“Р В РЎвЂў Р Р†Р вЂљРІР‚Сњ 0
+        Priority per credit account:
+        1. Sum of credit_payment transactions from the previous completed month
+        2. Fallback: most recent credit_payment from all history
+        3. Fallback: account.monthly_payment field
         """
+        credit_account_ids = set()
+        for account in active_accounts:
+            is_credit = (
+                account.account_type in {"credit", "credit_card", "installment_card"}
+                or bool(account.is_credit)
+            )
+            if is_credit:
+                credit_account_ids.add(account.id)
+
+        # Collect credit_payments from the previous completed month
+        prev_month_payment_by_account: dict[int, Decimal] = {}
+        if prev_month_window:
+            for transaction in transactions:
+                if transaction.operation_type != "credit_payment":
+                    continue
+                account_id = transaction.credit_account_id or transaction.target_account_id
+                if account_id is None or account_id not in credit_account_ids:
+                    continue
+                tx_date = transaction.transaction_date
+                tx_d = tx_date.date() if hasattr(tx_date, 'date') and callable(tx_date.date) else tx_date
+                if prev_month_window.month_start <= tx_d <= prev_month_window.month_end:
+                    prev_month_payment_by_account[account_id] = (
+                        prev_month_payment_by_account.get(account_id, ZERO)
+                        + self._to_decimal(transaction.amount)
+                    )
+
+        # Fallback: most recent credit_payment per account (across all history)
         last_payment_by_account: dict[int, Decimal] = {}
         last_payment_date_by_account: dict[int, datetime] = {}
-
         for transaction in transactions:
             if transaction.operation_type != "credit_payment":
                 continue
             account_id = transaction.credit_account_id or transaction.target_account_id
-            if account_id is None:
+            if account_id is None or account_id not in credit_account_ids:
                 continue
             tx_date = transaction.transaction_date
             existing_date = last_payment_date_by_account.get(account_id)
@@ -688,14 +717,13 @@ class FinancialHealthService:
 
         total = ZERO
         for account in active_accounts:
-            is_credit_account = (
-                account.account_type in {"credit", "credit_card"}
-                or bool(account.is_credit)
-            )
-            if not is_credit_account:
+            if account.id not in credit_account_ids:
                 continue
 
-            payment = last_payment_by_account.get(account.id)
+            # Priority: prev month -> latest historical -> account fallback
+            payment = prev_month_payment_by_account.get(account.id)
+            if payment is None or payment == ZERO:
+                payment = last_payment_by_account.get(account.id)
             if payment is None or payment == ZERO:
                 fallback = getattr(account, "monthly_payment", None)
                 if fallback is not None:

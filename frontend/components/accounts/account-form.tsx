@@ -61,6 +61,7 @@ export function AccountForm({
       { value: 'credit_card', label: 'Кредитная карта', searchText: 'кредитная карта credit card лимит' },
       { value: 'credit', label: 'Кредит', searchText: 'кредит кредитный счет loan credit' },
       { value: 'deposit', label: 'Вклад', searchText: 'вклад депозит deposit проценты' },
+      { value: 'installment_card', label: 'Карта рассрочки', searchText: 'рассрочка халва сплит installment карта' },
     ],
     [],
   );
@@ -124,6 +125,7 @@ export function AccountForm({
   const isCredit = accountType === 'credit';
   const isCreditCard = accountType === 'credit_card';
   const isDeposit = accountType === 'deposit';
+  const isInstallmentCard = accountType === 'installment_card';
 
   return (
     <form
@@ -134,11 +136,11 @@ export function AccountForm({
           account_type: accountType,
           is_credit: isCredit,
           balance: isCredit ? 0 : Number(values.balance),
-          credit_limit_original: isCredit || isCreditCard ? Number(values.credit_limit_original) : null,
-          credit_current_amount: isCredit ? Number(values.credit_current_amount) : null,
-          credit_interest_rate: isCredit ? Number(values.credit_interest_rate) : null,
+          credit_limit_original: isCredit || isCreditCard || isInstallmentCard ? Number(values.credit_limit_original) : null,
+          credit_current_amount: isCredit || isInstallmentCard ? Number(values.credit_current_amount) : null,
+          credit_interest_rate: isCredit || isInstallmentCard ? Number(values.credit_interest_rate) : null,
           credit_term_remaining: isCredit ? Number(values.credit_term_remaining) : null,
-          monthly_payment: isCredit || isCreditCard ? (values.monthly_payment || null) : null,
+          monthly_payment: isCredit || isCreditCard || isInstallmentCard ? (values.monthly_payment || null) : null,
           deposit_interest_rate: isDeposit ? (values.deposit_interest_rate || null) : null,
           deposit_open_date: isDeposit ? (values.deposit_open_date || null) : null,
           deposit_close_date: isDeposit ? (values.deposit_close_date || null) : null,
@@ -199,7 +201,7 @@ export function AccountForm({
           {errors.currency ? <p className="mt-1 text-sm text-danger">{errors.currency.message}</p> : null}
         </div>
 
-        {!isCredit && !isCreditCard ? (
+        {!isCredit && !isCreditCard && !isInstallmentCard ? (
           <div>
             <Label htmlFor="account-balance">Баланс</Label>
             <Input
@@ -289,7 +291,25 @@ export function AccountForm({
         </div>
       ) : null}
 
-      {isCredit || isCreditCard ? (
+      {isInstallmentCard ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <Label htmlFor="installment-limit">Лимит</Label>
+            <Input id="installment-limit" type="number" step="0.01" placeholder="0" {...register('credit_limit_original', { valueAsNumber: true, required: 'Укажи лимит карты' })} />
+            {errors.credit_limit_original ? <p className="mt-1 text-sm text-danger">{errors.credit_limit_original.message}</p> : null}
+          </div>
+          <div>
+            <Label htmlFor="installment-debt">Текущий долг</Label>
+            <Input id="installment-debt" type="number" step="0.01" placeholder="0" {...register('credit_current_amount', { valueAsNumber: true })} />
+          </div>
+          <div>
+            <Label htmlFor="installment-rate">Ставка, %</Label>
+            <Input id="installment-rate" type="number" step="0.001" placeholder="0" {...register('credit_interest_rate', { valueAsNumber: true })} />
+          </div>
+        </div>
+      ) : null}
+
+      {isCredit || isCreditCard || isInstallmentCard ? (
         <div>
           <Label htmlFor="monthly-payment">Ежемесячный платёж</Label>
           <Input

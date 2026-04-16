@@ -1,6 +1,5 @@
 ﻿'use client';
 
-import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import { AvgDailyExpenseWidget } from '@/components/dashboard/avg-daily-expense-widget';
@@ -10,7 +9,6 @@ import { CreditsWidget } from '@/components/dashboard/credits-widget';
 import { DebtsWidget } from '@/components/dashboard/debts-widget';
 import { FreeNetCapitalWidget } from '@/components/dashboard/free-net-capital-widget';
 import { IncomeStructureWidget } from '@/components/dashboard/income-structure-widget';
-import { MonthlyAvgBalanceCard } from '@/components/dashboard/monthly-avg-balance-card';
 import { SafetyBufferWidget } from '@/components/dashboard/safety-buffer-widget';
 import { SixMonthTrendChartCard } from '@/components/dashboard/six-month-trend-chart-card';
 import { SixMonthTrendWidget } from '@/components/dashboard/six-month-trend-widget';
@@ -25,10 +23,8 @@ import { getGoals } from '@/lib/api/goals';
 import { getRealAssets } from '@/lib/api/real-assets';
 import { getTransactions } from '@/lib/api/transactions';
 import { useFinancialHealth } from '@/hooks/use-financial-health';
-import { FI_SCORE_WIDGET_EVENT } from '@/components/planning/fi-score-widget';
 
 export default function DashboardPage() {
-  const [activeCard, setActiveCard] = useState<string | null>(null);
   const currentDate = new Date();
   const currentMonth = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-01`;
   const healthQuery = useFinancialHealth();
@@ -65,27 +61,6 @@ export default function DashboardPage() {
       transactionsQuery.error,
   );
 
-  useEffect(() => {
-    function handleFiScoreWidget(event: Event) {
-      const customEvent = event as CustomEvent<{ source?: string; open?: boolean }>;
-      if (customEvent.detail?.source !== 'dashboard-card' && customEvent.detail?.open) {
-        setActiveCard(null);
-      }
-    }
-
-    document.addEventListener(FI_SCORE_WIDGET_EVENT, handleFiScoreWidget as EventListener);
-    return () => document.removeEventListener(FI_SCORE_WIDGET_EVENT, handleFiScoreWidget as EventListener);
-  }, []);
-
-  const toggle = (key: string) => {
-    document.dispatchEvent(
-      new CustomEvent(FI_SCORE_WIDGET_EVENT, {
-        detail: { source: 'dashboard-card', open: true },
-      }),
-    );
-    setActiveCard((current) => (current === key ? null : key));
-  };
-
   return (
     <PageShell
       title="Дашборд"
@@ -106,21 +81,14 @@ export default function DashboardPage() {
 
       {!isLoading && !isError && health ? (
         <>
+          {/* ── Деньги месяца ── */}
           <section className="space-y-4">
             <div>
               <h3 className="text-lg font-semibold text-slate-950">Деньги месяца</h3>
               <p className="mt-1 text-sm text-slate-500">Текущая динамика доходов, расходов и качества накоплений.</p>
             </div>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <AvailableFinancesWidget accounts={accountsQuery.data ?? []} isLoading={accountsQuery.isLoading} />
-              <MonthlyAvgBalanceCard
-                health={health}
-                transactions={transactionsQuery.data ?? []}
-                categories={categoriesQuery.data ?? []}
-                goals={goalsQuery.data ?? []}
-                isExpanded={activeCard === 'avgBalance'}
-                onToggle={() => toggle('avgBalance')}
-              />
               <FreeNetCapitalWidget
                 budgetProgress={budgetQuery.data ?? []}
                 transactions={transactionsQuery.data ?? []}
@@ -130,6 +98,7 @@ export default function DashboardPage() {
             </div>
           </section>
 
+          {/* ── Аналитика ── */}
           <section className="space-y-4">
             <div>
               <h3 className="text-lg font-semibold text-slate-950">Аналитика</h3>
@@ -140,20 +109,25 @@ export default function DashboardPage() {
               <SixMonthTrendChartCard transactions={transactionsQuery.data ?? []} isLoading={transactionsQuery.isLoading} />
             </div>
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 xl:items-start">
-              <IncomeStructureWidget
-                transactions={transactionsQuery.data ?? []}
-                categories={categoriesQuery.data ?? []}
-                isLoading={transactionsQuery.isLoading || categoriesQuery.isLoading}
-              />
               <TopExpenseCategoriesWidget
                 transactions={transactionsQuery.data ?? []}
                 categories={categoriesQuery.data ?? []}
+                accounts={accountsQuery.data ?? []}
                 isLoading={transactionsQuery.isLoading || categoriesQuery.isLoading}
+                className="xl:col-span-2"
               />
-              <AvgDailyExpenseWidget transactions={transactionsQuery.data ?? []} isLoading={transactionsQuery.isLoading} />
+              <div className="space-y-4">
+                <IncomeStructureWidget
+                  transactions={transactionsQuery.data ?? []}
+                  categories={categoriesQuery.data ?? []}
+                  isLoading={transactionsQuery.isLoading || categoriesQuery.isLoading}
+                />
+                <AvgDailyExpenseWidget transactions={transactionsQuery.data ?? []} isLoading={transactionsQuery.isLoading} />
+              </div>
             </div>
           </section>
 
+          {/* ── Капитал и долги ── */}
           <section className="space-y-4">
             <div>
               <h3 className="text-lg font-semibold text-slate-950">Капитал и долги</h3>
@@ -165,18 +139,21 @@ export default function DashboardPage() {
                 realAssets={realAssetsQuery.data ?? []}
                 health={health}
                 isLoading={accountsQuery.isLoading || realAssetsQuery.isLoading}
+                className="xl:col-span-2"
               />
-              <DebtsWidget
-                counterparties={counterpartiesQuery.data ?? []}
-                health={health}
-                isLoading={counterpartiesQuery.isLoading}
-              />
-              <CreditsWidget
-                accounts={accountsQuery.data ?? []}
-                transactions={transactionsQuery.data ?? []}
-                health={health}
-                isLoading={accountsQuery.isLoading || transactionsQuery.isLoading}
-              />
+              <div className="space-y-4">
+                <DebtsWidget
+                  counterparties={counterpartiesQuery.data ?? []}
+                  health={health}
+                  isLoading={counterpartiesQuery.isLoading}
+                />
+                <CreditsWidget
+                  accounts={accountsQuery.data ?? []}
+                  transactions={transactionsQuery.data ?? []}
+                  health={health}
+                  isLoading={accountsQuery.isLoading || transactionsQuery.isLoading}
+                />
+              </div>
             </div>
           </section>
         </>

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
 from app.models.account import Account
+from app.models.transaction import Transaction as TransactionModel
 from app.repositories.account_repository import AccountRepository
 
 
@@ -42,6 +44,14 @@ class AccountService:
                 data["balance"] = Decimal(str(data["balance"]))
             data["credit_current_amount"] = None
             data["credit_interest_rate"] = None
+            data["credit_term_remaining"] = None
+            data["deposit_interest_rate"] = None
+            data["deposit_open_date"] = None
+            data["deposit_close_date"] = None
+            data["deposit_capitalization_period"] = None
+        elif account_type == "installment_card":
+            data["is_credit"] = False
+            data["balance"] = Decimal("0")
             data["credit_term_remaining"] = None
             data["deposit_interest_rate"] = None
             data["deposit_open_date"] = None
@@ -89,3 +99,38 @@ class AccountService:
 
     def delete(self, *, account_id: int, user_id: int) -> None:
         self.repo.delete(self.get(account_id=account_id, user_id=user_id))
+
+    def adjust_balance(
+        self,
+        *,
+        account_id: int,
+        user_id: int,
+        target_balance: Decimal,
+        comment: str | None = None,
+    ) -> TransactionModel:
+        account = self.get(account_id=account_id, user_id=user_id)
+        delta = target_balance - account.balance
+        if delta == 0:
+            raise ValueError("Баланс уже равен указанному значению.")
+
+        tx_type = "income" if delta > 0 else "expense"
+        amount = abs(delta)
+        description = comment or f"Корректировка баланса: {float(account.balance):+.2f} → {float(target_balance):+.2f}"
+
+        tx = TransactionModel(
+            user_id=user_id,
+            account_id=account.id,
+            amount=amount,
+            currency=account.currency,
+            type=tx_type,
+            operation_type="adjustment",
+            description=description,
+            transaction_date=datetime.now(timezone.utc),
+            affects_analytics=False,
+        )
+        self.repo.db.add(tx)
+        account.balance = target_balance
+        self.repo.db.add(account)
+        self.repo.db.commit()
+        self.repo.db.refresh(tx)
+        return tx

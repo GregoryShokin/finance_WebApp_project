@@ -44,6 +44,11 @@ class TransactionCreateRequest(BaseModel):
     transaction_date: datetime
     needs_review: bool = False
 
+    # Installment purchase fields (only used when account type is installment_card)
+    installment_term_months: int | None = Field(default=None, ge=1, le=120)
+    installment_monthly_payment: Decimal | None = Field(default=None, ge=0)
+    installment_description: str | None = Field(default=None, max_length=255)
+
     @model_validator(mode="after")
     def validate_credit_payment(self):
         if self.operation_type in {
@@ -79,10 +84,14 @@ class TransactionUpdateRequest(BaseModel):
     type: TransactionType | None = None
     operation_type: TransactionOperationType | None = None
     debt_direction: str | None = Field(default=None, pattern="^(lent|borrowed|repaid|collected)?$")
-    debt_direction: str | None = Field(default=None, pattern="^(lent|borrowed|repaid|collected)?$")
     description: str | None = Field(default=None, max_length=500)
     transaction_date: datetime | None = None
     needs_review: bool | None = None
+
+    # Installment purchase fields (only used when account type is installment_card)
+    installment_term_months: int | None = Field(default=None, ge=1, le=120)
+    installment_monthly_payment: Decimal | None = Field(default=None, ge=0)
+    installment_description: str | None = Field(default=None, max_length=255)
 
 
 class TransactionSplitItemRequest(BaseModel):
@@ -132,5 +141,11 @@ class TransactionResponse(BaseModel):
     transaction_date: datetime
     needs_review: bool
     affects_analytics: bool
+    is_regular: bool
+    converted_to_installment: bool
+    # Installment purchase data (populated from linked InstallmentPurchase)
+    installment_term_months: int | None = None
+    installment_monthly_payment: Decimal | None = None
+    installment_description: str | None = None
     created_at: datetime
     updated_at: datetime

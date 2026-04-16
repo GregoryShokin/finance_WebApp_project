@@ -23,6 +23,12 @@ class CategoryPriority(str, Enum):
     income_passive = "income_passive"
 
 
+class CategoryRegularity(str, Enum):
+    regular = "regular"
+    irregular = "irregular"
+    project = "project"
+
+
 class Category(Base):
     __tablename__ = "categories"
 
@@ -62,6 +68,13 @@ class Category(Base):
         server_default="false",
     )
     income_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    regularity: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=CategoryRegularity.regular.value,
+        server_default=CategoryRegularity.regular.value,
+        index=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

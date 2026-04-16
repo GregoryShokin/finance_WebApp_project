@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.models.user import User
-from app.schemas.account import AccountCreateRequest, AccountResponse, AccountUpdateRequest
+from app.schemas.account import AccountCreateRequest, AccountResponse, AccountUpdateRequest, BalanceAdjustRequest
 from app.services.account_service import AccountNotFoundError, AccountService
 
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
@@ -51,3 +51,24 @@ def delete_account(account_id: int, db: Session = Depends(get_db), current_user:
         AccountService(db).delete(account_id=account_id, user_id=current_user.id)
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/{account_id}/adjust", status_code=status.HTTP_200_OK)
+def adjust_account_balance(
+    account_id: int,
+    payload: BalanceAdjustRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        AccountService(db).adjust_balance(
+            account_id=account_id,
+            user_id=current_user.id,
+            target_balance=payload.target_balance,
+            comment=payload.comment,
+        )
+        return {"ok": True}
+    except AccountNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

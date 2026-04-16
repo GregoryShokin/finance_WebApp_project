@@ -76,13 +76,13 @@ export function SixMonthTrendWidget({ transactions, isLoading = false }: Props) 
   const monthsForSelectedYear = (metrics?.availableMonthOptions ?? []).filter((option) => option.year === selectedYear);
   const selectedMonthPoint = metrics?.chartData.find((point) => point.key === selectedMonthKey);
   const selectedMonthTotals = selectedMonthPoint
-    ? { income: selectedMonthPoint.income, expense: selectedMonthPoint.expense, balance: selectedMonthPoint.balance }
+    ? { income: selectedMonthPoint.income, expense: selectedMonthPoint.expense, creditPayments: selectedMonthPoint.creditPayments, balance: selectedMonthPoint.balance }
     : buildTotals(0, 0);
   const activeTotals = viewMode === 'month' ? selectedMonthTotals : metrics?.sixMonthAverageTotals ?? buildTotals(0, 0);
   const activeSlices = viewMode === 'month'
-    ? normalizeSlices(selectedMonthTotals.income, selectedMonthTotals.expense, selectedMonthTotals.balance)
+    ? normalizeSlices(selectedMonthTotals.income, selectedMonthTotals.expense, selectedMonthTotals.creditPayments, selectedMonthTotals.balance)
     : metrics
-      ? normalizeSlices(metrics.sixMonthAverageTotals.income, metrics.sixMonthAverageTotals.expense, metrics.sixMonthAverageTotals.balance)
+      ? normalizeSlices(metrics.sixMonthAverageTotals.income, metrics.sixMonthAverageTotals.expense, metrics.sixMonthAverageTotals.creditPayments, metrics.sixMonthAverageTotals.balance)
       : [];
 
   function renderControls() {
@@ -145,19 +145,30 @@ export function SixMonthTrendWidget({ transactions, isLoading = false }: Props) 
 
   function renderValueBlocks() {
     return (
-      <div className="mt-4 grid gap-2 sm:grid-cols-3">
-        <div className="rounded-2xl bg-slate-50 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-cyan-500">Доходы</p>
-          <MoneyAmount value={activeTotals.income} tone="income" className="mt-2 text-base" />
+      <div className="mt-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="size-2.5 shrink-0 rounded-full bg-cyan-500" />
+          <div>
+            <p className="text-xs text-slate-500">Доходы</p>
+            <p className="text-sm font-bold text-cyan-600">{formatMoney(activeTotals.income)}</p>
+          </div>
         </div>
-        <div className="rounded-2xl bg-slate-50 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-rose-500">Расходы</p>
-          <MoneyAmount value={activeTotals.expense} tone="expense" className="mt-2 text-base" />
+        <div className="flex items-center gap-2">
+          <span className="size-2.5 shrink-0 rounded-full bg-rose-500" />
+          <div>
+            <p className="text-xs text-slate-500">Расходы</p>
+            <p className="text-sm font-bold text-rose-600">{formatMoney(activeTotals.expense)}</p>
+          </div>
         </div>
-        <div className="rounded-2xl bg-slate-50 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-amber-500">Остаток</p>
-          <MoneyAmount value={activeTotals.balance} tone={activeTotals.balance >= 0 ? 'income' : 'expense'} className="mt-2 text-base" />
-        </div>
+        {activeTotals.creditPayments > 0 ? (
+          <div className="flex items-center gap-2">
+            <span className="size-2.5 shrink-0 rounded-full bg-slate-400" />
+            <div>
+              <p className="text-xs text-slate-500">Кредиты</p>
+              <p className="text-sm font-bold text-slate-500">{formatMoney(activeTotals.creditPayments)}</p>
+            </div>
+          </div>
+        ) : null}
       </div>
     );
   }

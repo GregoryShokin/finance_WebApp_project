@@ -24,3 +24,10 @@ export function deleteAccount(accountId: number) {
     method: 'DELETE',
   });
 }
+
+export function adjustAccountBalance(accountId: number, targetBalance: number, comment?: string) {
+  return apiClient<{ ok: boolean }>(`/accounts/${accountId}/adjust`, {
+    method: 'POST',
+    body: JSON.stringify({ target_balance: targetBalance, comment: comment ?? null }),
+  });
+}

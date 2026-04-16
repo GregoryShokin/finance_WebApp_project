@@ -29,7 +29,7 @@ export function TransactionDialog({
   goals?: GoalWithProgress[];
   isSubmitting?: boolean;
   onClose: () => void;
-  onSubmit: (values: CreateTransactionPayload) => void;
+  onSubmit: (values: CreateTransactionPayload, installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string; existingPurchaseId?: number | null } | null) => void;
 }) {
   return (
     <Dialog

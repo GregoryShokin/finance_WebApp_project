@@ -39,7 +39,7 @@ export function TransactionsList({
   pendingDeleteIds?: number[];
   editingTransaction?: Transaction | null;
   isSubmittingEdit?: boolean;
-  onSubmitEdit?: (values: CreateTransactionPayload) => void;
+  onSubmitEdit?: (values: CreateTransactionPayload, installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string; existingPurchaseId?: number | null } | null) => void;
   onCancelEdit?: () => void;
   onCreateCategoryRequest?: (payload: { name: string; kind: CategoryKind }) => void;
   onCreateAccountRequest?: (payload: { name: string }) => void;

@@ -67,7 +67,8 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
         !isCreditCard(account) &&
         !isLoan(account) &&
         account.account_type !== 'deposit' &&
-        account.account_type !== 'broker',
+        account.account_type !== 'broker' &&
+        account.account_type !== 'installment_card',
     ),
     [accounts],
   );
@@ -77,14 +78,19 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
     [accounts],
   );
 
+  const installmentCardAccounts = useMemo(
+    () => accounts.filter((account) => account.account_type === 'installment_card'),
+    [accounts],
+  );
+
   const visibleDebitAccounts = useMemo(
     () => debitAccounts.filter((account) => Math.max(0, Number(account.balance)) >= 1000),
     [debitAccounts],
   );
 
   const visibleAccounts = useMemo(
-    () => [...visibleDebitAccounts, ...creditCardAccounts],
-    [creditCardAccounts, visibleDebitAccounts],
+    () => [...visibleDebitAccounts, ...creditCardAccounts, ...installmentCardAccounts],
+    [creditCardAccounts, installmentCardAccounts, visibleDebitAccounts],
   );
 
   const debitTotal = useMemo(
@@ -92,13 +98,23 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
     [debitAccounts],
   );
 
-  const creditCardTotal = useMemo(
-    () => creditCardAccounts.reduce((sum, account) => sum + Math.max(0, Number(account.balance)), 0),
+  const creditCardLimitTotal = useMemo(
+    () => creditCardAccounts.reduce((sum, account) => {
+      const limit = Number(account.credit_limit ?? account.credit_limit_original ?? 0);
+      return sum + Math.max(0, limit);
+    }, 0),
     [creditCardAccounts],
   );
 
-  const totalAvailable = debitTotal + creditCardTotal;
-  const totalCreditAvailable = creditCardTotal;
+  const installmentCardLimitTotal = useMemo(
+    () => installmentCardAccounts.reduce((sum, account) => {
+      const limit = Number(account.credit_limit ?? account.credit_limit_original ?? 0);
+      return sum + Math.max(0, limit);
+    }, 0),
+    [installmentCardAccounts],
+  );
+
+  const totalAvailable = debitTotal;
 
   function handleToggle(next?: boolean) {
     if ((!isExpanded || next === true) && cardRef.current) {
@@ -123,7 +139,7 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
 
     return (
       <>
-        <p className="text-xs font-medium uppercase tracking-wider text-slate-400">Доступные финансы</p>
+        <p className="text-sm font-semibold text-slate-900">Доступные средства</p>
 
         <button
           type="button"
@@ -135,21 +151,26 @@ export function AvailableFinancesWidget({ accounts, isLoading = false }: Props) 
           <ChevronDown className={`size-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
         </button>
 
-        <div className="mt-3">
+        <div className="mt-1">
           <MoneyAmount
             value={totalAvailable}
             tone={totalAvailable >= 0 ? 'income' : 'expense'}
-            className="text-2xl lg:text-3xl"
+            className="text-2xl font-extrabold lg:text-3xl"
           />
-          <p className="mt-1 text-sm text-slate-500">по доступным счетам</p>
-          {totalCreditAvailable > 0 ? (
-            <p className="mt-0.5 text-xs text-slate-400">
-              из них кредитные: {formatMoney(totalCreditAvailable)}
-            </p>
+        </div>
+        <div className="mt-3 space-y-1.5">
+          {creditCardLimitTotal > 0 ? (
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-500">Кредитный лимит</span>
+              <span className="font-semibold text-slate-700">{formatMoney(creditCardLimitTotal)}</span>
+            </div>
           ) : null}
-          <p className="mt-2 text-xs font-medium uppercase tracking-wide text-slate-400">
-            {visibleAccounts.length} {visibleAccounts.length === 1 ? 'счёт' : visibleAccounts.length < 5 ? 'счёта' : 'счетов'}
-          </p>
+          {installmentCardLimitTotal > 0 ? (
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-500">Лимит рассрочки</span>
+              <span className="font-semibold text-slate-700">{formatMoney(installmentCardLimitTotal)}</span>
+            </div>
+          ) : null}
         </div>
 
         {isExpanded ? (

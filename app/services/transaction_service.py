@@ -23,6 +23,12 @@ except Exception:
     _GoalValidationError = Exception  # type: ignore
 
 try:
+    from app.models.installment_purchase import InstallmentPurchase
+    _INSTALLMENT_AVAILABLE = True
+except Exception:
+    _INSTALLMENT_AVAILABLE = False
+
+try:
     from app.services.transaction_enrichment_service import TransactionEnrichmentService
 except Exception:
     class TransactionEnrichmentService:
@@ -57,6 +63,7 @@ NON_ANALYTICS_OPERATION_TYPES = {
     "credit_disbursement",
     "credit_early_repayment",
     "debt",
+    "adjustment",
 }
 
 
@@ -115,15 +122,61 @@ class TransactionService:
         target_account = self._get_target_account_for_create(user_id=user_id, payload=payload, source_account=account)
 
         payload["affects_analytics"] = self._affects_analytics(payload.get("operation_type"))
+        payload["is_regular"] = self._resolve_is_regular(user_id=user_id, category_id=payload.get("category_id"))
         payload.pop("user_id", None)
+        # Extract installment fields before passing to repository (not Transaction model columns)
+        installment_term = payload.pop("installment_term_months", None)
+        installment_payment = payload.pop("installment_monthly_payment", None)
+        installment_desc = payload.pop("installment_description", None)
         transaction = self.transaction_repo.create(auto_commit=False, user_id=user_id, **payload)
         self._apply_balance_effect_on_create(transaction=transaction, account=account, target_account=target_account)
+
+        if transaction.operation_type == "transfer" and transaction.target_account_id is not None:
+            self._create_transfer_pair_record(transaction=transaction, user_id=user_id)
 
         # Check goal achievement after linking transaction to goal
         if _GOALS_AVAILABLE and transaction.goal_id is not None:
             GoalService(self.db).check_and_achieve(transaction.goal_id, user_id)
 
         self._upsert_category_rule_from_payload(user_id=user_id, payload=payload)
+
+        # Auto-create InstallmentPurchase when installment fields are provided
+        if (
+            _INSTALLMENT_AVAILABLE
+            and account.account_type == "installment_card"
+            and transaction.type == "expense"
+            and transaction.operation_type == "regular"
+            and (installment_term is not None or installment_payment is not None)
+        ):
+            amount = Decimal(str(transaction.amount))
+            # Compute missing field: if term given → compute payment; if payment given → compute term
+            if installment_term and not installment_payment:
+                monthly = (amount / installment_term).quantize(Decimal("0.01"))
+            elif installment_payment and not installment_term:
+                mp = Decimal(str(installment_payment))
+                installment_term = max(1, int(amount / mp)) if mp > 0 else 1
+                monthly = mp
+            else:
+                monthly = Decimal(str(installment_payment))
+                installment_term = int(installment_term)
+
+            start_date = transaction.transaction_date.date() if hasattr(transaction.transaction_date, "date") else transaction.transaction_date
+
+            purchase = InstallmentPurchase(
+                account_id=transaction.account_id,
+                transaction_id=transaction.id,
+                category_id=transaction.category_id,
+                description=installment_desc or (transaction.description or "Покупка в рассрочку"),
+                original_amount=amount,
+                remaining_amount=amount,
+                interest_rate=Decimal("0"),
+                term_months=installment_term,
+                monthly_payment=monthly,
+                start_date=start_date,
+                status="active",
+            )
+            self.db.add(purchase)
+
         self.db.commit()
         self.db.refresh(transaction)
         return self.transaction_repo.get_by_id(transaction_id=transaction.id, user_id=user_id) or transaction
@@ -141,9 +194,14 @@ class TransactionService:
         if transaction.target_account_id is not None:
             old_target_account = self.account_repo.get_by_id_and_user_for_update(transaction.target_account_id, user_id)
 
+        # Extract installment fields before building effective payload (not Transaction columns)
+        installment_term = updates.pop("installment_term_months", None)
+        installment_payment = updates.pop("installment_monthly_payment", None)
+        installment_desc = updates.pop("installment_description", None)
+
         effective = self._build_effective_update_payload(transaction=transaction, updates=updates)
 
-        # Р В РІР‚С”Р РЋР вЂ№Р В Р’В±Р В РЎвЂўР В Р’Вµ Р РЋР вЂљР В Р’ВµР В РўвЂР В Р’В°Р В РЎвЂќР РЋРІР‚С™Р В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ Р РЋРЎвЂњР В Р’В¶Р В Р’Вµ Р В РЎвЂ”Р В РЎвЂўР В РўвЂР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р’В¶Р В РўвЂР РЋРІР‚ВР В Р вЂ¦Р В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ Р В РўвЂР В РЎвЂўР В Р’В»Р В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋР С“Р В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В Р’В° Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р РЋР РЏР РЋРІР‚С™Р РЋР Р‰ Р В Р’ВµР РЋРІР‚В
+        #Р В РІР‚С”Р РЋР вЂ№Р В Р’В±Р В РЎвЂўР В Р’Вµ Р РЋР вЂљР В Р’ВµР В РўвЂР В Р’В°Р В РЎвЂќР РЋРІР‚С™Р В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ Р РЋРЎвЂњР В Р’В¶Р В Р’Вµ Р В РЎвЂ”Р В РЎвЂўР В РўвЂР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р’В¶Р В РўвЂР РЋРІР‚ВР В Р вЂ¦Р В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РЎвЂ Р В РўвЂР В РЎвЂўР В Р’В»Р В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋР С“Р В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В Р’В° Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р РЋР РЏР РЋРІР‚С™Р РЋР Р‰ Р В Р’ВµР РЋРІР‚В
         # Р В Р вЂ¦Р В Р’В° Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’ВµР РЋР вЂљР В РЎвЂќР РЋРЎвЂњ. Р В РЎвЂєР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В Р вЂ Р В РЎвЂўР В РўвЂ Р В Р вЂ  "Р В РІР‚СљР В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В РЎвЂў" Р РЋР вЂљР В Р’В°Р В Р’В·Р РЋР вЂљР В Р’ВµР РЋРІвЂљВ¬Р В Р’В°Р В Р’ВµР В РЎВ Р РЋРІР‚С™Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р В РўвЂР В Р’В»Р РЋР РЏ Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋРІР‚В Р В РЎвЂР В РІвЂћвЂ“,
         # Р В РЎвЂќР В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР РЋР вЂљР РЋРІР‚в„–Р В Р’Вµ Р РЋРЎвЂњР В Р’В¶Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋР РЏР РЋРІР‚С™Р РЋР С“Р РЋР РЏ Р В Р вЂ  Р РЋР С“Р РЋРІР‚С™Р В Р’В°Р РЋРІР‚С™Р РЋРЎвЂњР РЋР С“Р В Р’Вµ needs_review=True, Р В Р вЂ¦Р В Р’В°Р В РЎвЂ”Р РЋР вЂљР В РЎвЂР В РЎВР В Р’ВµР РЋР вЂљ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р’ВµР В Р’В· Р В РЎвЂќР В Р вЂ¦Р В РЎвЂўР В РЎвЂ”Р В РЎвЂќР РЋРЎвЂњ
         # Р В РЎвЂ”Р В РЎвЂўР В РўвЂР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р’В¶Р В РўвЂР В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В Р вЂ¦Р В Р’В° Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚В Р В Р’Вµ review.
@@ -156,6 +214,8 @@ class TransactionService:
         effective["user_id"] = user_id
         effective = self._prepare_payload(effective)
         effective["affects_analytics"] = self._affects_analytics(effective["operation_type"])
+        if "category_id" in updates:
+            effective["is_regular"] = self._resolve_is_regular(user_id=user_id, category_id=effective.get("category_id"))
 
         self._validate_payload(user_id=user_id, payload=effective)
 
@@ -175,10 +235,91 @@ class TransactionService:
             GoalService(self.db).check_and_achieve(updated.goal_id, user_id)
 
         self._upsert_category_rule_from_payload(user_id=user_id, payload=effective)
+
+        # Handle InstallmentPurchase create/update on transaction edit
+        if _INSTALLMENT_AVAILABLE:
+            self._sync_installment_purchase(
+                transaction=updated,
+                account=new_account,
+                installment_term=installment_term,
+                installment_payment=installment_payment,
+                installment_desc=installment_desc,
+            )
+
         self.db.commit()
         self.db.refresh(updated)
         return self.transaction_repo.get_by_id(transaction_id=updated.id, user_id=user_id) or updated
 
+    def _sync_installment_purchase(
+        self,
+        *,
+        transaction: Transaction,
+        account: Account,
+        installment_term: int | None,
+        installment_payment: Any | None,
+        installment_desc: str | None,
+    ) -> None:
+        """Create or update InstallmentPurchase linked to a transaction."""
+        existing = (
+            self.db.query(InstallmentPurchase)
+            .filter(InstallmentPurchase.transaction_id == transaction.id)
+            .first()
+        )
+
+        is_eligible = (
+            account.account_type == "installment_card"
+            and transaction.type == "expense"
+            and transaction.operation_type == "regular"
+        )
+
+        has_installment_data = installment_term is not None or installment_payment is not None
+
+        if not is_eligible or not has_installment_data:
+            return
+
+        amount = Decimal(str(transaction.amount))
+
+        if installment_term and not installment_payment:
+            monthly = (amount / installment_term).quantize(Decimal("0.01"))
+            installment_term = int(installment_term)
+        elif installment_payment and not installment_term:
+            mp = Decimal(str(installment_payment))
+            installment_term = max(1, int(amount / mp)) if mp > 0 else 1
+            monthly = mp
+        else:
+            monthly = Decimal(str(installment_payment))
+            installment_term = int(installment_term)
+
+        start_date = (
+            transaction.transaction_date.date()
+            if hasattr(transaction.transaction_date, "date")
+            else transaction.transaction_date
+        )
+
+        if existing:
+            existing.account_id = transaction.account_id
+            existing.category_id = transaction.category_id
+            existing.description = installment_desc or (transaction.description or existing.description)
+            existing.original_amount = amount
+            existing.remaining_amount = amount
+            existing.term_months = installment_term
+            existing.monthly_payment = monthly
+            existing.start_date = start_date
+        else:
+            purchase = InstallmentPurchase(
+                account_id=transaction.account_id,
+                transaction_id=transaction.id,
+                category_id=transaction.category_id,
+                description=installment_desc or (transaction.description or "Покупка в рассрочку"),
+                original_amount=amount,
+                remaining_amount=amount,
+                interest_rate=Decimal("0"),
+                term_months=installment_term,
+                monthly_payment=monthly,
+                start_date=start_date,
+                status="active",
+            )
+            self.db.add(purchase)
 
     def _upsert_category_rule_from_payload(self, *, user_id: int, payload: dict[str, Any]) -> None:
         category_id = payload.get("category_id")
@@ -308,6 +449,7 @@ class TransactionService:
             }
             payload = self._prepare_payload(payload)
             payload["affects_analytics"] = self._affects_analytics(payload.get("operation_type"))
+            payload["is_regular"] = self._resolve_is_regular(user_id=user_id, category_id=payload.get("category_id"))
             self._validate_payload(user_id=user_id, payload=payload)
             prepared_items.append(payload)
 
@@ -545,6 +687,43 @@ class TransactionService:
     @staticmethod
     def _affects_analytics(operation_type: str | None) -> bool:
         return operation_type not in NON_ANALYTICS_OPERATION_TYPES
+
+    def _resolve_is_regular(self, *, user_id: int, category_id: int | None) -> bool:
+        if category_id is None:
+            return True
+        category = self.category_repo.get_by_id(category_id=category_id, user_id=user_id)
+        if category is None:
+            return True
+        return category.regularity == "regular"
+
+    def _create_transfer_pair_record(self, *, transaction: Transaction, user_id: int) -> None:
+        """Creates a paired income/expense record for a manually created transfer.
+
+        Balances are already updated by _apply_balance_effect_on_create, so this
+        method only inserts the mirror transaction and links both via transfer_pair_id.
+        """
+        pair_type = "income" if transaction.type == "expense" else "expense"
+        pair_tx = Transaction(
+            user_id=user_id,
+            account_id=transaction.target_account_id,
+            target_account_id=transaction.account_id,
+            amount=transaction.amount,
+            currency=transaction.currency,
+            type=pair_type,
+            operation_type="transfer",
+            description=transaction.description,
+            normalized_description=transaction.normalized_description,
+            transaction_date=transaction.transaction_date,
+            needs_review=transaction.needs_review,
+            affects_analytics=False,
+        )
+        self.db.add(pair_tx)
+        self.db.flush()
+
+        transaction.transfer_pair_id = pair_tx.id
+        pair_tx.transfer_pair_id = transaction.id
+        self.db.add(transaction)
+        self.db.add(pair_tx)
 
     def _apply_balance_effect_on_create(
         self,

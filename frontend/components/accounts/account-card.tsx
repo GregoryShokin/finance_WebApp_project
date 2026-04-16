@@ -1,11 +1,15 @@
 ﻿"use client";
 
 import { useState } from 'react';
-import { CreditCard, Pencil, RotateCcw, Trash2, Wallet } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { CreditCard, Pencil, RotateCcw, SlidersHorizontal, Trash2, Wallet } from 'lucide-react';
+import { toast } from 'sonner';
+import { adjustAccountBalance } from '@/lib/api/accounts';
 import { MoneyAmount } from '@/components/shared/money-amount';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Dialog } from '@/components/ui/dialog';
 import type { Account } from '@/types/account';
 import type { Transaction } from '@/types/transaction';
 
@@ -13,8 +17,10 @@ function CreditCardLimitBar({ account }: { account: Account }) {
   const limit = Number(account.credit_limit_original ?? 0);
   if (limit <= 0) return null;
 
-  const balance = Number(account.balance);
-  const used = Math.max(0, limit - balance);
+  const isInstallment = account.account_type === 'installment_card';
+  const used = isInstallment
+    ? Math.abs(Number(account.credit_current_amount ?? 0))
+    : Math.max(0, limit - Number(account.balance));
   const pct = Math.min(100, (used / limit) * 100);
 
   const barColor = pct > 80 ? 'bg-rose-500' : pct > 50 ? 'bg-amber-400' : 'bg-emerald-500';
@@ -52,9 +58,28 @@ export function AccountCard({
 }) {
   const numericBalance = Number(account.balance);
   const isCreditCard = account.account_type === 'credit_card';
+  const isInstallmentCard = account.account_type === 'installment_card';
   const [showCalc, setShowCalc] = useState(false);
+  const [showAdjust, setShowAdjust] = useState(false);
+  const [adjustValue, setAdjustValue] = useState('');
+  const [adjustComment, setAdjustComment] = useState('');
+  const queryClient = useQueryClient();
+
+  const adjustMutation = useMutation({
+    mutationFn: () => adjustAccountBalance(account.id, parseFloat(adjustValue), adjustComment || undefined),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['accounts'] });
+      await queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      setShowAdjust(false);
+      setAdjustValue('');
+      setAdjustComment('');
+      toast.success('Баланс скорректирован');
+    },
+    onError: (err: Error) => toast.error(err.message || 'Не удалось скорректировать баланс'),
+  });
 
   return (
+    <>
     <Card className="p-5 lg:p-6">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1">
@@ -85,7 +110,7 @@ export function AccountCard({
               tone={account.is_credit && !isCreditCard ? 'expense' : numericBalance < 0 ? 'expense' : 'default'}
               className="mt-1 block text-2xl lg:text-3xl"
             />
-            {isCreditCard ? <CreditCardLimitBar account={account} /> : null}
+            {(isCreditCard || isInstallmentCard) ? <CreditCardLimitBar account={account} /> : null}
           </div>
 
           {account.is_credit && !isCreditCard ? (
@@ -261,6 +286,9 @@ export function AccountCard({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+          <Button type="button" variant="secondary" size="icon" onClick={() => { setAdjustValue(String(numericBalance)); setShowAdjust(true); }} aria-label="Скорректировать баланс" title="Скорректировать баланс">
+            <SlidersHorizontal className="size-4" />
+          </Button>
           <Button type="button" variant="secondary" size="icon" onClick={() => onEdit(account)} aria-label="Изменить счёт" title="Изменить">
             <Pencil className="size-4" />
           </Button>
@@ -292,5 +320,64 @@ export function AccountCard({
         </div>
       </div>
     </Card>
+
+    <Dialog
+      open={showAdjust}
+      onClose={() => setShowAdjust(false)}
+      title="Корректировка баланса"
+      description={`Текущий баланс: ${numericBalance.toLocaleString('ru-RU')} ${account.currency}. Введи новый баланс — разница запишется как транзакция-корректировка.`}
+    >
+      <div className="space-y-4">
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-slate-700">Новый баланс ({account.currency})</label>
+          <input
+            type="number"
+            step="0.01"
+            value={adjustValue}
+            onChange={(e) => setAdjustValue(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+            placeholder="0.00"
+            autoFocus
+          />
+          {adjustValue !== '' && !isNaN(parseFloat(adjustValue)) && parseFloat(adjustValue) !== numericBalance && (
+            <p className="mt-1.5 text-xs text-slate-500">
+              Дельта: <span className={parseFloat(adjustValue) > numericBalance ? 'text-emerald-600 font-medium' : 'text-rose-600 font-medium'}>
+                {parseFloat(adjustValue) > numericBalance ? '+' : ''}{(parseFloat(adjustValue) - numericBalance).toLocaleString('ru-RU', { minimumFractionDigits: 2 })} {account.currency}
+              </span>
+            </p>
+          )}
+        </div>
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-slate-700">Комментарий (необязательно)</label>
+          <input
+            type="text"
+            value={adjustComment}
+            onChange={(e) => setAdjustComment(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+            placeholder="Начальный баланс при настройке"
+            maxLength={255}
+          />
+        </div>
+        <div className="flex gap-3 pt-1">
+          <Button
+            type="button"
+            variant="secondary"
+            className="flex-1"
+            onClick={() => setShowAdjust(false)}
+          >
+            Отмена
+          </Button>
+          <Button
+            type="button"
+            className="flex-1"
+            disabled={adjustMutation.isPending || adjustValue === '' || isNaN(parseFloat(adjustValue)) || parseFloat(adjustValue) === numericBalance}
+            onClick={() => adjustMutation.mutate()}
+          >
+            {adjustMutation.isPending ? 'Сохраняем...' : 'Применить'}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+    </>
   );
 }

@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy.orm import Session
 
+from app.models.account import Account
 from app.models.budget import Budget
 from app.models.budget_alert import BudgetAlert
 from app.models.category import Category
@@ -182,6 +183,18 @@ class BudgetAnalyticsService:
             )
         return _adaptive_avg(values)
 
+    def _get_installment_card_ids(self, user_id: int) -> set[int]:
+        """Get IDs of installment_card accounts — purchases on these are NOT real expenses."""
+        rows = (
+            self.db.query(Account.id)
+            .filter(
+                Account.user_id == user_id,
+                Account.account_type == "installment_card",
+            )
+            .all()
+        )
+        return {r.id for r in rows}
+
     def _spent_by_category(
         self,
         user_id: int,
@@ -189,18 +202,25 @@ class BudgetAnalyticsService:
         date_from: datetime,
         date_to: datetime,
     ) -> Decimal:
-        rows = (
+        ic_ids = self._get_installment_card_ids(user_id)
+
+        q = (
             self.db.query(Transaction)
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.category_id == category_id,
                 Transaction.type == "expense",
                 Transaction.affects_analytics.is_(True),
+                Transaction.converted_to_installment.is_(False),
                 Transaction.transaction_date >= date_from,
                 Transaction.transaction_date <= date_to,
+                Transaction.operation_type.notin_(("transfer", "credit_early_repayment")),
             )
-            .all()
         )
+        if ic_ids:
+            q = q.filter(Transaction.account_id.notin_(ic_ids))
+
+        rows = q.all()
         return sum((Decimal(str(tx.amount)) for tx in rows), Decimal("0"))
 
     def _avg_monthly_expense(

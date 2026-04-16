@@ -15,6 +15,7 @@ import { getAccounts, createAccount } from '@/lib/api/accounts';
 import { getCategories, createCategory } from '@/lib/api/categories';
 import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
 import { createTransaction, deleteTransaction, deleteTransactionsByPeriod, getTransactions, updateTransaction } from '@/lib/api/transactions';
+import { createInstallmentPurchase, updateInstallmentPurchase } from '@/lib/api/installment-purchases';
 import { getGoals } from '@/lib/api/goals';
 import { TransactionsList } from '@/components/transactions/transactions-list';
 import { TransactionFilters } from '@/components/transactions/transaction-filters';
@@ -116,8 +117,46 @@ export default function TransactionsPage() {
     ]);
   };
 
-  const createMutation = useMutation({ mutationFn: createTransaction, onSuccess: async () => { toast.success('Транзакция создана'); setFormOpen(false); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось создать транзакцию') });
-  const updateMutation = useMutation({ mutationFn: ({ id, payload }: { id: number; payload: CreateTransactionPayload }) => updateTransaction(id, payload), onSuccess: async () => { toast.success('Транзакция обновлена'); setEditingTransaction(null); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось обновить транзакцию') });
+  const createMutation = useMutation({
+    mutationFn: async ({ payload, installment }: { payload: CreateTransactionPayload; installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string } | null }) => {
+      const tx = await createTransaction(payload);
+      if (installment) {
+        await createInstallmentPurchase(payload.account_id, {
+          description: installment.description,
+          term_months: installment.term_months,
+          monthly_payment: installment.monthly_payment,
+          original_amount: installment.original_amount,
+          start_date: installment.start_date,
+          transaction_id: tx.id,
+        });
+      }
+      return tx;
+    },
+    onSuccess: async () => { toast.success('Транзакция создана'); setFormOpen(false); await invalidateData(); },
+    onError: (error: Error) => toast.error(error.message || 'Не удалось создать транзакцию'),
+  });
+  const updateMutation = useMutation({
+    mutationFn: async ({ id, payload, installment }: { id: number; payload: CreateTransactionPayload; installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string; existingPurchaseId?: number | null } | null }) => {
+      const tx = await updateTransaction(id, payload);
+      if (installment && installment.existingPurchaseId) {
+        await updateInstallmentPurchase(payload.account_id, installment.existingPurchaseId, {
+          description: installment.description,
+        });
+      } else if (installment) {
+        await createInstallmentPurchase(payload.account_id, {
+          description: installment.description,
+          term_months: installment.term_months,
+          monthly_payment: installment.monthly_payment,
+          original_amount: installment.original_amount,
+          start_date: installment.start_date,
+          transaction_id: tx.id,
+        });
+      }
+      return tx;
+    },
+    onSuccess: async () => { toast.success('Транзакция обновлена'); setEditingTransaction(null); await invalidateData(); },
+    onError: (error: Error) => toast.error(error.message || 'Не удалось обновить транзакцию'),
+  });
   const deleteMutation = useMutation({ mutationFn: deleteTransaction, onSuccess: async () => { toast.success('Транзакция удалена'); setDeletingId(null); await invalidateData(); }, onError: (error: Error) => { toast.error(error.message || 'Не удалось удалить транзакцию'); setDeletingId(null); } });
   const deletePeriodMutation = useMutation({ mutationFn: deleteTransactionsByPeriod, onSuccess: async (result) => { toast.success(result.deleted_count > 0 ? `Удалено транзакций: ${result.deleted_count}` : 'За период транзакции не найдены'); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось удалить транзакции за период') });
   const createAccountMutation = useMutation({ mutationFn: createAccount, onSuccess: async () => { toast.success('Счёт создан'); setAccountDialogOpen(false); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось создать счёт') });
@@ -177,10 +216,12 @@ export default function TransactionsPage() {
   function openCreateForm() { setEditingTransaction(null); setFormOpen(true); }
   function closeCreateForm() { setFormOpen(false); }
   function cancelEdit() { setEditingTransaction(null); }
-  function handleCreateSubmit(values: CreateTransactionPayload) { createMutation.mutate(values); }
-  function handleEditSubmit(values: CreateTransactionPayload) {
+  function handleCreateSubmit(values: CreateTransactionPayload, installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string; existingPurchaseId?: number | null } | null) {
+    createMutation.mutate({ payload: values, installment });
+  }
+  function handleEditSubmit(values: CreateTransactionPayload, installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string; existingPurchaseId?: number | null } | null) {
     if (!editingTransaction) return;
-    updateMutation.mutate({ id: editingTransaction.id, payload: values });
+    updateMutation.mutate({ id: editingTransaction.id, payload: values, installment });
   }
   function handleDelete(transaction: Transaction) { delayedDelete.scheduleDelete(transaction.id, () => { setDeletingId(transaction.id); deleteMutation.mutate(transaction.id); }); }
   function handleDeletePeriod() { if (!filters.date_from || !filters.date_to) return; deletePeriodMutation.mutate({ date_from: toIsoStart(filters.date_from), date_to: toIsoEnd(filters.date_to), account_id: filters.account_id ? Number(filters.account_id) : undefined }); }

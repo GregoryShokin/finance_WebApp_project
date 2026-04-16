@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-AccountType = Literal['regular', 'credit', 'credit_card', 'cash', 'broker', 'deposit']
+AccountType = Literal['regular', 'credit', 'credit_card', 'cash', 'broker', 'deposit', 'installment_card']
 
 
 class AccountCreateRequest(BaseModel):
@@ -49,6 +49,11 @@ class AccountUpdateRequest(BaseModel):
     deposit_capitalization_period: str | None = None
     contract_number: str | None = None
     statement_account_number: str | None = None
+
+
+class BalanceAdjustRequest(BaseModel):
+    target_balance: Decimal
+    comment: str | None = Field(default=None, max_length=255)
 
 
 class AccountResponse(BaseModel):

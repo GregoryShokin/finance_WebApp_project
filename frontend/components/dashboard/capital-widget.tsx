@@ -20,6 +20,7 @@ type Props = {
   realAssets: RealAsset[];
   health: FinancialHealth;
   isLoading?: boolean;
+  className?: string;
 };
 
 function toNumber(value: number | string | null | undefined) {
@@ -38,10 +39,13 @@ function AssetIcon({ type }: { type: RealAsset['asset_type'] }) {
   return <Package className="size-4 text-slate-400" />;
 }
 
-export function CapitalWidget({ accounts, realAssets, health, isLoading = false }: Props) {
+type CapitalMode = 'liquid' | 'net';
+
+export function CapitalWidget({ accounts, realAssets, health, isLoading = false, className }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState<number>(0);
   const [expandUp, setExpandUp] = useState(false);
+  const [capitalMode, setCapitalMode] = useState<CapitalMode>('liquid');
 
   const wrapperRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -93,7 +97,9 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
     const realAssetsTotal = realAssets.reduce((sum, asset) => sum + Math.max(0, toNumber(asset.estimated_value)), 0);
     const brokerTotal = brokerAccounts.reduce((sum, account) => sum + Math.max(0, toNumber(account.balance)), 0);
     const totalAssets = liquidTotal + realAssetsTotal + brokerTotal + depositTotal;
-    const netCapital = health.leverage_own_capital - health.leverage_total_debt;
+    const totalDebt = health.leverage_total_debt;
+    const liquidCapital = liquidTotal + depositTotal - totalDebt;
+    const netCapital = totalAssets - totalDebt;
 
     return {
       liquidTotal,
@@ -101,6 +107,8 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
       realAssetsTotal,
       brokerTotal,
       totalAssets,
+      totalDebt,
+      liquidCapital,
       netCapital,
     };
   }, [accounts, realAssets, health]);
@@ -133,16 +141,38 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
       );
     }
 
+    const activeCapital = capitalMode === 'liquid' ? metrics.liquidCapital : metrics.netCapital;
+
     return (
       <>
-        <div className="flex items-start justify-between gap-4">
-          <div className="pr-4">
-            <p className="text-sm font-medium text-slate-500">Капитал</p>
+        <div className="flex items-center gap-3 mb-2">
+          <p className="text-sm font-semibold text-slate-900">Капитал</p>
+          <div className="inline-flex rounded-full bg-slate-100 p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setCapitalMode('liquid')}
+              className={cn(
+                'rounded-full px-2.5 py-1 font-medium transition',
+                capitalMode === 'liquid' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500',
+              )}
+            >
+              Ликвидный
+            </button>
+            <button
+              type="button"
+              onClick={() => setCapitalMode('net')}
+              className={cn(
+                'rounded-full px-2.5 py-1 font-medium transition',
+                capitalMode === 'net' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500',
+              )}
+            >
+              Чистый
+            </button>
           </div>
           <button
             type="button"
             onClick={handleToggle}
-            className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
+            className="ml-auto flex size-[22px] shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500 transition hover:border-slate-800 hover:bg-slate-800 hover:text-white"
             aria-label="Подробнее"
             aria-expanded={isExpanded}
           >
@@ -151,31 +181,29 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
         </div>
 
         {!isExpanded ? (
-          <div className="mt-4">
-            <p className={cn('text-2xl font-semibold lg:text-3xl', metrics.netCapital >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
-              {formatMoney(metrics.netCapital)}
+          <div className="mt-2">
+            <p className={cn('text-2xl font-extrabold', activeCapital >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+              {formatMoney(activeCapital)}
             </p>
-            <p className="mt-2 text-sm text-slate-500">чистый капитал</p>
-            <div className="mt-4 space-y-2 text-sm">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Активы</span>
-                <span className="font-medium text-slate-700">{formatMoney(metrics.totalAssets)}</span>
-              </div>
-              {metrics.depositTotal > 0 ? (
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-slate-500">Вклады</span>
-                  <span className="font-medium text-emerald-600">{formatMoney(metrics.depositTotal)}</span>
+            <div className="mt-4 grid grid-cols-2 gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Активы</p>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between"><span className="text-slate-500">Наличные и карты</span><span className="font-semibold text-slate-700">{formatMoney(metrics.liquidTotal)}</span></div>
+                  {metrics.depositTotal > 0 ? <div className="flex justify-between"><span className="text-slate-500">Вклады</span><span className="font-semibold text-emerald-600">{formatMoney(metrics.depositTotal)}</span></div> : null}
+                  {capitalMode === 'net' ? (
+                    <>
+                      {metrics.realAssetsTotal > 0 ? <div className="flex justify-between"><span className="text-slate-500">Недвижимость / авто</span><span className="font-semibold text-slate-700">{formatMoney(metrics.realAssetsTotal)}</span></div> : null}
+                      <div className="flex justify-between"><span className="text-slate-500">Инвестиции</span><span className="font-semibold text-slate-700">{metrics.brokerTotal > 0 ? formatMoney(metrics.brokerTotal) : '—'}</span></div>
+                    </>
+                  ) : null}
                 </div>
-              ) : null}
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Долги</span>
-                <span className="font-medium text-rose-600">{formatMoney(health.leverage_total_debt)}</span>
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-slate-500">Инвестиции</span>
-                <span className="font-medium text-slate-400">
-                  {metrics.brokerTotal === 0 ? 'нет данных' : formatMoney(metrics.brokerTotal)}
-                </span>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Пассивы</p>
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex justify-between"><span className="text-slate-500">Кредиты и займы</span><span className="font-semibold text-rose-600">{formatMoney(metrics.totalDebt)}</span></div>
+                </div>
               </div>
             </div>
           </div>
@@ -256,7 +284,7 @@ export function CapitalWidget({ accounts, realAssets, health, isLoading = false 
   return (
     <div
       ref={wrapperRef}
-      className="relative h-full overflow-visible"
+      className={`relative h-full overflow-visible${className ? ` ${className}` : ''}`}
       style={{ height: collapsedHeight > 0 ? `${collapsedHeight}px` : 'auto' }}
     >
       {isExpanded ? (

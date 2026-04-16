@@ -58,6 +58,8 @@ class Transaction(Base):
     transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     affects_analytics: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true", index=True)
+    is_regular: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true", index=True)
+    converted_to_installment: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     transfer_pair_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True, index=True)
     goal_id: Mapped[int | None] = mapped_column(ForeignKey("goals.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -81,3 +83,24 @@ class Transaction(Base):
     @property
     def counterparty_name(self) -> str | None:
         return self.counterparty.name if self.counterparty else None
+
+    @property
+    def installment_term_months(self) -> int | None:
+        ip = self.installment_purchase  # backref from InstallmentPurchase
+        if isinstance(ip, list):
+            ip = ip[0] if ip else None
+        return ip.term_months if ip else None
+
+    @property
+    def installment_monthly_payment(self) -> Decimal | None:
+        ip = self.installment_purchase
+        if isinstance(ip, list):
+            ip = ip[0] if ip else None
+        return ip.monthly_payment if ip else None
+
+    @property
+    def installment_description(self) -> str | None:
+        ip = self.installment_purchase
+        if isinstance(ip, list):
+            ip = ip[0] if ip else None
+        return ip.description if ip else None

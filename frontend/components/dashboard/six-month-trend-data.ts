@@ -9,6 +9,7 @@ export const MONTH_OPTIONS = ['Январь', 'Февраль', 'Март', 'А�
 export const TREND_COLORS = {
   pieIncome: '#14D8E1',
   pieExpense: '#E46363',
+  pieCreditPayments: '#94A3B8',
   pieBalance: '#F59E0B',
   chartIncome: '#16A34A',
   chartExpense: '#EF4444',
@@ -22,6 +23,7 @@ export type MonthlyPoint = {
   month: string;
   income: number;
   expense: number;
+  creditPayments: number;
   balance: number;
   daysInMonth: number;
   year: number;
@@ -38,6 +40,7 @@ export type SummarySlice = {
 export type SummaryTotals = {
   income: number;
   expense: number;
+  creditPayments: number;
   balance: number;
 };
 
@@ -143,18 +146,20 @@ function buildSummaryText(avgMonthlyBalance: number, forecastMonthBalance: numbe
   return 'Прогноз близок к среднему значению';
 }
 
-export function buildTotals(income: number, expense: number): SummaryTotals {
+export function buildTotals(income: number, expense: number, creditPayments = 0): SummaryTotals {
   return {
     income,
     expense,
-    balance: income - expense,
+    creditPayments,
+    balance: income - expense - creditPayments,
   };
 }
 
-export function normalizeSlices(income: number, expense: number, balance: number): SummarySlice[] {
+export function normalizeSlices(income: number, expense: number, creditPayments: number, balance: number): SummarySlice[] {
   return [
     { name: 'Доходы', value: Math.max(income, 0), color: TREND_COLORS.pieIncome, rawValue: income },
     { name: 'Расходы', value: Math.max(expense, 0), color: TREND_COLORS.pieExpense, rawValue: expense },
+    { name: 'Кредиты', value: Math.max(creditPayments, 0), color: TREND_COLORS.pieCreditPayments, rawValue: creditPayments },
     { name: 'Остаток', value: Math.max(balance, 0), color: TREND_COLORS.pieBalance, rawValue: balance },
   ].filter((slice) => slice.value > 0 || slice.name === 'Остаток');
 }
@@ -203,6 +208,7 @@ export function getSixMonthTrendMetrics(transactions: Transaction[]): TrendMetri
       month: pointDate.toLocaleString('ru-RU', { month: 'short' }).replace('.', ''),
       income: 0,
       expense: 0,
+      creditPayments: 0,
       balance: 0,
       daysInMonth: daysInMonth(pointDate),
       year: pointDate.getFullYear(),
@@ -220,28 +226,30 @@ export function getSixMonthTrendMetrics(transactions: Transaction[]): TrendMetri
 
     if (!bucket) continue;
     if (transaction.type === 'income') bucket.income += amount;
-    if (transaction.type === 'expense') bucket.expense += amount;
+    if (transaction.type === 'expense' && transaction.operation_type !== 'credit_payment' && transaction.operation_type !== 'credit_early_repayment') bucket.expense += amount;
+    if (transaction.operation_type === 'credit_payment' || transaction.operation_type === 'credit_early_repayment') bucket.creditPayments = (bucket.creditPayments ?? 0) + amount;
   }
 
   const chartData = monthOrder
     .map((key) => monthBuckets.get(key))
     .filter((bucket): bucket is MonthlyPoint => Boolean(bucket))
-    .map((bucket) => ({ ...bucket, balance: bucket.income - bucket.expense }));
+    .map((bucket) => ({ ...bucket, balance: bucket.income - bucket.expense - bucket.creditPayments }));
 
   const currentMonthKey = monthKey(currentMonth);
   const populatedMonths = chartData.filter(
-    (point) => (point.income > 0 || point.expense > 0) && point.key !== currentMonthKey,
+    (point) => (point.income > 0 || point.expense > 0 || point.creditPayments > 0) && point.key !== currentMonthKey,
   );
   if (populatedMonths.length === 0) return null;
 
   const avgMonthlyBalance = mean(populatedMonths.map((point) => point.balance));
   const avgIncome = mean(populatedMonths.map((point) => point.income));
   const avgExpense = mean(populatedMonths.map((point) => point.expense));
+  const avgCreditPayments = mean(populatedMonths.map((point) => point.creditPayments));
   const totalExpenses = populatedMonths.reduce((sum, point) => sum + point.expense, 0);
   const totalDays = populatedMonths.reduce((sum, point) => sum + point.daysInMonth, 0);
   const avgDailyExpense = totalDays > 0 ? totalExpenses / totalDays : 0;
   const forecastMonthExpense = avgDailyExpense * daysInMonth(currentMonth);
-  const forecastMonthBalance = avgIncome - forecastMonthExpense;
+  const forecastMonthBalance = avgIncome - forecastMonthExpense - avgCreditPayments;
   const status = getStatus(avgMonthlyBalance, forecastMonthBalance);
 
   return {
@@ -258,6 +266,7 @@ export function getSixMonthTrendMetrics(transactions: Transaction[]): TrendMetri
     sixMonthAverageTotals: {
       income: avgIncome,
       expense: avgExpense,
+      creditPayments: avgCreditPayments,
       balance: avgMonthlyBalance,
     },
   };
