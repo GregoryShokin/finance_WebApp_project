@@ -716,10 +716,10 @@ export function computeCapital(
   const depositTotal = deposits.reduce((s, a) => s + Math.max(0, toNum(a.balance)), 0);
   const brokerTotal = brokers.reduce((s, a) => s + Math.max(0, toNum(a.balance)), 0);
   const realAssetsTotal = realAssets.reduce((s, a) => s + Math.max(0, toNum(a.estimated_value)), 0);
-  const receivableTotal = debts?.receivableTotal ?? 0;
-  const counterpartyDebt = debts?.payableTotal ?? 0;
+  const receivableTotal = toNum(debts?.receivableTotal);
+  const counterpartyDebt = toNum(debts?.payableTotal);
   const totalAssets = liquidTotal + depositTotal + brokerTotal + realAssetsTotal + receivableTotal;
-  const creditDebt = health.leverage_total_debt;
+  const creditDebt = toNum(health.leverage_total_debt);
   const totalDebt = creditDebt + counterpartyDebt;
   const liquidCapital = liquidTotal + depositTotal + receivableTotal - totalDebt;
   const netCapital = totalAssets - totalDebt;
@@ -776,11 +776,11 @@ export type DebtsData = {
 
 export function computeDebts(counterparties: Counterparty[]): DebtsData {
   const receivables = counterparties
-    .filter((c) => c.receivable_amount > 0)
-    .map((c) => ({ name: c.name, amount: c.receivable_amount }));
+    .filter((c) => toNum(c.receivable_amount) > 0)
+    .map((c) => ({ name: c.name, amount: toNum(c.receivable_amount) }));
   const payables = counterparties
-    .filter((c) => c.payable_amount > 0)
-    .map((c) => ({ name: c.name, amount: c.payable_amount }));
+    .filter((c) => toNum(c.payable_amount) > 0)
+    .map((c) => ({ name: c.name, amount: toNum(c.payable_amount) }));
 
   const receivableTotal = receivables.reduce((s, r) => s + r.amount, 0);
   const payableTotal = payables.reduce((s, p) => s + p.amount, 0);
