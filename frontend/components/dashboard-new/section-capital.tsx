@@ -100,6 +100,14 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
                 {formatRub(capital.liquidTotal + capital.depositTotal)}
               </span>
             </div>
+            {capital.receivableTotal > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Дебиторка</span>
+                <span className="font-medium text-emerald-600">
+                  {formatRub(capital.receivableTotal)}
+                </span>
+              </div>
+            )}
             {capitalMode === 'net' && (
               <>
                 {Object.entries(realAssetsByType).map(
@@ -128,9 +136,17 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
             <div className="flex justify-between text-sm">
               <span className="text-slate-600">Кредиты</span>
               <span className="font-medium text-rose-600">
-                {formatRub(totalDebt)}
+                {formatRub(capital.creditDebt)}
               </span>
             </div>
+            {capital.counterpartyDebt > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Я должен</span>
+                <span className="font-medium text-rose-600">
+                  {formatRub(capital.counterpartyDebt)}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -170,6 +186,15 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
                   {formatRub(capital.depositTotal)}
                 </p>
                 <p className="text-[11px] text-slate-400">Банковские депозиты</p>
+              </div>
+            )}
+            {capital.receivableTotal > 0 && (
+              <div className="p-3 rounded-xl bg-emerald-50/60">
+                <p className="text-xs text-slate-500">Дебиторка</p>
+                <p className="text-sm font-bold text-slate-900">
+                  {formatRub(capital.receivableTotal)}
+                </p>
+                <p className="text-[11px] text-slate-400">Вам должны контрагенты</p>
               </div>
             )}
             {Object.entries(realAssetsByType).map(
@@ -220,6 +245,15 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
                 </p>
               </div>
             ))}
+            {capital.counterpartyDebt > 0 && (
+              <div className="p-3 rounded-xl bg-rose-50/60">
+                <p className="text-xs text-slate-500">Долги контрагентам</p>
+                <p className="text-sm font-bold text-slate-900">
+                  {formatRub(capital.counterpartyDebt)}
+                </p>
+                <p className="text-[11px] text-slate-400">Вы должны контрагентам</p>
+              </div>
+            )}
           </div>
 
           {/* Summary box */}
@@ -279,8 +313,8 @@ function DebtsCard({ debts }: { debts: DebtsData }) {
   const collapsed = (
     <div>
       <p className="text-sm font-semibold text-slate-900">Долги</p>
-      <p className="text-lg font-bold text-rose-600 mt-1">
-        {formatRub(debts.payableTotal)}
+      <p className={`text-lg font-bold mt-1 ${debts.netPosition >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+        {debts.netPosition >= 0 ? '+' : ''}{formatRub(debts.netPosition)}
       </p>
       <div className="mt-2 space-y-1.5">
         <div className="flex justify-between text-xs">

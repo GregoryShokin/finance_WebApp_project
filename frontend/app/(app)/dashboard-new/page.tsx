@@ -160,11 +160,11 @@ export default function DashboardNewPage() {
   const incomeStructure = useMemo(() => computeIncomeStructure(transactions, categories), [transactions, categories]);
   const avgDailyExpense = useMemo(() => computeAvgDailyExpense(transactions), [transactions]);
 
-  const capitalData = useMemo(
-    () => (health ? computeCapital(accounts, realAssets, health) : null),
-    [accounts, realAssets, health],
-  );
   const debtsData = useMemo(() => computeDebts(counterparties), [counterparties]);
+  const capitalData = useMemo(
+    () => (health ? computeCapital(accounts, realAssets, health, debtsData) : null),
+    [accounts, realAssets, health, debtsData],
+  );
 
   const installmentCards = useMemo(() => computeInstallments(transactions), [transactions]);
 

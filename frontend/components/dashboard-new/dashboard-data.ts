@@ -682,7 +682,10 @@ export type CapitalData = {
   depositTotal: number;
   brokerTotal: number;
   realAssetsTotal: number;
+  receivableTotal: number;
   totalAssets: number;
+  creditDebt: number;
+  counterpartyDebt: number;
   totalDebt: number;
   liquidCapital: number;
   netCapital: number;
@@ -696,6 +699,7 @@ export function computeCapital(
   accounts: Account[],
   realAssets: RealAsset[],
   health: FinancialHealth,
+  debts?: DebtsData,
 ): CapitalData {
   const liquid = accounts.filter(
     (a) =>
@@ -712,9 +716,12 @@ export function computeCapital(
   const depositTotal = deposits.reduce((s, a) => s + Math.max(0, toNum(a.balance)), 0);
   const brokerTotal = brokers.reduce((s, a) => s + Math.max(0, toNum(a.balance)), 0);
   const realAssetsTotal = realAssets.reduce((s, a) => s + Math.max(0, toNum(a.estimated_value)), 0);
-  const totalAssets = liquidTotal + depositTotal + brokerTotal + realAssetsTotal;
-  const totalDebt = health.leverage_total_debt;
-  const liquidCapital = liquidTotal + depositTotal - totalDebt;
+  const receivableTotal = debts?.receivableTotal ?? 0;
+  const counterpartyDebt = debts?.payableTotal ?? 0;
+  const totalAssets = liquidTotal + depositTotal + brokerTotal + realAssetsTotal + receivableTotal;
+  const creditDebt = health.leverage_total_debt;
+  const totalDebt = creditDebt + counterpartyDebt;
+  const liquidCapital = liquidTotal + depositTotal + receivableTotal - totalDebt;
   const netCapital = totalAssets - totalDebt;
 
   const creditAccounts = accounts
@@ -743,7 +750,10 @@ export function computeCapital(
     depositTotal,
     brokerTotal,
     realAssetsTotal,
+    receivableTotal,
     totalAssets,
+    creditDebt,
+    counterpartyDebt,
     totalDebt,
     liquidCapital,
     netCapital,
