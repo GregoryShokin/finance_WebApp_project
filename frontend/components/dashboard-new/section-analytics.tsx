@@ -1,14 +1,24 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import type {
   FlowType,
   TrendData,
+  TrendPoint,
   TopExpenseItem,
   IncomeStructureData,
 } from '@/components/dashboard-new/dashboard-data';
-import { formatRub, TAG_CLASSES } from '@/components/dashboard-new/dashboard-data';
+import {
+  formatRub,
+  TAG_CLASSES,
+  computeTopExpenses,
+  computeExpenseTotals,
+  getTransactionYears,
+  getTransactionMonths,
+} from '@/components/dashboard-new/dashboard-data';
 import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
+import type { Transaction } from '@/types/transaction';
+import type { Category } from '@/types/category';
 
 type Props = {
   trend: TrendData | null;
@@ -17,6 +27,8 @@ type Props = {
   incomeStructure: IncomeStructureData | null;
   avgDailyExpense: number;
   installmentCards: Array<{ name: string; monthlyPayment: number; remaining: number | null; totalAmount: number }>;
+  transactions: Transaction[];
+  categories: Category[];
   // Trend controls
   trendYears: number[];
   trendYear: number;
@@ -49,31 +61,70 @@ const MONTH_NAMES = [
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
 ];
 
-/* ── Trend Donut ─────────────────────────────────────────────── */
+const MONTH_SHORT = [
+  'Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн',
+  'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек',
+];
+
+/* ── Trend Donut (SVG with transitions) ────────────────────── */
 
 function TrendDonut({ trend }: { trend: TrendData }) {
   const s = trend.selected;
   const total = s.income + s.expense + s.creditPayments;
-  const incomePct = total > 0 ? (s.income / total) * 100 : 33;
-  const expensePct = total > 0 ? (s.expense / total) * 100 : 33;
+  const incomePct = total > 0 ? s.income / total : 1 / 3;
+  const expensePct = total > 0 ? s.expense / total : 1 / 3;
+  const creditPct = total > 0 ? s.creditPayments / total : 1 / 3;
 
-  const conicGradient = `conic-gradient(
-    #06b6d4 0% ${incomePct}%,
-    #f43f5e ${incomePct}% ${incomePct + expensePct}%,
-    #94a3b8 ${incomePct + expensePct}% 100%
-  )`;
+  const R = 72;
+  const C = 2 * Math.PI * R;
+
+  const segments = [
+    { color: '#06b6d4', pct: incomePct },
+    { color: '#f43f5e', pct: expensePct },
+    { color: '#94a3b8', pct: creditPct },
+  ];
+
+  let cumulative = 0;
+  const arcs = segments.map((seg) => {
+    const len = seg.pct * C;
+    const dashOffset = C - cumulative;
+    cumulative += len;
+    return { ...seg, len, dashOffset };
+  });
 
   return (
     <div className="flex items-center gap-6 mt-4">
-      {/* Donut */}
+      {/* SVG Donut */}
       <div className="relative shrink-0" style={{ width: 180, height: 180 }}>
-        <div
-          className="absolute inset-0 rounded-full"
-          style={{ background: conicGradient }}
-        />
+        <svg width="180" height="180" viewBox="0 0 180 180">
+          <g transform="rotate(-90 90 90)">
+            {arcs.map((arc, i) => (
+              <circle
+                key={i}
+                cx="90"
+                cy="90"
+                r={R}
+                fill="none"
+                stroke={arc.color}
+                strokeWidth="18"
+                strokeLinecap="butt"
+                strokeDasharray={`${arc.len} ${C - arc.len}`}
+                strokeDashoffset={arc.dashOffset}
+                style={{
+                  transition:
+                    'stroke-dasharray 0.6s cubic-bezier(0.4, 0, 0.2, 1), stroke-dashoffset 0.6s cubic-bezier(0.4, 0, 0.2, 1)',
+                }}
+              />
+            ))}
+          </g>
+        </svg>
         <div className="absolute inset-[38px] rounded-full bg-white flex flex-col items-center justify-center">
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 leading-tight">Остаток</span>
-          <span className="text-lg font-extrabold text-emerald-600 leading-tight">{formatRub(s.balance)}</span>
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 leading-tight">
+            {s.balance >= 0 ? 'Остаток' : 'Дефицит'}
+          </span>
+          <span className={`text-lg font-extrabold leading-tight ${s.balance >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+            {formatRub(s.balance)}
+          </span>
         </div>
       </div>
 
@@ -105,59 +156,227 @@ function TrendDonut({ trend }: { trend: TrendData }) {
   );
 }
 
-/* ── Trend Chart ─────────────────────────────────────────────── */
+/* ── Bar Tooltip ───────────────────────────────────────────── */
 
-function TrendChart({ trend }: { trend: TrendData }) {
-  const maxVal = Math.max(
-    ...trend.points.map((p) => Math.max(p.income, p.expense, Math.max(0, p.balance))),
-    1,
-  );
+function BarTooltip({
+  point,
+  kind,
+  x,
+  y,
+}: {
+  point: TrendPoint;
+  kind: 'income' | 'expense' | 'balance';
+  x: number;
+  y: number;
+}) {
+  const bd = point.incomeBreakdown;
+  const ed = point.expenseBreakdown;
 
   return (
-    <div className="mt-3">
-      <div className="flex items-end gap-1.5 h-[200px] px-2">
-        {trend.points.map((p) => (
-          <div key={p.key} className="flex-1 flex items-end gap-0.5 min-w-0 h-full">
-            <div
-              className="flex-1 rounded-t-md min-w-0 bg-cyan-200"
-              style={{ height: `${(p.income / maxVal) * 100}%` }}
-            />
-            <div
-              className="flex-1 rounded-t-md min-w-0 bg-rose-200"
-              style={{ height: `${(p.expense / maxVal) * 100}%` }}
-            />
-            <div
-              className="flex-1 rounded-t-md min-w-0 bg-emerald-200"
-              style={{ height: `${(Math.max(0, p.balance) / maxVal) * 100}%` }}
-            />
-          </div>
-        ))}
+    <div
+      className="absolute z-50 pointer-events-none rounded-xl bg-slate-800 text-white px-3.5 py-2.5 text-xs shadow-lg whitespace-nowrap"
+      style={{
+        left: x,
+        top: y,
+        transform: 'translate(-50%, -100%)',
+        marginTop: -8,
+      }}
+    >
+      {kind === 'income' && (
+        <>
+          <p className="font-semibold text-cyan-300 mb-1.5">Доходы: {formatRub(point.income)}</p>
+          {bd.activeRegular > 0 && <p>Активный регулярный: {formatRub(bd.activeRegular)}</p>}
+          {bd.activeIrregular > 0 && <p>Активный нерегулярный: {formatRub(bd.activeIrregular)}</p>}
+          {bd.passiveRegular > 0 && <p>Пассивный регулярный: {formatRub(bd.passiveRegular)}</p>}
+          {bd.passiveIrregular > 0 && <p>Пассивный нерегулярный: {formatRub(bd.passiveIrregular)}</p>}
+        </>
+      )}
+      {kind === 'expense' && (
+        <>
+          <p className="font-semibold text-rose-300 mb-1.5">Расходы: {formatRub(point.expense)}</p>
+          {ed.essentialRegular > 0 && <p>Обязательные регулярные: {formatRub(ed.essentialRegular)}</p>}
+          {ed.essentialIrregular > 0 && <p>Обязательные нерегулярные: {formatRub(ed.essentialIrregular)}</p>}
+          {ed.secondaryRegular > 0 && <p>Второстепенные регулярные: {formatRub(ed.secondaryRegular)}</p>}
+          {ed.secondaryIrregular > 0 && <p>Второстепенные нерегулярные: {formatRub(ed.secondaryIrregular)}</p>}
+          {point.creditPayments > 0 && (
+            <p className="mt-1 pt-1 border-t border-slate-600">Кредитные платежи: {formatRub(point.creditPayments)}</p>
+          )}
+        </>
+      )}
+      {kind === 'balance' && (
+        <p className={`font-semibold ${point.balance >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+          {point.balance >= 0 ? 'Остаток' : 'Дефицит'}: {formatRub(point.balance)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ── Trend Chart (negative values + transitions + tooltips) ── */
+
+function TrendChart({ trend }: { trend: TrendData }) {
+  const [hover, setHover] = useState<{
+    point: TrendPoint;
+    kind: 'income' | 'expense' | 'balance';
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const points = trend.points;
+
+  const maxPos = Math.max(
+    ...points.map((p) => Math.max(p.income, p.expense, Math.max(0, p.balance))),
+    1,
+  );
+  const minNeg = Math.min(...points.map((p) => Math.min(0, p.balance)), 0);
+  const absNeg = Math.abs(minNeg);
+  const totalRange = maxPos + absNeg || 1;
+  const hasNegative = minNeg < 0;
+
+  const posPct = (maxPos / totalRange) * 100;
+  const negPct = hasNegative ? (absNeg / totalRange) * 100 : 0;
+
+  const handleBarEnter = (
+    e: React.MouseEvent,
+    point: TrendPoint,
+    kind: 'income' | 'expense' | 'balance',
+  ) => {
+    const rect = (e.currentTarget.closest('[data-chart-root]') as HTMLElement)?.getBoundingClientRect();
+    const barRect = e.currentTarget.getBoundingClientRect();
+    if (!rect) return;
+    setHover({
+      point,
+      kind,
+      x: barRect.left + barRect.width / 2 - rect.left,
+      y: barRect.top - rect.top,
+    });
+  };
+
+  const handleBarLeave = () => setHover(null);
+
+  return (
+    <div className="mt-3 relative" data-chart-root>
+      {/* Tooltip — outside height-constrained area so it doesn't clip */}
+      {hover && (
+        <BarTooltip point={hover.point} kind={hover.kind} x={hover.x} y={hover.y} />
+      )}
+      <div className="relative" style={{ height: 200 }}>
+
+        {/* Zero line */}
+        {hasNegative && (
+          <div
+            className="absolute left-2 right-2 h-px bg-slate-400 z-10"
+            style={{ top: `${posPct}%` }}
+          />
+        )}
+        {/* Negative zone background */}
+        {hasNegative && (
+          <div
+            className="absolute left-2 right-2 bg-rose-50/60 rounded-b-lg pointer-events-none"
+            style={{ top: `${posPct}%`, height: `${negPct}%` }}
+          />
+        )}
+
+        {/* Bar columns */}
+        <div className="flex gap-1.5 h-full px-2">
+          {points.map((p) => (
+            <div key={p.key} className="flex-1 flex flex-col min-w-0">
+              {/* Positive zone */}
+              <div
+                className="flex items-end gap-0.5 shrink-0"
+                style={{ height: `${posPct}%` }}
+              >
+                <div
+                  className="flex-1 rounded-t-md min-w-0 bg-cyan-200 transition-all duration-500 ease-out cursor-pointer hover:bg-cyan-300"
+                  style={{ height: `${(p.income / maxPos) * 100}%` }}
+                  onMouseEnter={(e) => handleBarEnter(e, p, 'income')}
+                  onMouseLeave={handleBarLeave}
+                />
+                <div
+                  className="flex-1 rounded-t-md min-w-0 bg-rose-200 transition-all duration-500 ease-out cursor-pointer hover:bg-rose-300"
+                  style={{ height: `${(p.expense / maxPos) * 100}%` }}
+                  onMouseEnter={(e) => handleBarEnter(e, p, 'expense')}
+                  onMouseLeave={handleBarLeave}
+                />
+                <div
+                  className="flex-1 rounded-t-md min-w-0 bg-emerald-200 transition-all duration-500 ease-out cursor-pointer hover:bg-emerald-300"
+                  style={{
+                    height: `${(Math.max(0, p.balance) / maxPos) * 100}%`,
+                  }}
+                  onMouseEnter={(e) => handleBarEnter(e, p, 'balance')}
+                  onMouseLeave={handleBarLeave}
+                />
+              </div>
+
+              {/* Negative zone */}
+              {hasNegative && (
+                <div
+                  className="flex items-start gap-0.5 shrink-0"
+                  style={{ height: `${negPct}%` }}
+                >
+                  <div className="flex-1 min-w-0" />
+                  <div className="flex-1 min-w-0" />
+                  <div
+                    className="flex-1 rounded-b-md min-w-0 bg-red-500 transition-all duration-500 ease-out cursor-pointer hover:bg-red-600"
+                    style={{
+                      height: `${
+                        p.balance < 0 && absNeg > 0
+                          ? (Math.abs(p.balance) / absNeg) * 100
+                          : 0
+                      }%`,
+                    }}
+                    onMouseEnter={(e) => handleBarEnter(e, p, 'balance')}
+                    onMouseLeave={handleBarLeave}
+                  />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
+
+      {/* Month labels */}
       <div className="flex justify-between text-[10px] text-slate-400 mt-2 px-2">
-        {trend.points.map((p) => (
-          <span key={p.key}>{p.label}</span>
+        {points.map((p) => (
+          <span key={p.key} className="flex-1 text-center">
+            {p.label}
+          </span>
         ))}
       </div>
+
       {/* Legend */}
       <div className="flex items-center gap-3 mt-2 px-2 text-[10px] text-slate-400">
-        <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-cyan-200" />Доходы</span>
-        <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-rose-200" />Расходы</span>
-        <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-emerald-200" />Остаток</span>
+        <span className="flex items-center gap-1">
+          <span className="h-2 w-2 rounded-sm bg-cyan-200" />
+          Доходы
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="h-2 w-2 rounded-sm bg-rose-200" />
+          Расходы
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="h-2 w-2 rounded-sm bg-emerald-200" />
+          Остаток
+        </span>
+        {hasNegative && (
+          <span className="flex items-center gap-1">
+            <span className="h-2 w-2 rounded-sm bg-red-500" />
+            Дефицит
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-/* ── Top Expense Categories ──────────────────────────────────── */
+/* ── Top Expense Categories (Collapsed — enhanced) ──────────── */
 
 function TopExpenseCategoriesCollapsed({
   items,
   totalExpenses,
-  installmentCards,
 }: {
   items: TopExpenseItem[];
   totalExpenses: number;
-  installmentCards: Props['installmentCards'];
 }) {
   return (
     <div>
@@ -167,45 +386,71 @@ function TopExpenseCategoriesCollapsed({
           <p className="text-sm font-semibold text-slate-800">Топ категорий расходов</p>
           <p className="text-xs text-slate-400 mt-0.5">за текущий месяц</p>
         </div>
-        <span className="flex h-[22px] w-[22px] items-center justify-center rounded-full border border-slate-200 bg-slate-50 text-[10px] text-slate-400 shrink-0">
-          i
-        </span>
+        <div className="text-right">
+          <p className="text-base font-bold text-slate-900">{formatRub(totalExpenses)}</p>
+        </div>
       </div>
 
-      {/* Summary */}
-      <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2 flex items-center justify-between">
-        <span className="text-sm text-slate-500">Всего</span>
-        <span className="text-sm font-semibold text-slate-700">{formatRub(totalExpenses)}</span>
-      </div>
-
-      {/* Category list */}
-      <div className="mt-2 divide-y divide-slate-100">
-        {items.map((item) => (
-          <div key={item.name} className="flex items-center gap-2 py-2">
-            {anomalyDot(item.status)}
-            <span className="text-sm text-slate-800 flex-1 truncate">{item.name}</span>
-            {item.isRegular ? (
-              <span className="text-[10px] rounded px-1.5 py-0.5 font-medium shrink-0 bg-emerald-50 text-emerald-600">
-                рег.
-              </span>
-            ) : (
-              <span className="text-[10px] rounded px-1.5 py-0.5 font-medium shrink-0 bg-amber-50 text-amber-600">
-                нерег.
-              </span>
-            )}
-            <span className="text-sm font-semibold text-slate-700 tabular-nums w-[76px] text-right shrink-0">
-              {formatRub(item.amount)}
-            </span>
-          </div>
-        ))}
+      {/* Category list with bars */}
+      <div className="mt-3 space-y-2.5">
+        {items.map((item) => {
+          const pct = totalExpenses > 0 ? (item.amount / totalExpenses) * 100 : 0;
+          const barColor =
+            item.status === 'spike'
+              ? 'bg-[#E24B4A]'
+              : item.status === 'drift'
+                ? 'bg-[#EF9F27]'
+                : 'bg-[#378ADD]';
+          return (
+            <div key={item.name}>
+              <div className="flex items-center gap-2 mb-1">
+                {anomalyDot(item.status)}
+                <span className="text-sm text-slate-800 flex-1 truncate">{item.name}</span>
+                {item.status === 'spike' && (
+                  <span className="text-[10px] rounded px-1.5 py-0.5 font-medium shrink-0 bg-red-50 text-red-600">
+                    ↑ всплеск
+                  </span>
+                )}
+                {item.status === 'drift' && (
+                  <span className="text-[10px] rounded px-1.5 py-0.5 font-medium shrink-0 bg-amber-50 text-amber-600">
+                    ↗ дрифт
+                  </span>
+                )}
+                {item.isRegular ? (
+                  <span className="text-[10px] rounded px-1.5 py-0.5 font-medium shrink-0 bg-emerald-50 text-emerald-600">
+                    рег.
+                  </span>
+                ) : (
+                  <span className="text-[10px] rounded px-1.5 py-0.5 font-medium shrink-0 bg-amber-50 text-amber-600">
+                    нерег.
+                  </span>
+                )}
+                <span className="text-[11px] text-slate-400 tabular-nums w-[32px] text-right shrink-0">
+                  {pct.toFixed(0)}%
+                </span>
+                <span className="text-sm font-semibold text-slate-700 tabular-nums w-[76px] text-right shrink-0">
+                  {formatRub(item.amount)}
+                </span>
+              </div>
+              {/* Progress bar */}
+              <div className="ml-3.5 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ease-out ${barColor}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </div>
+          );
+        })}
         {items.length === 0 && (
           <div className="py-4 text-center text-sm text-slate-400">Нет данных</div>
         )}
       </div>
-
     </div>
   );
 }
+
+/* ── Filter Chip ────────────────────────────────────────────── */
 
 type RegularityFilter = 'all' | 'regular' | 'irregular';
 type PriorityFilter = 'all' | 'expense_essential' | 'expense_secondary';
@@ -230,17 +475,62 @@ function FilterChip({
   );
 }
 
+/* ── Top Expense Categories (Expanded — with period filter + transitions) ── */
+
 function TopExpenseCategoriesExpanded({
-  items,
-  totalExpenses,
+  defaultItems,
+  defaultTotal,
   installmentCards,
+  transactions,
+  categories,
 }: {
-  items: TopExpenseItem[];
-  totalExpenses: number;
+  defaultItems: TopExpenseItem[];
+  defaultTotal: number;
   installmentCards: Props['installmentCards'];
+  transactions: Transaction[];
+  categories: Category[];
 }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth());
   const [regFilter, setRegFilter] = useState<RegularityFilter>('all');
   const [prioFilter, setPrioFilter] = useState<PriorityFilter>('all');
+
+  const isCurrentMonth = year === now.getFullYear() && month === now.getMonth();
+
+  // Compute years/months from transactions
+  const years = useMemo(() => {
+    const yrs = getTransactionYears(transactions);
+    if (!yrs.includes(now.getFullYear())) yrs.unshift(now.getFullYear());
+    return yrs;
+  }, [transactions]);
+
+  const months = useMemo(() => {
+    const m = getTransactionMonths(transactions, year);
+    if (year === now.getFullYear() && !m.includes(now.getMonth())) m.push(now.getMonth());
+    m.sort((a, b) => a - b);
+    return m.length > 0 ? m : [now.getMonth()];
+  }, [transactions, year]);
+
+  // Snap month when year changes
+  useEffect(() => {
+    if (months.length > 0 && !months.includes(month)) {
+      setMonth(months[months.length - 1]);
+    }
+  }, [months, month]);
+
+  // Compute data for the selected period (all categories, not just top 5)
+  const items = useMemo(
+    () =>
+      isCurrentMonth
+        ? defaultItems
+        : computeTopExpenses(transactions, categories, year, month, 50),
+    [isCurrentMonth, defaultItems, transactions, categories, year, month],
+  );
+  const totalExpenses = useMemo(
+    () => (isCurrentMonth ? defaultTotal : computeExpenseTotals(transactions, year, month)),
+    [isCurrentMonth, defaultTotal, transactions, year, month],
+  );
 
   const filtered = items.filter((item) => {
     if (regFilter === 'regular' && !item.isRegular) return false;
@@ -257,8 +547,36 @@ function TopExpenseCategoriesExpanded({
       <p className="text-base font-semibold text-slate-900">Категории расходов</p>
       <p className="text-xs text-slate-500 mt-0.5">Анализ расходов по категориям</p>
 
-      {/* Filters */}
+      {/* Period + Regularity + Priority filters */}
       <div className="mt-5 space-y-3">
+        {/* Period selectors */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-slate-400 font-medium">Период:</span>
+          <select
+            value={year}
+            onChange={(e) => setYear(Number(e.target.value))}
+            className="text-xs rounded-lg border border-slate-200 px-2 py-1.5 text-slate-700 bg-white focus:outline-none focus:ring-1 focus:ring-slate-300"
+          >
+            {years.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+          <select
+            value={month}
+            onChange={(e) => setMonth(Number(e.target.value))}
+            className="text-xs rounded-lg border border-slate-200 px-2 py-1.5 text-slate-700 bg-white focus:outline-none focus:ring-1 focus:ring-slate-300"
+          >
+            {months.map((idx) => (
+              <option key={idx} value={idx}>
+                {MONTH_NAMES[idx]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Regularity + priority filters */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex rounded-xl bg-slate-100 p-0.5 text-xs text-slate-500">
             <FilterChip label="Все" active={regFilter === 'all'} onClick={() => setRegFilter('all')} />
@@ -274,60 +592,85 @@ function TopExpenseCategoriesExpanded({
         </div>
       </div>
 
-      {/* SVG Bar Chart */}
-      {filtered.length > 0 && (() => {
-        const maxAmount = Math.max(...filtered.map((i) => i.amount), 1);
-        const barGap = Math.min(100, Math.floor(600 / filtered.length));
-        const chartW = Math.max(780, filtered.length * barGap + 80);
+      {/* SVG Bar Chart with transitions */}
+      {filtered.length > 0 &&
+        (() => {
+          const maxAmount = Math.max(...filtered.map((i) => i.amount), 1);
+          const barGap = Math.min(100, Math.floor(600 / filtered.length));
+          const chartW = Math.max(780, filtered.length * barGap + 80);
 
-        const barFill = (status: 'spike' | 'drift' | 'normal') => {
-          if (status === 'spike') return '#E24B4A';
-          if (status === 'drift') return '#EF9F27';
-          return '#378ADD';
-        };
+          const barFill = (status: 'spike' | 'drift' | 'normal') => {
+            if (status === 'spike') return '#E24B4A';
+            if (status === 'drift') return '#EF9F27';
+            return '#378ADD';
+          };
 
-        return (
-          <div className="mt-5 rounded-[28px] bg-slate-50/70 px-2 py-4">
-            <svg viewBox={`0 0 ${chartW} 340`} width="100%" height="340" xmlns="http://www.w3.org/2000/svg">
-              {[30, 78, 126, 174, 222].map((y) => (
-                <line key={y} x1="56" y1={y} x2={chartW - 20} y2={y} stroke="#E2E8F0" strokeDasharray="4 3" />
-              ))}
-              <line x1="56" y1={270} x2={chartW - 20} y2={270} stroke="#E2E8F0" />
+          return (
+            <div className="mt-5 rounded-[28px] bg-slate-50/70 px-2 py-4 overflow-x-auto">
+              <svg
+                viewBox={`0 0 ${chartW} 340`}
+                width="100%"
+                height="340"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                {[30, 78, 126, 174, 222].map((y) => (
+                  <line key={y} x1="56" y1={y} x2={chartW - 20} y2={y} stroke="#E2E8F0" strokeDasharray="4 3" />
+                ))}
+                <line x1="56" y1={270} x2={chartW - 20} y2={270} stroke="#E2E8F0" />
 
-              {filtered.map((item, idx) => {
-                const x = 80 + idx * barGap;
-                const pct = item.amount / maxAmount;
-                const barH = pct * 240;
-                const y = 270 - barH;
-                return (
-                  <g key={item.name}>
-                    <rect x={x} y={y} width={48} height={barH} rx="6" ry="6" fill={barFill(item.status)} />
-                    <text x={x + 24} y={y - 10} textAnchor="middle" fill="#64748B" fontSize="11" fontWeight="500">
-                      {formatRub(item.amount)}
-                    </text>
-                    {item.status === 'spike' && (
-                      <text x={x + 24} y={y} textAnchor="middle" fill="#A32D2D" fontSize="13" fontWeight="700">{'\u2191'}</text>
-                    )}
-                    {item.status === 'drift' && (
-                      <text x={x + 24} y={y} textAnchor="middle" fill="#854F0B" fontSize="13" fontWeight="700">{'\u2197'}</text>
-                    )}
-                    <text
-                      x={x + 24}
-                      y={292}
-                      textAnchor="end"
-                      fill="#64748B"
-                      fontSize="11"
-                      transform={`rotate(-20 ${x + 24} 292)`}
-                    >
-                      {item.name.length > 10 ? item.name.slice(0, 9) + '.' : item.name}
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
-          </div>
-        );
-      })()}
+                {filtered.map((item, idx) => {
+                  const x = 80 + idx * barGap;
+                  const pct = item.amount / maxAmount;
+                  const barH = pct * 240;
+                  const y = 270 - barH;
+                  return (
+                    <g key={item.name}>
+                      <rect
+                        x={x}
+                        width={48}
+                        rx="6"
+                        ry="6"
+                        fill={barFill(item.status)}
+                        style={{
+                          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                          ...({ y, height: barH } as any),
+                          transition: 'y 0.5s cubic-bezier(0.4,0,0.2,1), height 0.5s cubic-bezier(0.4,0,0.2,1)',
+                        }}
+                      />
+                      <text x={x + 24} y={y - 10} textAnchor="middle" fill="#64748B" fontSize="11" fontWeight="500">
+                        {formatRub(item.amount)}
+                      </text>
+                      {item.status === 'spike' && (
+                        <text x={x + 24} y={y} textAnchor="middle" fill="#A32D2D" fontSize="13" fontWeight="700">
+                          {'\u2191'}
+                        </text>
+                      )}
+                      {item.status === 'drift' && (
+                        <text x={x + 24} y={y} textAnchor="middle" fill="#854F0B" fontSize="13" fontWeight="700">
+                          {'\u2197'}
+                        </text>
+                      )}
+                      <text
+                        x={x + 24}
+                        y={292}
+                        textAnchor="end"
+                        fill="#64748B"
+                        fontSize="11"
+                        transform={`rotate(-20 ${x + 24} 292)`}
+                      >
+                        {item.name.length > 10 ? item.name.slice(0, 9) + '.' : item.name}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
+          );
+        })()}
+
+      {filtered.length === 0 && (
+        <div className="mt-5 py-8 text-center text-sm text-slate-400">Нет данных за выбранный период</div>
+      )}
 
       {/* Legend */}
       <div className="mt-3 flex items-center gap-4 text-xs text-slate-500">
@@ -349,8 +692,18 @@ function TopExpenseCategoriesExpanded({
           <span className="text-base font-bold text-slate-900">{formatRub(filteredTotal)}</span>
         </div>
         <div className="mt-1 flex gap-4 text-xs text-slate-400">
-          <span>Регулярные: <b className="text-slate-500">{formatRub(filtered.filter((i) => i.isRegular).reduce((s, i) => s + i.amount, 0))}</b></span>
-          <span>Нерегулярные: <b className="text-slate-500">{formatRub(filtered.filter((i) => !i.isRegular).reduce((s, i) => s + i.amount, 0))}</b></span>
+          <span>
+            Регулярные:{' '}
+            <b className="text-slate-500">
+              {formatRub(filtered.filter((i) => i.isRegular).reduce((s, i) => s + i.amount, 0))}
+            </b>
+          </span>
+          <span>
+            Нерегулярные:{' '}
+            <b className="text-slate-500">
+              {formatRub(filtered.filter((i) => !i.isRegular).reduce((s, i) => s + i.amount, 0))}
+            </b>
+          </span>
         </div>
       </div>
 
@@ -523,6 +876,8 @@ export function SectionAnalytics({
   incomeStructure,
   avgDailyExpense,
   installmentCards,
+  transactions,
+  categories,
   trendYears,
   trendYear,
   trendMonth,
@@ -550,7 +905,9 @@ export function SectionAnalytics({
         <div className="grid grid-cols-[0.72fr_1.28fr] gap-4">
           {/* Left — Trend Donut */}
           <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] relative">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">{MONTH_NAMES[trendMonth]} {trendYear}</p>
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">
+              {MONTH_NAMES[trendMonth]} {trendYear}
+            </p>
             {trend ? <TrendDonut trend={trend} /> : <EmptyState text="Недостаточно данных" />}
           </div>
 
@@ -565,7 +922,9 @@ export function SectionAnalytics({
                   className="text-xs rounded-lg border border-slate-200 px-2 py-1 text-slate-700 bg-white focus:outline-none focus:ring-1 focus:ring-slate-300"
                 >
                   {trendYears.map((y) => (
-                    <option key={y} value={y}>{y}</option>
+                    <option key={y} value={y}>
+                      {y}
+                    </option>
                   ))}
                 </select>
                 <select
@@ -574,7 +933,9 @@ export function SectionAnalytics({
                   className="text-xs rounded-lg border border-slate-200 px-2 py-1 text-slate-700 bg-white focus:outline-none focus:ring-1 focus:ring-slate-300"
                 >
                   {availableMonths.map((idx) => (
-                    <option key={idx} value={idx}>{MONTH_NAMES[idx]}</option>
+                    <option key={idx} value={idx}>
+                      {MONTH_NAMES[idx]}
+                    </option>
                   ))}
                 </select>
                 <div className="inline-flex rounded-xl bg-slate-100 p-0.5 text-xs text-slate-500">
@@ -612,14 +973,15 @@ export function SectionAnalytics({
               <TopExpenseCategoriesCollapsed
                 items={topExpenses}
                 totalExpenses={totalExpenses}
-                installmentCards={installmentCards}
               />
             }
             expanded={
               <TopExpenseCategoriesExpanded
-                items={topExpenses}
-                totalExpenses={totalExpenses}
+                defaultItems={topExpenses}
+                defaultTotal={totalExpenses}
                 installmentCards={installmentCards}
+                transactions={transactions}
+                categories={categories}
               />
             }
           />

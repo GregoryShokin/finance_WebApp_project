@@ -31,7 +31,7 @@ class AnalyticsService:
         last_day = calendar.monthrange(year, month)[1]
         month_end = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
 
-        # Get installment_card accounts — purchases on these are NOT expenses
+        # Fetch installment_card accounts (used for installment annotations below)
         ic_accounts = (
             self.db.query(Account)
             .filter(
@@ -43,21 +43,18 @@ class AnalyticsService:
         )
         ic_account_ids = [a.id for a in ic_accounts]
 
-        # Fetch expense transactions (exclude installment-card purchases & converted)
+        # Fetch expense transactions (installment_card purchases are real expenses)
         q = (
             self.db.query(Transaction)
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.type == "expense",
                 Transaction.affects_analytics.is_(True),
-                Transaction.converted_to_installment.is_(False),
                 Transaction.transaction_date >= month_start,
                 Transaction.transaction_date <= month_end,
                 Transaction.operation_type.notin_(("transfer", "credit_early_repayment")),
             )
         )
-        if ic_account_ids:
-            q = q.filter(Transaction.account_id.notin_(ic_account_ids))
         txns = q.all()
 
         # Build category map

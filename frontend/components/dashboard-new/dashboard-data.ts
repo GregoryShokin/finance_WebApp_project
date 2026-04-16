@@ -84,7 +84,6 @@ export function computeFlow(transactions: Transaction[]): FlowMetric {
     const amount = toNum(tx.amount);
     if (tx.type === 'income') income += amount;
     if (tx.type === 'expense') {
-      if (tx.converted_to_installment) continue;
       if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') {
         creditPayments += amount;
       } else {
@@ -289,6 +288,20 @@ export function computeSafetyBuffer(goals: GoalWithProgress[], health: Financial
 
 export type FlowType = 'basic' | 'full';
 
+export type TrendBreakdown = {
+  activeRegular: number;
+  activeIrregular: number;
+  passiveRegular: number;
+  passiveIrregular: number;
+};
+
+export type ExpenseBreakdown = {
+  essentialRegular: number;
+  essentialIrregular: number;
+  secondaryRegular: number;
+  secondaryIrregular: number;
+};
+
 export type TrendPoint = {
   key: string;
   label: string;
@@ -296,6 +309,8 @@ export type TrendPoint = {
   expense: number;
   creditPayments: number;
   balance: number;
+  incomeBreakdown: TrendBreakdown;
+  expenseBreakdown: ExpenseBreakdown;
 };
 
 export type TrendData = {
@@ -313,7 +328,6 @@ export type TrendOptions = {
   endMonth: number; // 0-indexed (0=January)
   months?: number; // default 6
   flowType?: FlowType; // default 'full'
-  installmentCardIds?: Set<number>;
 };
 
 export function computeTrend(
@@ -325,7 +339,6 @@ export function computeTrend(
   const endMonth = options?.endMonth ?? now.getMonth();
   const MONTHS = options?.months ?? 6;
   const flowType = options?.flowType ?? 'full';
-  const installmentCardIds = options?.installmentCardIds ?? new Set<number>();
 
   const analytics = transactions.filter((tx) => tx.affects_analytics);
   if (analytics.length === 0) return null;
@@ -347,6 +360,8 @@ export function computeTrend(
       expense: 0,
       creditPayments: 0,
       balance: 0,
+      incomeBreakdown: { activeRegular: 0, activeIrregular: 0, passiveRegular: 0, passiveIrregular: 0 },
+      expenseBreakdown: { essentialRegular: 0, essentialIrregular: 0, secondaryRegular: 0, secondaryIrregular: 0 },
     });
   }
 
@@ -365,23 +380,37 @@ export function computeTrend(
 
     if (tx.type === 'income') {
       bucket.income += amount;
+      const priority = tx.category_priority;
+      const isPassive = priority === 'income_passive';
+      if (isPassive) {
+        if (tx.is_regular) bucket.incomeBreakdown.passiveRegular += amount;
+        else bucket.incomeBreakdown.passiveIrregular += amount;
+      } else {
+        if (tx.is_regular) bucket.incomeBreakdown.activeRegular += amount;
+        else bucket.incomeBreakdown.activeIrregular += amount;
+      }
     }
     if (tx.type === 'expense') {
-      // Exclude installment card expenses and purchases converted to installments
-      if (installmentCardIds.has(tx.account_id)) continue;
-      if (tx.converted_to_installment) continue;
-
       if (tx.operation_type === 'credit_payment') {
         bucket.creditPayments += amount;
       } else {
         bucket.expense += amount;
+        const priority = tx.category_priority;
+        const isEssential = priority === 'expense_essential';
+        if (isEssential) {
+          if (tx.is_regular) bucket.expenseBreakdown.essentialRegular += amount;
+          else bucket.expenseBreakdown.essentialIrregular += amount;
+        } else {
+          if (tx.is_regular) bucket.expenseBreakdown.secondaryRegular += amount;
+          else bucket.expenseBreakdown.secondaryIrregular += amount;
+        }
       }
     }
   }
 
   const points = order
     .map((k) => buckets.get(k)!)
-    .map((p) => ({ ...p, balance: p.income - p.expense - p.creditPayments }));
+    .map((p): TrendPoint => ({ ...p, balance: p.income - p.expense - p.creditPayments }));
 
   const endKey = monthKey(endMonthStart);
   const completed = points.filter((p) => p.key !== endKey && (p.income > 0 || p.expense > 0));
@@ -443,21 +472,22 @@ export type TopExpenseItem = {
 export function computeTopExpenses(
   transactions: Transaction[],
   categories: Category[],
+  targetYear?: number,
+  targetMonth?: number,
+  limit = 5,
 ): TopExpenseItem[] {
   const analytics = transactions.filter(
     (tx) =>
       tx.affects_analytics &&
       tx.type === 'expense' &&
-      !tx.converted_to_installment &&
       tx.operation_type !== 'credit_payment' &&
       tx.operation_type !== 'credit_early_repayment',
   );
 
   const categoriesById = new Map(categories.map((c) => [c.id, c]));
   const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth();
-  const currentKey = monthKey(now);
+  const currentYear = targetYear ?? now.getFullYear();
+  const currentMonth = targetMonth ?? now.getMonth();
 
   // Group current month by category
   const grouped = new Map<string, { name: string; amount: number; categoryId: number | null; isRegular: boolean; priority: string | null }>();
@@ -482,7 +512,7 @@ export function computeTopExpenses(
     }
   }
 
-  const items = [...grouped.values()].sort((a, b) => b.amount - a.amount).slice(0, 5);
+  const items = [...grouped.values()].sort((a, b) => b.amount - a.amount).slice(0, limit);
 
   // Detect anomalies
   return items.map((item) => {
@@ -523,14 +553,15 @@ export function computeTopExpenses(
   });
 }
 
-export function computeExpenseTotals(transactions: Transaction[]) {
+export function computeExpenseTotals(transactions: Transaction[], targetYear?: number, targetMonth?: number) {
   const now = new Date();
-  const key = monthKey(now);
+  const y = targetYear ?? now.getFullYear();
+  const m = targetMonth ?? now.getMonth();
+  const key = monthKey(new Date(y, m, 1));
   let total = 0;
 
   for (const tx of transactions) {
     if (!tx.affects_analytics || tx.type !== 'expense') continue;
-    if (tx.converted_to_installment) continue;
     if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
     if (txMonthKey(tx) !== key) continue;
     total += toNum(tx.amount);
@@ -581,7 +612,6 @@ export function computeIncomeStructure(
       const amount = toNum(tx.amount);
       if (tx.type === 'income') { income += amount; continue; }
       if (tx.type !== 'expense') continue;
-      if (tx.converted_to_installment) continue;
       if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
       const priority = categoriesById.get(tx.category_id ?? -1)?.priority ?? tx.category_priority ?? null;
       if (priority === 'expense_essential') essential += amount;
@@ -625,7 +655,6 @@ export function computeIncomeStructure(
     }
 
     if (tx.type === 'expense') {
-      if (tx.converted_to_installment) continue;
       if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
       const priority = categoriesById.get(tx.category_id ?? -1)?.priority ?? tx.category_priority ?? null;
       if (priority === 'expense_essential') curEssential += amount;
@@ -654,7 +683,6 @@ export function computeAvgDailyExpense(transactions: Transaction[]) {
     (tx) =>
       tx.affects_analytics &&
       tx.type === 'expense' &&
-      !tx.converted_to_installment &&
       tx.operation_type !== 'credit_payment' &&
       tx.operation_type !== 'credit_early_repayment',
   );
@@ -685,6 +713,7 @@ export type CapitalData = {
   receivableTotal: number;
   totalAssets: number;
   creditDebt: number;
+  creditCardDebt: number;
   counterpartyDebt: number;
   totalDebt: number;
   liquidCapital: number;
@@ -719,11 +748,6 @@ export function computeCapital(
   const receivableTotal = toNum(debts?.receivableTotal);
   const counterpartyDebt = toNum(debts?.payableTotal);
   const totalAssets = liquidTotal + depositTotal + brokerTotal + realAssetsTotal + receivableTotal;
-  const creditDebt = toNum(health.leverage_total_debt);
-  const totalDebt = creditDebt + counterpartyDebt;
-  const liquidCapital = liquidTotal + depositTotal + receivableTotal - totalDebt;
-  const netCapital = totalAssets - totalDebt;
-
   const creditAccounts = accounts
     .filter((a) => a.account_type === 'credit')
     .map((a) => ({
@@ -745,6 +769,12 @@ export function computeCapital(
     })
     .filter((c) => c.limit > 0);
 
+  const creditCardDebt = creditCards.reduce((s, c) => s + c.used, 0);
+  const creditDebt = toNum(health.leverage_total_debt);
+  const totalDebt = creditDebt + creditCardDebt + counterpartyDebt;
+  const liquidCapital = liquidTotal + depositTotal + receivableTotal - totalDebt;
+  const netCapital = totalAssets - totalDebt;
+
   return {
     liquidTotal,
     depositTotal,
@@ -753,6 +783,7 @@ export function computeCapital(
     receivableTotal,
     totalAssets,
     creditDebt,
+    creditCardDebt,
     counterpartyDebt,
     totalDebt,
     liquidCapital,

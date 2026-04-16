@@ -176,7 +176,6 @@ class TransactionService:
                 status="active",
             )
             self.db.add(purchase)
-            transaction.converted_to_installment = True
 
         self.db.commit()
         self.db.refresh(transaction)

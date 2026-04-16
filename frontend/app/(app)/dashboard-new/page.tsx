@@ -114,11 +114,6 @@ export default function DashboardNewPage() {
     }
   }, [availableMonths, trendMonth]);
 
-  const installmentCardIds = useMemo(
-    () => new Set(accounts.filter((a) => a.account_type === 'installment_card').map((a) => a.id)),
-    [accounts],
-  );
-
   // ── Computed data ───────────────────────────────────────────────
 
   const flow = useMemo(() => (health ? computeFlow(transactions) : null), [transactions, health]);
@@ -151,9 +146,8 @@ export default function DashboardNewPage() {
         endMonth: trendMonth,
         months: trendMonthsCount,
         flowType,
-        installmentCardIds,
       }),
-    [transactions, trendYear, trendMonth, trendMonthsCount, flowType, installmentCardIds],
+    [transactions, trendYear, trendMonth, trendMonthsCount, flowType],
   );
   const topExpenses = useMemo(() => computeTopExpenses(transactions, categories), [transactions, categories]);
   const totalExpenses = useMemo(() => computeExpenseTotals(transactions), [transactions]);
@@ -204,6 +198,8 @@ export default function DashboardNewPage() {
             incomeStructure={incomeStructure}
             avgDailyExpense={avgDailyExpense}
             installmentCards={installmentCards}
+            transactions={transactions}
+            categories={categories}
             trendYears={trendYears}
             trendYear={trendYear}
             trendMonth={trendMonth}

@@ -58,23 +58,6 @@ class SavingsRateMetric:
 class MetricsService:
     def __init__(self, db: Session) -> None:
         self.db = db
-        self._ic_account_ids: set[int] | None = None
-
-    def _get_installment_card_ids(self, user_id: int) -> set[int]:
-        """Cache installment_card account IDs per service instance."""
-        if self._ic_account_ids is None:
-            rows = (
-                self.db.query(Account.id)
-                .filter(Account.user_id == user_id, Account.account_type == "installment_card")
-                .all()
-            )
-            self._ic_account_ids = {r.id for r in rows}
-        return self._ic_account_ids
-
-    def _is_real_expense(self, tx: Transaction, user_id: int) -> bool:
-        """Check if a transaction is a real expense (not an installment-card purchase)."""
-        ic_ids = self._get_installment_card_ids(user_id)
-        return tx.account_id not in ic_ids
 
     # ── 1. Financial independence ─────────────────────────────────────────────
 
@@ -248,7 +231,6 @@ class MetricsService:
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.affects_analytics.is_(True),
-                Transaction.converted_to_installment.is_(False),
                 Transaction.transaction_date >= _month_start_dt(month),
                 Transaction.transaction_date <= _month_end_dt(month),
             )
@@ -261,12 +243,11 @@ class MetricsService:
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.affects_analytics.is_(True),
-                Transaction.converted_to_installment.is_(False),
             )
             .all()
         )
 
-    def _calc_basic_flow_for_month(self, txns: list[Transaction], user_id: int) -> Decimal:
+    def _calc_basic_flow_for_month(self, txns: list[Transaction]) -> Decimal:
         regular_income = sum(
             (Decimal(str(tx.amount)) for tx in txns
              if tx.type == "income" and tx.is_regular
@@ -276,8 +257,7 @@ class MetricsService:
         regular_expense = sum(
             (Decimal(str(tx.amount)) for tx in txns
              if tx.type == "expense" and tx.is_regular
-             and tx.operation_type not in ("transfer", "credit_payment", "credit_early_repayment")
-             and self._is_real_expense(tx, user_id)),
+             and tx.operation_type not in ("transfer", "credit_payment", "credit_early_repayment")),
             Decimal("0"),
         )
         credit_payments = sum(
@@ -287,7 +267,7 @@ class MetricsService:
         )
         return _round2(regular_income - regular_expense - credit_payments)
 
-    def _calc_full_flow_for_month(self, txns: list[Transaction], user_id: int) -> Decimal:
+    def _calc_full_flow_for_month(self, txns: list[Transaction]) -> Decimal:
         income = sum(
             (Decimal(str(tx.amount)) for tx in txns
              if tx.type == "income"
@@ -297,8 +277,7 @@ class MetricsService:
         expense = sum(
             (Decimal(str(tx.amount)) for tx in txns
              if tx.type == "expense"
-             and tx.operation_type not in ("transfer", "credit_early_repayment")
-             and self._is_real_expense(tx, user_id)),
+             and tx.operation_type not in ("transfer", "credit_early_repayment")),
             Decimal("0"),
         )
         return _round2(income - expense)
@@ -315,8 +294,8 @@ class MetricsService:
         current = date(year, month, 1)
         txns = self._get_month_transactions(user_id, current)
 
-        basic_flow = self._calc_basic_flow_for_month(txns, user_id)
-        full_flow = self._calc_full_flow_for_month(txns, user_id)
+        basic_flow = self._calc_basic_flow_for_month(txns)
+        full_flow = self._calc_full_flow_for_month(txns)
 
         # lifestyle_indicator: avg basic_flow / avg regular_income over last 3 completed months
         basic_flows: list[Decimal] = []
@@ -325,7 +304,7 @@ class MetricsService:
             prev = _prev_month(current, n)
             prev_txns = self._get_month_transactions(user_id, prev)
             if prev_txns:
-                basic_flows.append(self._calc_basic_flow_for_month(prev_txns, user_id))
+                basic_flows.append(self._calc_basic_flow_for_month(prev_txns))
                 regular_incomes.append(self._calc_regular_income_for_month(prev_txns))
 
         lifestyle_indicator = None
@@ -350,7 +329,7 @@ class MetricsService:
         prev_month_date = _prev_month(current, 1)
         prev_txns = self._get_month_transactions(user_id, prev_month_date)
         if prev_txns:
-            prev_basic = self._calc_basic_flow_for_month(prev_txns, user_id)
+            prev_basic = self._calc_basic_flow_for_month(prev_txns)
             trend = _round2(basic_flow - prev_basic)
 
         return {
@@ -551,8 +530,7 @@ class MetricsService:
             outflow = sum(
                 (Decimal(str(tx.amount)) for tx in prev_txns
                  if tx.type == "expense"
-                 and tx.operation_type not in ("transfer", "credit_early_repayment")
-                 and self._is_real_expense(tx, user_id)),
+                 and tx.operation_type not in ("transfer", "credit_early_repayment")),
                 Decimal("0"),
             )
             # Add credit payments too

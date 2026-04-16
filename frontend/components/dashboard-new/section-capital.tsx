@@ -36,6 +36,9 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
 
   const totalAssets = capital.totalAssets;
   const totalDebt = capital.totalDebt;
+  const liquidAssetsTotal = capital.liquidTotal + capital.depositTotal + capital.receivableTotal;
+  const displayedAssets = capitalMode === 'liquid' ? liquidAssetsTotal : totalAssets;
+  const capitalLabel = capitalMode === 'liquid' ? 'Ликвидный капитал' : 'Чистый капитал';
 
   // Group real assets by type
   const realAssetsByType = capital.realAssets.reduce<Record<string, number>>((acc, a) => {
@@ -139,6 +142,14 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
                 {formatRub(capital.creditDebt)}
               </span>
             </div>
+            {capital.creditCardDebt > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Карты</span>
+                <span className="font-medium text-rose-600">
+                  {formatRub(capital.creditCardDebt)}
+                </span>
+              </div>
+            )}
             {capital.counterpartyDebt > 0 && (
               <div className="flex justify-between text-sm">
                 <span className="text-slate-600">Я должен</span>
@@ -165,7 +176,7 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
         {/* Assets column */}
         <div>
           <p className="text-xs font-semibold text-emerald-500 uppercase tracking-wider mb-3">
-            Активы — {formatRub(totalAssets)}
+            Активы — {formatRub(displayedAssets)}
           </p>
           <div className="space-y-2">
             {capital.liquidTotal > 0 && (
@@ -197,22 +208,32 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
                 <p className="text-[11px] text-slate-400">Вам должны контрагенты</p>
               </div>
             )}
-            {Object.entries(realAssetsByType).map(
-              ([type, val]) =>
-                val > 0 && (
-                  <div key={type} className="p-3 rounded-xl bg-emerald-50/60">
-                    <p className="text-xs text-slate-500">
-                      {ASSET_TYPE_LABELS[type] ?? type}
-                    </p>
-                    <p className="text-sm font-bold text-slate-900">
-                      {formatRub(val)}
-                    </p>
-                    <p className="text-[11px] text-slate-400">
-                      Оценочная стоимость
-                    </p>
-                  </div>
-                ),
+            {capitalMode === 'net' && capital.brokerTotal > 0 && (
+              <div className="p-3 rounded-xl bg-emerald-50/60">
+                <p className="text-xs text-slate-500">Брокерские счета</p>
+                <p className="text-sm font-bold text-slate-900">
+                  {formatRub(capital.brokerTotal)}
+                </p>
+                <p className="text-[11px] text-slate-400">Инвестиционные счета</p>
+              </div>
             )}
+            {capitalMode === 'net' &&
+              Object.entries(realAssetsByType).map(
+                ([type, val]) =>
+                  val > 0 && (
+                    <div key={type} className="p-3 rounded-xl bg-emerald-50/60">
+                      <p className="text-xs text-slate-500">
+                        {ASSET_TYPE_LABELS[type] ?? type}
+                      </p>
+                      <p className="text-sm font-bold text-slate-900">
+                        {formatRub(val)}
+                      </p>
+                      <p className="text-[11px] text-slate-400">
+                        Оценочная стоимость
+                      </p>
+                    </div>
+                  ),
+              )}
           </div>
         </div>
 
@@ -262,7 +283,7 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
               <div className="flex justify-between">
                 <span className="text-slate-500">Активы</span>
                 <span className="font-medium text-emerald-600">
-                  {formatRub(totalAssets)}
+                  {formatRub(displayedAssets)}
                 </span>
               </div>
               <div className="flex justify-between">
@@ -273,16 +294,16 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
               </div>
               <div className="flex justify-between border-t border-slate-200 pt-1">
                 <span className="font-semibold text-slate-700">
-                  Чистый капитал
+                  {capitalLabel}
                 </span>
                 <span
                   className={`font-bold ${
-                    capital.netCapital >= 0
+                    value >= 0
                       ? 'text-emerald-600'
                       : 'text-rose-600'
                   }`}
                 >
-                  {formatRub(capital.netCapital)}
+                  {formatRub(value)}
                 </span>
               </div>
             </div>
