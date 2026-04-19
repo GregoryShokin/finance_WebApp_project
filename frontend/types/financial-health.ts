@@ -73,12 +73,12 @@ export type FIScoreHistory = {
   baseline: number;
 };
 
+// FI-score v1.4 (Phase 4, 2026-04-19): 4 components, weights 0.20+0.30+0.25+0.25
 export type FIScoreComponents = {
-  savings_rate: number;
-  discipline: number;
-  financial_independence: number;
-  safety_buffer: number;
-  dti_inverse: number;
+  savings_rate: number;      // weight 0.20
+  capital_trend: number;     // weight 0.30 — capital trajectory
+  dti_inverse: number;       // weight 0.25
+  buffer_stability: number;  // weight 0.25 — deposit months / 6 * 10
   months_calculated?: number;
   history?: FIScoreHistory;
 };

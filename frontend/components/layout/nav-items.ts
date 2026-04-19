@@ -10,7 +10,6 @@ import {
   ListTree,
   PiggyBank,
   ReceiptText,
-  Sparkles,
   Target,
   Wallet,
 } from 'lucide-react';
@@ -39,7 +38,6 @@ export const navItems: NavItem[] = [
     icon: BarChart2,
     children: [
       { href: '/dashboard', label: 'Дашборд', icon: LayoutDashboard },
-      { href: '/dashboard-new', label: 'Дашборд New', icon: Sparkles },
       { href: '/health', label: 'Финансовое здоровье', icon: HeartPulse },
     ],
   },

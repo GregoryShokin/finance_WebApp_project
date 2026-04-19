@@ -99,7 +99,7 @@ function mapOperationToUi(
   if (operationType === 'investment_sell') {
     return { mainType: 'investment', investmentDirection: 'sell', debtDirection: '', creditOperationKind: '' };
   }
-  if (operationType === 'credit_disbursement' || operationType === 'credit_payment' || operationType === 'credit_early_repayment') {
+  if (operationType === 'credit_disbursement' || operationType === 'credit_early_repayment') {
     return {
       mainType: 'credit_operation',
       investmentDirection: '',
@@ -132,7 +132,7 @@ function mapUiToOperation(mainType: MainTypeValue, investmentDirection: Investme
   if (mainType === 'credit_operation') {
     if (creditOperationKind === 'disbursement') return 'credit_disbursement';
     if (creditOperationKind === 'early_repayment') return 'credit_early_repayment';
-    return 'credit_payment';
+    return 'transfer';
   }
   if (mainType === 'debt') {
     return 'debt';
@@ -154,9 +154,7 @@ function getFixedTypeByOperation(operationType: TransactionOperationType): Trans
     investment_buy: 'expense',
     investment_sell: 'income',
     credit_disbursement: 'income',
-    credit_payment: 'expense',
     credit_early_repayment: 'expense',
-    credit_interest: 'expense',
     debt: null,
     refund: 'income',
     adjustment: null,
@@ -198,7 +196,7 @@ function getOperationSummaryLabel(
   if (operationType === 'investment_buy' || operationType === 'investment_sell') {
     if (!investmentDirection) return 'Инвестиционный: действие не выбрано';
   }
-  if (operationType === 'credit_disbursement' || operationType === 'credit_payment' || operationType === 'credit_early_repayment') {
+  if (operationType === 'credit_disbursement' || operationType === 'credit_early_repayment') {
     if (!hasValidCreditOperationKind) return 'Кредитная операция: вид не выбран';
     return `Кредитная операция: ${getCreditOperationKindLabel(creditOperationKind)}`;
   }

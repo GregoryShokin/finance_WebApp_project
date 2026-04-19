@@ -167,19 +167,24 @@ export function AccountCard({
 
                 const lastPaymentFromTx = (() => {
                   const txList = transactions ?? [];
-                  const creditPayments = txList
+                  // Sum interest + body for the most recent month.
+                  // Body uses credit_account_id != null to exclude plain card top-ups.
+                  const allPayments = txList
                     .filter((tx) => {
-                      if (tx.operation_type !== 'credit_payment') return false;
-                      const creditId = tx.credit_account_id ?? tx.target_account_id;
-                      return creditId === account.id;
+                      const isInterest = tx.type === 'expense' && tx.operation_type === 'regular' && tx.credit_account_id === account.id;
+                      const isBody = tx.operation_type === 'transfer' && tx.target_account_id === account.id && tx.credit_account_id != null;
+                      return isInterest || isBody;
                     })
-                    .sort(
-                      (a, b) =>
-                        new Date(b.transaction_date).getTime() -
-                        new Date(a.transaction_date).getTime(),
-                    );
-
-                  return creditPayments[0] ? Number(creditPayments[0].amount) : 0;
+                    .sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime());
+                  if (allPayments.length === 0) return 0;
+                  const latestDate = new Date(allPayments[0].transaction_date);
+                  const latestMonth = `${latestDate.getFullYear()}-${latestDate.getMonth()}`;
+                  return allPayments
+                    .filter((tx) => {
+                      const d = new Date(tx.transaction_date);
+                      return `${d.getFullYear()}-${d.getMonth()}` === latestMonth;
+                    })
+                    .reduce((s, tx) => s + Number(tx.amount), 0);
                 })();
 
                 const paymentSource: 'transactions' | 'manual' | 'none' =
@@ -188,13 +193,12 @@ export function AccountCard({
 
                 const realOverpay = (() => {
                   const txList = transactions ?? [];
+                  // realOverpay = sum of interest expense for this credit
                   return txList
-                    .filter((tx) => {
-                      if (tx.operation_type !== 'credit_payment') return false;
-                      const creditId = tx.credit_account_id ?? tx.target_account_id;
-                      return creditId === account.id;
-                    })
-                    .reduce((sum, tx) => sum + Number(tx.credit_interest_amount ?? 0), 0);
+                    .filter((tx) =>
+                      tx.type === 'expense' && tx.operation_type === 'regular' && tx.credit_account_id === account.id
+                    )
+                    .reduce((sum, tx) => sum + Number(tx.amount), 0);
                 })();
 
                 const hasOverpayData = realOverpay > 0;
@@ -202,13 +206,12 @@ export function AccountCard({
 
                 const totalPrincipalPaid = (() => {
                   const txList = transactions ?? [];
+                  // totalPrincipalPaid = sum of body transfer amounts
                   return txList
-                    .filter((tx) => {
-                      if (tx.operation_type !== 'credit_payment') return false;
-                      const creditId = tx.credit_account_id ?? tx.target_account_id;
-                      return creditId === account.id;
-                    })
-                    .reduce((sum, tx) => sum + Number(tx.credit_principal_amount ?? 0), 0);
+                    .filter((tx) =>
+                      tx.operation_type === 'transfer' && tx.target_account_id === account.id && tx.credit_account_id != null
+                    )
+                    .reduce((sum, tx) => sum + Number(tx.amount), 0);
                 })();
 
                 const closeDate = (() => {

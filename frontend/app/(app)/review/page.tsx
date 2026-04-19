@@ -148,12 +148,10 @@ function getOperationOptionItems(): SearchSelectItem[] {
     { value: 'transfer', label: 'Перевод', searchText: 'перевод между счетами transfer' },
     { value: 'refund', label: 'Возврат', searchText: 'возврат refund' },
     { value: 'adjustment', label: 'Корректировка', searchText: 'корректировка adjustment' },
-    { value: 'credit_payment', label: 'Кредитная операция', searchText: 'платеж по кредиту credit payment кредит' },
   ];
 }
 
 function getOperationLabel(value: TransactionOperationType) {
-  if (value === 'credit_payment') return 'Кредитная операция';
   if (value === 'transfer') return 'Перевод';
   if (value === 'refund') return 'Возврат';
   if (value === 'adjustment') return 'Корректировка';
@@ -170,7 +168,6 @@ function formatImportAmount(row: ImportReviewRow) {
 
 function inferTypeByOperation(operationType: TransactionOperationType, currentType: TransactionKind): TransactionKind {
   if (operationType === 'refund') return 'income';
-  if (operationType === 'credit_payment') return 'expense';
   if (operationType === 'transfer') return 'expense';
   return currentType;
 }

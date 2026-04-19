@@ -34,11 +34,10 @@ function getFiZone(score: number) {
 
 function buildComponents(components: FIScoreComponents): ScoreComponentRow[] {
   return [
-    { label: 'РќРѕСЂРјР° СЃР±РµСЂРµР¶РµРЅРёР№', value: components.savings_rate },
-    { label: 'Р”РёСЃС†РёРїР»РёРЅР°', value: components.discipline },
-    { label: 'Р¤РёРЅ. РЅРµР·Р°РІРёСЃРёРјРѕСЃС‚СЊ', value: components.financial_independence },
-    { label: 'Подушка безопасности', value: components.safety_buffer },
-    { label: 'РљСЂРµРґРёС‚РЅР°СЏ РЅР°РіСЂСѓР·РєР°', value: components.dti_inverse },
+    { label: 'Норма сбережений', value: components.savings_rate },
+    { label: 'Траектория капитала', value: components.capital_trend },
+    { label: 'Кредитная нагрузка', value: components.dti_inverse },
+    { label: 'Буфер устойчивости', value: components.buffer_stability },
   ];
 }
 

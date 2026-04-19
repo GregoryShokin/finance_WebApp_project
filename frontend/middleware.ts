@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { ACCESS_TOKEN_KEY } from '@/lib/auth/constants';
 
 const publicRoutes = ['/login', '/register'];
-const appRoutes = ['/dashboard', '/dashboard-new', '/transactions', '/import', '/review', '/categories', '/rules', '/accounts', '/bank-connections', '/planning', '/health', '/goals'];
+const appRoutes = ['/dashboard', '/transactions', '/import', '/review', '/categories', '/rules', '/accounts', '/bank-connections', '/planning', '/health', '/goals'];
 
 export function middleware(request: NextRequest) {
   const token = request.cookies.get(ACCESS_TOKEN_KEY)?.value;

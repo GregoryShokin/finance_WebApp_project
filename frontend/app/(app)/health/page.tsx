@@ -11,6 +11,7 @@ import { PageShell } from '@/components/layout/page-shell';
 import { ErrorState, LoadingState } from '@/components/states/page-state';
 import { Card } from '@/components/ui/card';
 import { useFinancialHealth } from '@/hooks/use-financial-health';
+import { useHealthSummary } from '@/hooks/use-health-summary';
 import { getCategories } from '@/lib/api/categories';
 import { getGoals } from '@/lib/api/goals';
 import { getTransactions } from '@/lib/api/transactions';
@@ -271,6 +272,8 @@ function formatRublesCompact(value: number) {
 
 export default function HealthPage() {
   const healthQuery = useFinancialHealth();
+  const healthSummaryQuery = useHealthSummary();
+  const healthSummary = healthSummaryQuery.data;
   const transactionsQuery = useQuery({ queryKey: ['transactions', 'health'], queryFn: () => getTransactions() });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'health'], queryFn: () => getCategories() });
   const goalsQuery = useQuery({ queryKey: ['goals', 'health'], queryFn: getGoals });
@@ -290,12 +293,32 @@ export default function HealthPage() {
     const safetyGoal = goals.find((goal) => goal.system_key === 'safety_buffer') ?? null;
     const safetyBufferPercent = safetyGoal?.percent ?? 0;
 
-    const componentRows: Array<{ key: string; label: string; value: number; tone: Tone }> = [
-      { key: 'savings_rate', label: 'Норма сбережений', value: currentHealth.fi_score_components.savings_rate ?? 0, tone: getSavingsTone((currentHealth.fi_score_components.savings_rate ?? 0) * 2) },
-      { key: 'discipline', label: 'Дисциплина', value: currentHealth.fi_score_components.discipline ?? 0, tone: getDisciplineTone(currentHealth.discipline) },
-      { key: 'financial_independence', label: 'Финансовая независимость', value: currentHealth.fi_score_components.financial_independence ?? 0, tone: currentHealth.fi_percent >= 50 ? 'good' : 'info' },
-      { key: 'safety_buffer', label: 'Подушка безопасности', value: currentHealth.fi_score_components.safety_buffer ?? 0, tone: (currentHealth.fi_score_components.safety_buffer ?? 0) < 5 ? 'warning' : 'good' },
-      { key: 'dti_inverse', label: 'Кредитная нагрузка', value: currentHealth.fi_score_components.dti_inverse ?? 0, tone: (currentHealth.fi_score_components.dti_inverse ?? 0) < 5 ? 'warning' : 'good' },
+    // FI-score v1.4 components (Phase 4): 4 components, weights 0.20+0.30+0.25+0.25
+    const componentRows: Array<{ key: string; label: string; value: number; tone: Tone; hint?: string }> = [
+      {
+        key: 'savings_rate', label: 'Норма сбережений',
+        value: currentHealth.fi_score_components.savings_rate ?? 0,
+        tone: getSavingsTone((currentHealth.fi_score_components.savings_rate ?? 0) * 3),
+        hint: 'Базовый поток / регулярный доход. ≥30% → отлично.',
+      },
+      {
+        key: 'capital_trend', label: 'Траектория капитала',
+        value: currentHealth.fi_score_components.capital_trend ?? 5,
+        tone: (currentHealth.fi_score_components.capital_trend ?? 5) >= 6 ? 'good' : (currentHealth.fi_score_components.capital_trend ?? 5) >= 4 ? 'info' : 'warning',
+        hint: 'Капитал растёт или падает за последние 3 мес. 5 = нейтральный.',
+      },
+      {
+        key: 'dti_inverse', label: 'Кредитная нагрузка',
+        value: currentHealth.fi_score_components.dti_inverse ?? 0,
+        tone: (currentHealth.fi_score_components.dti_inverse ?? 0) < 5 ? 'warning' : 'good',
+        hint: 'Чем ниже DTI, тем выше балл. DTI<30% → 5+.',
+      },
+      {
+        key: 'buffer_stability', label: 'Буфер устойчивости',
+        value: currentHealth.fi_score_components.buffer_stability ?? 0,
+        tone: (currentHealth.fi_score_components.buffer_stability ?? 0) < 5 ? 'warning' : 'good',
+        hint: 'Месяцы расходов на вкладах. 3 мес → 5, 6+ мес → 10.',
+      },
     ];
 
     const diagnosis = currentHealth.dti > 40
@@ -424,38 +447,58 @@ export default function HealthPage() {
       ? Math.max(1, dtiDeclinePerMonth > 0 ? Math.ceil((currentHealth.dti - 30) / dtiDeclinePerMonth) : 6)
       : 0;
 
+    // Phase 7: prefer recommendations from MetricsService (single source of truth).
+    // Fallback to local rules if summary not available yet.
     const actionSteps: ActionStep[] = [];
-    if (safetyBufferPercent < 100) {
-      actionSteps.push({
-        key: 'safety-buffer',
-        title: `Сформируй подушку безопасности — тебе нужно ещё ${formatMoney(neededToSafety)} до минимальной цели.`,
-        href: '/planning?lesson=6',
-        lesson: 'Урок 6 — Подушка безопасности',
-      });
-    }
-    if (currentHealth.avg_savings_rate < 20) {
-      actionSteps.push({
-        key: 'savings-rate',
-        title: `Подними норму сбережений до 20% — это ${formatMoney(savingsGapMonthly)} в месяц при твоём доходе.`,
-        href: '/planning?lesson=3',
-        lesson: 'Урок 3 — Норма сбережений',
-      });
-    }
-    if (currentHealth.dti > 30) {
-      actionSteps.push({
-        key: 'dti',
-        title: `Снижай кредитную нагрузку. При текущем темпе выйдешь в зелёную зону через ${monthsToGreen} мес.`,
-        href: '/planning?lesson=1',
-        lesson: 'Урок 1 — Кредиты и долги',
-      });
-    }
-    if (!actionSteps.length || actionSteps.length < 3) {
-      actionSteps.push({
-        key: 'invest',
-        title: 'Начни инвестировать свободный капитал — подушка сформирована, нагрузка низкая.',
-        href: '/planning?lesson=11',
-        lesson: 'Урок 11 — Инвестиционный портфель',
-      });
+    if (healthSummary && healthSummary.recommendations.length > 0) {
+      const lessonByMetric: Record<string, { href: string; lesson: string }> = {
+        flow: { href: '/planning?lesson=3', lesson: 'Урок 3 — Норма сбережений' },
+        dti: { href: '/planning?lesson=1', lesson: 'Урок 1 — Кредиты и долги' },
+        buffer_stability: { href: '/planning?lesson=6', lesson: 'Урок 6 — Буфер устойчивости' },
+        capital: { href: '/planning?lesson=11', lesson: 'Урок 11 — Капитал и инвестиции' },
+      };
+      for (const rec of healthSummary.recommendations.slice(0, 3)) {
+        const link = lessonByMetric[rec.metric] ?? { href: '/planning', lesson: '' };
+        actionSteps.push({
+          key: rec.message_key,
+          title: `${rec.title}. ${rec.message}`,
+          href: link.href,
+          lesson: link.lesson,
+        });
+      }
+    } else {
+      if (safetyBufferPercent < 100) {
+        actionSteps.push({
+          key: 'safety-buffer',
+          title: `Сформируй подушку безопасности — тебе нужно ещё ${formatMoney(neededToSafety)} до минимальной цели.`,
+          href: '/planning?lesson=6',
+          lesson: 'Урок 6 — Подушка безопасности',
+        });
+      }
+      if (currentHealth.avg_savings_rate < 20) {
+        actionSteps.push({
+          key: 'savings-rate',
+          title: `Подними норму сбережений до 20% — это ${formatMoney(savingsGapMonthly)} в месяц при твоём доходе.`,
+          href: '/planning?lesson=3',
+          lesson: 'Урок 3 — Норма сбережений',
+        });
+      }
+      if (currentHealth.dti > 30) {
+        actionSteps.push({
+          key: 'dti',
+          title: `Снижай кредитную нагрузку. При текущем темпе выйдешь в зелёную зону через ${monthsToGreen} мес.`,
+          href: '/planning?lesson=1',
+          lesson: 'Урок 1 — Кредиты и долги',
+        });
+      }
+      if (!actionSteps.length || actionSteps.length < 3) {
+        actionSteps.push({
+          key: 'invest',
+          title: 'Начни инвестировать свободный капитал — подушка сформирована, нагрузка низкая.',
+          href: '/planning?lesson=11',
+          lesson: 'Урок 11 — Инвестиционный портфель',
+        });
+      }
     }
 
     return {
@@ -482,7 +525,7 @@ export default function HealthPage() {
       savingsAdvice,
       actionSteps: actionSteps.slice(0, 3),
     };
-  }, [categoriesQuery.data, goalsQuery.data, health, transactionsQuery.data]);
+  }, [categoriesQuery.data, goalsQuery.data, health, transactionsQuery.data, healthSummary]);
 
   if (isLoading) {
     return (

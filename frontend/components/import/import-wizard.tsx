@@ -276,9 +276,7 @@ function mapOperationToUi(
   if (operationType === 'credit_disbursement') {
     return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'disbursement' };
   }
-  if (operationType === 'credit_payment') {
-    return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'payment' };
-  }
+  
   if (operationType === 'credit_early_repayment') {
     return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'early_repayment' };
   }
@@ -299,9 +297,7 @@ function resolveOperationFields(form: RowEditState): Pick<RowEditState, 'operati
       operation_type:
         form.credit_operation_kind === 'disbursement'
           ? 'credit_disbursement'
-          : form.credit_operation_kind === 'early_repayment'
-            ? 'credit_early_repayment'
-            : 'credit_payment',
+          : 'credit_early_repayment',
       type: form.credit_operation_kind === 'disbursement' ? 'income' : 'expense',
     };
   }
@@ -437,11 +433,11 @@ function buildRowUpdatePayload(
     account_id: form.account_id ? Number(form.account_id) : null,
     target_account_id: resolved.operation_type === 'transfer'
       ? (form.target_account_id ? Number(form.target_account_id) : null)
-      : resolved.operation_type === 'credit_payment' || resolved.operation_type === 'credit_early_repayment'
+      : resolved.operation_type === 'credit_early_repayment'
         ? (form.credit_account_id ? Number(form.credit_account_id) : null)
         : null,
     credit_account_id:
-      resolved.operation_type === 'credit_payment' || resolved.operation_type === 'credit_early_repayment'
+      resolved.operation_type === 'credit_early_repayment'
         ? (form.credit_account_id ? Number(form.credit_account_id) : null)
         : null,
     category_id: resolved.operation_type === 'regular' || resolved.operation_type === 'refund' ? (splitPayload && splitPayload.length >= 2 ? null : form.category_id ? Number(form.category_id) : null) : null,
@@ -454,11 +450,11 @@ function buildRowUpdatePayload(
     transaction_date: form.transaction_date ? new Date(form.transaction_date).toISOString() : null,
     currency: form.currency,
     credit_principal_amount:
-      resolved.operation_type === 'credit_payment' || resolved.operation_type === 'credit_early_repayment'
+      resolved.operation_type === 'credit_early_repayment'
         ? toNumericValue(form.credit_principal_amount)
         : null,
     credit_interest_amount:
-      resolved.operation_type === 'credit_payment'
+      resolved.operation_type === 'credit_early_repayment'
         ? toNumericValue(form.credit_interest_amount)
         : resolved.operation_type === 'credit_early_repayment'
           ? 0

@@ -8,9 +8,7 @@ export type TransactionOperationType =
   | 'investment_buy'
   | 'investment_sell'
   | 'credit_disbursement'
-  | 'credit_payment'
   | 'credit_early_repayment'
-  | 'credit_interest'
   | 'debt'
   | 'refund'
   | 'adjustment';

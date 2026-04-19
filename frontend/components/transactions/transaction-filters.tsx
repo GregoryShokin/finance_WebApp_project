@@ -223,7 +223,6 @@ export function TransactionFilters({
         label: item.label,
         searchText: `${item.label} ${item.value}`,
       })),
-      { value: 'credit_payment', label: 'Платёж по кредиту', searchText: 'платеж кредит credit payment погашение' },
       { value: 'credit_early_repayment', label: 'Досрочное погашение', searchText: 'досрочное погашение кредит early repayment' },
       { value: 'credit_disbursement', label: 'Получение кредита', searchText: 'получение кредита выдача disbursement' },
     ].filter((item, index, self) => self.findIndex((x) => x.value === item.value) === index),

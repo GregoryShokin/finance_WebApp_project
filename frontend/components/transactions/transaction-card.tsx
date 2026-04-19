@@ -93,10 +93,10 @@ export function TransactionCard({
 
           <div className="grid gap-2 text-sm text-slate-500 md:grid-cols-3">
             <p className="min-w-0 break-words [overflow-wrap:anywhere]">Счёт: <span className="font-medium text-slate-700">{account?.name ?? '—'}</span></p>
-            {transaction.operation_type === 'transfer' ? <p className="min-w-0 break-words [overflow-wrap:anywhere]">Поступление: <span className="font-medium text-slate-700">{targetAccount?.name ?? '—'}</span></p> : transaction.operation_type === 'credit_payment' ? <p className="min-w-0 break-words [overflow-wrap:anywhere]">Кредит: <span className="font-medium text-slate-700">{creditAccount?.name ?? '—'}</span></p> : <p className="min-w-0 break-words [overflow-wrap:anywhere]">Категория: <span className="font-medium text-slate-700">{category?.name ?? '—'}</span></p>}
+            {transaction.operation_type === 'transfer' ? <p className="min-w-0 break-words [overflow-wrap:anywhere]">Поступление: <span className="font-medium text-slate-700">{targetAccount?.name ?? '—'}</span></p> : <p className="min-w-0 break-words [overflow-wrap:anywhere]">Категория: <span className="font-medium text-slate-700">{category?.name ?? '—'}</span></p>}
             <p>Дата: <span className="font-medium text-slate-700">{formatDateTime(transaction.transaction_date)}</span></p>
             {transaction.operation_type === 'credit_disbursement' ? <p>Кредитная операция: <span className="font-medium text-slate-700">Получение кредита</span></p> : null}
-            {transaction.operation_type === 'credit_payment' ? <p>Основной долг: <span className="font-medium text-slate-700">{Number(transaction.credit_principal_amount ?? 0).toLocaleString('ru-RU')} · Проценты: {Number(transaction.credit_interest_amount ?? 0).toLocaleString('ru-RU')}</span></p> : null}
+            
           </div>
         </div>
 

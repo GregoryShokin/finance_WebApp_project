@@ -367,21 +367,30 @@ export default function AccountsPage() {
     return creditItems
       .filter((account) => account.is_active && Math.abs(Number(account.balance)) > 0)
       .reduce((sum, account) => {
-        const txPayments = transactions
+        // After Phase 1: credit_payment abolished.
+        // Interest = expense/regular with credit_account_id.
+        // Body = transfer with credit_account_id set (not a plain card top-up).
+        // Sum all payments for the most recent month found.
+        const allPayments = transactions
           .filter((tx) => {
-            if (tx.operation_type !== 'credit_payment') return false;
-            const creditId =
-              (tx as Transaction & { credit_account_id?: number }).credit_account_id ??
-              tx.target_account_id;
-            return creditId === account.id;
+            const isInterest = tx.type === 'expense' && tx.operation_type === 'regular' && tx.credit_account_id === account.id;
+            const isBody = tx.operation_type === 'transfer' && tx.target_account_id === account.id && tx.credit_account_id != null;
+            return isInterest || isBody;
           })
-          .sort(
-            (a, b) =>
-              new Date(b.transaction_date).getTime() -
-              new Date(a.transaction_date).getTime(),
-          );
+          .sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime());
 
-        if (txPayments[0]) return sum + Number(txPayments[0].amount);
+        if (allPayments.length > 0) {
+          // Find the most recent month and sum all its payments (interest + body)
+          const latestDate = new Date(allPayments[0].transaction_date);
+          const latestMonth = `${latestDate.getFullYear()}-${latestDate.getMonth()}`;
+          const monthTotal = allPayments
+            .filter((tx) => {
+              const d = new Date(tx.transaction_date);
+              return `${d.getFullYear()}-${d.getMonth()}` === latestMonth;
+            })
+            .reduce((s, tx) => s + Number(tx.amount), 0);
+          if (monthTotal > 0) return sum + monthTotal;
+        }
 
         if (Number(account.monthly_payment ?? 0) > 0) {
           return sum + Number(account.monthly_payment);
