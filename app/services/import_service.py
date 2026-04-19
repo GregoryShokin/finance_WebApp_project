@@ -949,6 +949,47 @@ class ImportService:
                     )
                     last_transaction = expense_tx
                     imported_count += 1
+                elif operation_type == "credit_payment":
+                    # Ref: financeapp-vault/01-Metrics/Поток.md — decision 2026-04-19
+                    # Split into interest expense + principal transfer
+                    principal = payloads[0].get("credit_principal_amount")
+                    interest = payloads[0].get("credit_interest_amount")
+                    eff_credit_acc = payloads[0].get("credit_account_id") or payloads[0].get("target_account_id")
+                    from app.models.category import Category as _Category
+                    interest_cat = self.db.query(_Category).filter(
+                        _Category.user_id == user_id,
+                        _Category.is_system.is_(True),
+                        _Category.name == "Проценты по кредитам",
+                    ).first()
+                    interest_cat_id = interest_cat.id if interest_cat else None
+                    if principal is not None and interest is not None and eff_credit_acc:
+                        # Interest expense
+                        interest_payload = {**payloads[0], "operation_type": "regular", "type": "expense",
+                            "amount": interest, "category_id": interest_cat_id,
+                            "target_account_id": None, "credit_account_id": eff_credit_acc,
+                            "credit_principal_amount": None, "credit_interest_amount": None,
+                            "description": f"Проценты · {payloads[0].get(chr(39) + "description" + chr(39)) or ""}".strip(" ·"),
+                        }
+                        # Principal transfer
+                        principal_payload = {**payloads[0], "operation_type": "transfer", "type": "expense",
+                            "amount": principal, "category_id": None,
+                            "target_account_id": eff_credit_acc, "credit_account_id": eff_credit_acc,
+                            "credit_principal_amount": None, "credit_interest_amount": None,
+                            "description": f"Тело кредита · {payloads[0].get(chr(39) + "description" + chr(39)) or ""}".strip(" ·"),
+                        }
+                        int_tx = self.transaction_service.create_transaction(user_id=user_id, payload=interest_payload)
+                        last_transaction = int_tx
+                        self.transaction_service.create_transaction(user_id=user_id, payload=principal_payload)
+                        imported_count += 2
+                    else:
+                        # Missing principal/interest: create as interest expense with needs_review
+                        fallback_payload = {**payloads[0], "operation_type": "regular", "type": "expense",
+                            "category_id": interest_cat_id, "target_account_id": None,
+                            "credit_account_id": eff_credit_acc, "needs_review": True,
+                            "credit_principal_amount": None, "credit_interest_amount": None,
+                        }
+                        last_transaction = self.transaction_service.create_transaction(user_id=user_id, payload=fallback_payload)
+                        imported_count += 1
                 else:
                     for payload in payloads:
                         last_transaction = self.transaction_service.create_transaction(
@@ -1183,8 +1224,6 @@ class ImportService:
         else:
             base_payload["counterparty_id"] = None
 
-        if str(operation_type) == "credit_payment" and base_payload.get("target_account_id") in (None, "", 0):
-            base_payload["target_account_id"] = base_payload.get("credit_account_id")
 
         split_items = normalized.get("split_items") or []
         if str(operation_type) == "regular" and isinstance(split_items, list) and len(split_items) >= 2:

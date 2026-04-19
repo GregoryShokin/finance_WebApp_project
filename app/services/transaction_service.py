@@ -362,7 +362,7 @@ class TransactionService:
         explicit_credit_account_id = updates.get("credit_account_id") if "credit_account_id" in updates else None
         explicit_target_account_id = updates.get("target_account_id") if "target_account_id" in updates else None
 
-        if operation_type in {"credit_payment", "credit_early_repayment"}:
+        if operation_type == "credit_early_repayment":
             resolved_credit_account_id = (
                 explicit_credit_account_id
                 if explicit_credit_account_id is not None
@@ -615,13 +615,13 @@ class TransactionService:
                 raise TransactionValidationError("Для перевода нужно указать счёт назначения.")
             if category_id is not None:
                 raise TransactionValidationError("Для перевода нельзя указывать категорию.")
-        elif operation_type in {"credit_payment", "credit_early_repayment"}:
+        elif operation_type == "credit_early_repayment":
             if target_account_id is None and not allow_incomplete_transfer:
-                raise TransactionValidationError("Для платежа по кредиту нужно указать кредит.")
+                raise TransactionValidationError("Для досрочного погашения нужно указать кредит.")
             if category_id is not None:
-                raise TransactionValidationError("Для платежа по кредиту нельзя указывать категорию.")
+                raise TransactionValidationError("Для досрочного погашения нельзя указывать категорию.")
         elif target_account_id is not None:
-            raise TransactionValidationError("Счёт назначения можно указывать только для перевода и платежа по кредиту.")
+            raise TransactionValidationError("Счёт назначения можно указывать только для переводов.")
 
         if operation_type == "debt":
             if counterparty_id in (None, "", 0):
@@ -658,13 +658,13 @@ class TransactionService:
         target_account_id = payload.get("target_account_id")
         operation_type = payload.get("operation_type")
 
-        if operation_type not in {"transfer", "credit_payment", "credit_early_repayment"}:
+        if operation_type not in {"transfer", "credit_early_repayment"}:
             return None
 
         if target_account_id is None:
             if payload.get("needs_review"):
                 return None
-            if operation_type in {"credit_payment", "credit_early_repayment"}:
+            if operation_type == "credit_early_repayment":
                 raise TransactionValidationError("Р вЂќР В»РЎРЏ Р С—Р В»Р В°РЎвЂљР ВµР В¶Р В° Р С—Р С• Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљРЎС“ Р Р…РЎС“Р В¶Р Р…Р С• РЎС“Р С”Р В°Р В·Р В°РЎвЂљРЎРЉ Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљ.")
             raise TransactionValidationError("Р В РІР‚СњР В Р’В»Р РЋР РЏ Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В Р вЂ Р В РЎвЂўР В РўвЂР В Р’В° Р В Р вЂ¦Р РЋРЎвЂњР В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋРЎвЂњР В РЎвЂќР В Р’В°Р В Р’В·Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р РЋР С“Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р В Р вЂ¦Р В Р’В°Р В Р’В·Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ.")
 
@@ -674,13 +674,13 @@ class TransactionService:
         target_account = self.account_repo.get_by_id_and_user_for_update(target_account_id, user_id)
         if not target_account:
             raise TransactionValidationError("Р В Р Р‹Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ Р В Р вЂ¦Р В Р’В°Р В Р’В·Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦.")
-        ALLOWED_CREDIT_TYPES = {"credit", "credit_card"}
-        if operation_type in {"credit_payment", "credit_early_repayment"}:
+        ALLOWED_CREDIT_TYPES = {"credit", "credit_card", "installment_card"}
+        if operation_type == "credit_early_repayment":
             acct_type = getattr(target_account, "account_type", None)
             is_credit = bool(getattr(target_account, "is_credit", False))
             if acct_type not in ALLOWED_CREDIT_TYPES and not is_credit:
                 raise TransactionValidationError(
-                    "Р вЂќР В»РЎРЏ Р С—Р В»Р В°РЎвЂљР ВµР В¶Р В° Р С—Р С• Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљРЎС“ Р Р…РЎС“Р В¶Р Р…Р С• Р Р†РЎвЂ№Р В±РЎР‚Р В°РЎвЂљРЎРЉ Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљР Р…РЎвЂ№Р в„– РЎРѓРЎвЂЎРЎвЂРЎвЂљ Р С‘Р В»Р С‘ Р С”РЎР‚Р ВµР Т‘Р С‘РЎвЂљР Р…РЎС“РЎР‹ Р С”Р В°РЎР‚РЎвЂљРЎС“."
+                    "Для досрочного погашения нужно выбрать кредитный счёт или кредитную карту."
                 )
 
         return target_account
@@ -733,28 +733,20 @@ class TransactionService:
         account: Account,
         target_account: Account | None,
     ) -> None:
-        if transaction.operation_type == "transfer":
+        if transaction.operation_type in {"transfer", "credit_early_repayment"}:
             account.balance -= transaction.amount
             if target_account is not None:
-                target_account.balance += transaction.amount
-                self.db.add(target_account)
-        elif transaction.operation_type in {"credit_payment", "credit_early_repayment"}:
-            account.balance -= transaction.amount
-            if target_account is not None:
-                if getattr(target_account, "account_type", None) == "credit_card":
+                acct_type = getattr(target_account, "account_type", None)
+                if acct_type == "credit_card":
                     target_account.balance += transaction.amount
+                elif acct_type in {"credit", "installment_card"}:
+                    current = getattr(target_account, "credit_current_amount", None) or Decimal("0")
+                    principal = transaction.credit_principal_amount or transaction.amount
+                    new_amt = max(Decimal(str(current)) - Decimal(str(principal)), Decimal("0"))
+                    target_account.credit_current_amount = new_amt
+                    target_account.balance = -new_amt
                 else:
-                    current_amount = getattr(target_account, "credit_current_amount", None)
-                    if current_amount is None:
-                        current_amount = Decimal("0")
-                    principal_amount = transaction.credit_principal_amount
-                    if principal_amount is None:
-                        principal_amount = transaction.amount
-                    next_amount = current_amount - principal_amount
-                    if next_amount < 0:
-                        next_amount = Decimal("0")
-                    target_account.credit_current_amount = next_amount
-                    target_account.balance = -next_amount
+                    target_account.balance += transaction.amount
                 self.db.add(target_account)
         elif transaction.type == "expense":
             account.balance -= transaction.amount
@@ -770,26 +762,20 @@ class TransactionService:
         account: Account,
         target_account: Account | None,
     ) -> None:
-        if transaction.operation_type == "transfer":
+        if transaction.operation_type in {"transfer", "credit_early_repayment"}:
             account.balance += transaction.amount
             if target_account is not None:
-                target_account.balance -= transaction.amount
-                self.db.add(target_account)
-        elif transaction.operation_type in {"credit_payment", "credit_early_repayment"}:
-            account.balance += transaction.amount
-            if target_account is not None:
-                if getattr(target_account, "account_type", None) == "credit_card":
+                acct_type = getattr(target_account, "account_type", None)
+                if acct_type == "credit_card":
                     target_account.balance -= transaction.amount
+                elif acct_type in {"credit", "installment_card"}:
+                    current = getattr(target_account, "credit_current_amount", None) or Decimal("0")
+                    principal = transaction.credit_principal_amount or transaction.amount
+                    new_amt = Decimal(str(current)) + Decimal(str(principal))
+                    target_account.credit_current_amount = new_amt
+                    target_account.balance = -new_amt
                 else:
-                    current_amount = getattr(target_account, "credit_current_amount", None)
-                    if current_amount is None:
-                        current_amount = Decimal("0")
-                    principal_amount = transaction.credit_principal_amount
-                    if principal_amount is None:
-                        principal_amount = transaction.amount
-                    next_amount = current_amount + principal_amount
-                    target_account.credit_current_amount = next_amount
-                    target_account.balance = -next_amount
+                    target_account.balance -= transaction.amount
                 self.db.add(target_account)
         elif transaction.type == "expense":
             account.balance += transaction.amount

@@ -18,9 +18,7 @@ class TransactionOperationType(str, Enum):
     investment_buy = "investment_buy"
     investment_sell = "investment_sell"
     credit_disbursement = "credit_disbursement"
-    credit_payment = "credit_payment"
     credit_early_repayment = "credit_early_repayment"
-    credit_interest = "credit_interest"
     debt = "debt"
     refund = "refund"
     adjustment = "adjustment"
@@ -51,22 +49,11 @@ class TransactionCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_credit_payment(self):
-        if self.operation_type in {
-            TransactionOperationType.credit_payment,
-            TransactionOperationType.credit_early_repayment,
-        }:
+        if self.operation_type == TransactionOperationType.credit_early_repayment:
             if self.credit_account_id is None:
-                raise ValueError("Для платежа по кредиту нужно указать кредит.")
-            if self.operation_type == TransactionOperationType.credit_payment:
-                if self.credit_principal_amount is None:
-                    raise ValueError("Для платежа по кредиту укажи сумму основного долга.")
-                if self.credit_interest_amount is None:
-                    raise ValueError("Для платежа по кредиту укажи сумму процентов.")
-                if (self.credit_principal_amount + self.credit_interest_amount) != self.amount:
-                    raise ValueError("Сумма платежа должна быть равна сумме основного долга и процентов.")
-            elif self.operation_type == TransactionOperationType.credit_early_repayment:
-                if self.credit_principal_amount is None:
-                    raise ValueError("Для досрочного погашения укажи сумму основного долга.")
+                raise ValueError("Для досрочного погашения нужно указать кредитный счёт.")
+            if self.credit_principal_amount is None:
+                raise ValueError("Для досрочного погашения укажи сумму основного долга.")
         return self
 
 

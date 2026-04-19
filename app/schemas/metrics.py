@@ -29,7 +29,10 @@ class MetricsResponse(BaseModel):
 
 class FlowMetricResponse(BaseModel):
     basic_flow: Decimal
+    free_capital: Decimal
     full_flow: Decimal
+    cc_debt_compensator: Decimal
+    credit_body_payments: Decimal
     lifestyle_indicator: float | None
     zone: str
     trend: Decimal | None
@@ -38,6 +41,10 @@ class FlowMetricResponse(BaseModel):
 class CapitalMetricResponse(BaseModel):
     capital: Decimal
     trend: Decimal | None
+    trend_3m: Decimal | None = None
+    trend_6m: Decimal | None = None
+    trend_12m: Decimal | None = None
+    snapshots_count: int = 0
 
 
 class DTIMetricResponse(BaseModel):
@@ -54,10 +61,18 @@ class ReserveMetricResponse(BaseModel):
     monthly_outflow: Decimal
 
 
+class BufferStabilityResponse(BaseModel):
+    months: float | None
+    zone: str | None
+    deposit_balance: Decimal
+    avg_monthly_expense: Decimal
+
+
 class MetricsSummaryResponse(BaseModel):
     flow: FlowMetricResponse
     capital: CapitalMetricResponse
     dti: DTIMetricResponse
+    buffer_stability: BufferStabilityResponse
     reserve: ReserveMetricResponse
     fi_score: float
 

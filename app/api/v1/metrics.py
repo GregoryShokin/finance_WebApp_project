@@ -9,6 +9,7 @@ from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.models.user import User
 from app.schemas.metrics import (
+    BufferStabilityResponse,
     CapitalMetricResponse,
     DTIMetricResponse,
     FinancialIndependenceMetricResponse,
@@ -82,6 +83,7 @@ def get_metrics_summary(
         flow=FlowMetricResponse(**data["flow"]),
         capital=CapitalMetricResponse(**data["capital"]),
         dti=DTIMetricResponse(**data["dti"]),
+        buffer_stability=BufferStabilityResponse(**data["buffer_stability"]),
         reserve=ReserveMetricResponse(**data["reserve"]),
         fi_score=data["fi_score"],
     )
@@ -101,6 +103,7 @@ def get_health_summary(
             flow=FlowMetricResponse(**metrics["flow"]),
             capital=CapitalMetricResponse(**metrics["capital"]),
             dti=DTIMetricResponse(**metrics["dti"]),
+            buffer_stability=BufferStabilityResponse(**metrics["buffer_stability"]),
             reserve=ReserveMetricResponse(**metrics["reserve"]),
             fi_score=metrics["fi_score"],
         ),

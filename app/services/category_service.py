@@ -1,7 +1,12 @@
 
 from app.models.category import Category
 from app.repositories.category_repository import CategoryRepository
-from app.services.category_defaults import DEFAULT_CATEGORIES, resolve_category_icon_name, resolve_next_category_color
+from app.services.category_defaults import (
+    DEFAULT_CATEGORIES,
+    SYSTEM_CATEGORIES,
+    resolve_category_icon_name,
+    resolve_next_category_color,
+)
 
 
 class CategoryNotFoundError(Exception):
@@ -57,6 +62,9 @@ class CategoryService:
         if not category:
             raise CategoryNotFoundError("Category not found")
 
+        if category.is_system:
+            raise CategoryValidationError("Системную категорию нельзя изменять.")
+
         effective_kind = updates.get('kind', category.kind)
         effective_priority = updates.get('priority', category.priority)
         effective_name = updates.get('name', category.name)
@@ -74,10 +82,38 @@ class CategoryService:
         category = self.repo.get_by_id(category_id=category_id, user_id=user_id)
         if not category:
             raise CategoryNotFoundError("Category not found")
+        if category.is_system:
+            raise CategoryValidationError("Системную категорию нельзя удалять.")
         self.repo.delete(category)
 
 
+    def ensure_system_categories(self, *, user_id: int) -> list[Category]:
+        created: list[Category] = []
+        for item in SYSTEM_CATEGORIES:
+            existing_count = self.repo.count_by_identity(
+                user_id=user_id,
+                name=item.name,
+                kind=item.kind,
+                priority=item.priority,
+            )
+            if existing_count:
+                continue
+            created.append(
+                self.create_category(
+                    user_id=user_id,
+                    name=item.name,
+                    kind=item.kind,
+                    priority=item.priority,
+                    regularity=item.regularity,
+                    icon_name=item.icon_name,
+                    color="#94a3b8",
+                    is_system=True,
+                )
+            )
+        return created
+
     def ensure_default_categories(self, *, user_id: int) -> list[Category]:
+        self.ensure_system_categories(user_id=user_id)
         created_categories: list[Category] = []
         for item in DEFAULT_CATEGORIES:
             existing_count = self.repo.count_by_identity(

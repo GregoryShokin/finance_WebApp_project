@@ -26,7 +26,24 @@ class DefaultCategoryDefinition:
     kind: str
     priority: str
     icon_name: str
+    is_system: bool = False
+    regularity: str = "regular"
 
+
+# System category created automatically for every user (cannot be deleted/renamed).
+# Decision 2026-04-19: credit_payment abolished — interest portion is classified as
+# a regular expense in this category.
+# Ref: financeapp-vault/01-Metrics/Поток.md
+SYSTEM_CATEGORIES: tuple[DefaultCategoryDefinition, ...] = (
+    DefaultCategoryDefinition(
+        name="Проценты по кредитам",
+        kind="expense",
+        priority="expense_essential",
+        icon_name="percent",
+        is_system=True,
+        regularity="regular",
+    ),
+)
 
 DEFAULT_CATEGORIES: tuple[DefaultCategoryDefinition, ...] = (
     DefaultCategoryDefinition('Жильё', 'expense', 'expense_essential', 'house'),

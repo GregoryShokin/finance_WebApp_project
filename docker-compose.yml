@@ -29,6 +29,18 @@ services:
       - redis
     command: celery -A app.core.celery_app.celery_app worker --loglevel=info
 
+  beat:
+    build: .
+    container_name: finance_beat
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    command: celery -A app.core.celery_app.celery_app beat --loglevel=info
+
   bot:
     build: ./bot
     container_name: finance_bot

@@ -65,11 +65,11 @@ class FIScoreHistory(BaseModel):
 
 
 class FIScoreComponents(BaseModel):
-    savings_rate: float
-    discipline: float
-    financial_independence: float
-    safety_buffer: float
-    dti_inverse: float
+    # v1.4 weights (2026-04-19): 0.20 + 0.30 + 0.25 + 0.25 = 1.00
+    savings_rate: float        # weight 0.20 — normalised basic flow / regular income
+    capital_trend: float       # weight 0.30 — capital trajectory (3-month trend)
+    dti_inverse: float         # weight 0.25 — 10 - DTI%/6
+    buffer_stability: float    # weight 0.25 — deposit months / 6 * 10
     months_calculated: int | None = None
     history: FIScoreHistory | None = None
 

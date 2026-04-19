@@ -17,6 +17,7 @@ from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.financial_health import ChronicUnderperformer, ChronicViolation, DirectionHeatmapRow, FIScoreComponents, FIScoreHistory, FinancialHealthResponse, MonthlyHealthSnapshot, UnplannedCategory
+from app.services.metrics_service import MetricsService as _MetricsService
 
 TWOPLACES = Decimal("0.01")
 ZERO = Decimal("0")
@@ -118,6 +119,7 @@ class FinancialHealthService:
         ]) if tracked_windows else ZERO
         prev_month_window = self._last_completed_month_windows(today, count=1)
         dti_total_payments = self._calc_dti_payments(
+            user_id=user_id,
             active_accounts=active_accounts,
             transactions=transactions,
             prev_month_window=prev_month_window[0] if prev_month_window else None,
@@ -166,44 +168,30 @@ class FinancialHealthService:
         fi_capital_needed = (average_expenses * Decimal("12") * Decimal("25")).quantize(TWOPLACES)
         fi_monthly_gap = max(average_expenses - fi_passive_income, ZERO).quantize(TWOPLACES)
 
-        safety_buffer_score = self._safety_buffer_component(safety_goal=safety_goal)
-
-        discipline_score = round(self._clamp((discipline or 0.0) / 10, 0, 10), 2)
-
-        fi_score_components = FIScoreComponents(
-            savings_rate=round(self._clamp(avg_savings_rate / 2, 0, 10), 2),
-            discipline=discipline_score,
-            financial_independence=round(self._clamp(fi_percent / 10, 0, 10), 2),
-            safety_buffer=round(safety_buffer_score, 2),
-            dti_inverse=round(self._clamp((100 - dti) / 10, 0, 10), 2),
-        )
-        fi_score = round(
-            fi_score_components.savings_rate * 0.25
-            + fi_score_components.discipline * 0.20
-            + fi_score_components.financial_independence * 0.30
-            + fi_score_components.safety_buffer * 0.15
-            + fi_score_components.dti_inverse * 0.10,
-            1,
-        )
-
+        # FI-score v1.4 — единый источник через MetricsService
+        # Ref: financeapp-vault/14-Specifications §11 (GAP #1 closed Phase 4)
+        metrics_svc = _MetricsService(self.db)
+        fi_breakdown = metrics_svc.calculate_fi_score_breakdown(user_id)
+        fi_score = fi_breakdown.total
         fi_score_payload = FIScoreComponents(
-            **fi_score_components.model_dump(exclude={"months_calculated", "history"}),
+            savings_rate=fi_breakdown.savings_score,
+            capital_trend=fi_breakdown.capital_score,
+            dti_inverse=fi_breakdown.dti_score,
+            buffer_stability=fi_breakdown.buffer_score,
             months_calculated=lookback_months,
-            history=FIScoreHistory(**self._build_fi_score_history(
-                savings_rate=avg_savings_rate,
-                discipline=discipline or 0.0,
-                fi_percent=fi_percent,
-                dti=dti,
-                safety_buffer_score=safety_buffer_score,
-            )),
+            history=FIScoreHistory(**self._build_fi_score_history_v14(fi_breakdown.total)),
         )
+        # Cache credit account ids for DTI body calculation in _credit_payments_for_window
+        self._cached_credit_account_ids = {
+            a.id for a in active_accounts
+            if a.account_type in {"credit", "credit_card", "installment_card"} or bool(a.is_credit)
+        }
         monthly_history = self._build_monthly_history(
             user_id=user_id,
             windows=tracked_windows,
             transactions=transactions,
             monthly_totals=monthly_totals,
             categories_by_id=categories_by_id,
-            safety_buffer_score=safety_buffer_score,
         )
 
         return FinancialHealthResponse(
@@ -235,7 +223,7 @@ class FinancialHealthService:
             fi_passive_income=float(fi_passive_income),
             fi_monthly_gap=float(fi_monthly_gap),
             fi_score=fi_score,
-            fi_score_zone=self._fi_score_zone(fi_score),
+            fi_score_zone=metrics_svc._get_fi_zone(fi_score),
             fi_score_components=fi_score_payload,
             monthly_history=monthly_history,
         )
@@ -272,7 +260,7 @@ class FinancialHealthService:
             if month_key not in month_keys or not transaction.affects_analytics:
                 continue
             amount = self._to_decimal(transaction.amount)
-            if transaction.type == "income":
+            if transaction.type == "income" and transaction.operation_type != "credit_disbursement":
                 totals[month_key]["income"] += amount
             elif transaction.type == "expense":
                 totals[month_key]["expense"] += amount
@@ -294,7 +282,6 @@ class FinancialHealthService:
         transactions: list[Transaction],
         monthly_totals: dict[str, dict[str, Decimal]],
         categories_by_id: dict[int, Category],
-        safety_buffer_score: float,
     ) -> list[MonthlyHealthSnapshot]:
         if not windows:
             return []
@@ -356,7 +343,11 @@ class FinancialHealthService:
             savings_rate = self._percent(savings, income)
             essential_rate = self._percent(essential, income)
             secondary_rate = self._percent(secondary, income)
-            dti_payments = self._credit_payments_for_window(transactions=transactions, window=window)
+            dti_payments = self._credit_payments_for_window(
+                transactions=transactions, window=window,
+                credit_account_ids=getattr(self, "_cached_credit_account_ids", None),
+                user_id=user_id,
+            )
             dti = self._percent(dti_payments, income)
             discipline, _, _ = self._discipline_metrics(
                 user_id=user_id,
@@ -370,12 +361,18 @@ class FinancialHealthService:
                 window=window,
             )
             fi_percent = self._percent(passive_income, totals["expense"])
-            fi_score = self._build_weighted_fi_score(
-                savings_rate=savings_rate,
-                discipline=discipline or 0.0,
-                fi_percent=fi_percent,
-                dti=dti,
-                safety_buffer_score=safety_buffer_score,
+            # FI-score v1.4 for monthly snapshot: use same weights as MetricsService.
+            # capital_score=5.0 (neutral) unless historical snapshots available.
+            # Prágmatic approach: compute from available monthly data.
+            _li = round(savings_rate, 2)  # savings_rate here ≈ (income-expense)/income*100
+            _savings_sc = min(max(_li / 30 * 10, 0), 10) if _li is not None else 5.0
+            _dti_sc = max(10 - (dti / 6), 0) if dti is not None else 10.0
+            fi_score = round(
+                _savings_sc * 0.20
+                + 5.0 * 0.30          # capital neutral until snapshots accumulate
+                + _dti_sc * 0.25
+                + 0.0 * 0.25,         # buffer unknown for historical months
+                1,
             )
             direction_heatmap: list[DirectionHeatmapRow] = []
             for direction, label in HEATMAP_DIRECTIONS:
@@ -662,6 +659,7 @@ class FinancialHealthService:
     def _calc_dti_payments(
         self,
         *,
+        user_id: int,
         active_accounts: list[Account],
         transactions: list[Transaction],
         prev_month_window: MonthWindow | None = None,
@@ -670,8 +668,8 @@ class FinancialHealthService:
         Calculate monthly credit payments for DTI.
 
         Priority per credit account:
-        1. Sum of credit_payment transactions from the previous completed month
-        2. Fallback: most recent credit_payment from all history
+        1. Sum of interest expense transactions (type=expense, operation_type=regular, credit_account_id set) from prev month
+        2. Fallback: most recent interest expense from all history
         3. Fallback: account.monthly_payment field
         """
         credit_account_ids = set()
@@ -683,13 +681,35 @@ class FinancialHealthService:
             if is_credit:
                 credit_account_ids.add(account.id)
 
-        # Collect credit_payments from the previous completed month
+        if not credit_account_ids:
+            return ZERO
+
+        # Body transactions (transfer with credit_account_id set) have affects_analytics=False
+        # and are NOT in the `transactions` list. Load them separately.
+        # Ref: Phase 3 Block Б + bugfix 2026-04-19.
+        body_txns = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.operation_type == "transfer",
+                Transaction.target_account_id.in_(list(credit_account_ids)),
+                Transaction.credit_account_id.isnot(None),
+            )
+            .all()
+        )
+        all_credit_txns = [
+            tx for tx in transactions
+            if tx.type == "expense" and tx.operation_type == "regular" and tx.credit_account_id is not None
+        ] + body_txns
+
+        # Collect payments for the previous completed month
         prev_month_payment_by_account: dict[int, Decimal] = {}
         if prev_month_window:
-            for transaction in transactions:
-                if transaction.operation_type != "credit_payment":
-                    continue
-                account_id = transaction.credit_account_id or transaction.target_account_id
+            for transaction in all_credit_txns:
+                if transaction.operation_type == "transfer":
+                    account_id = transaction.target_account_id
+                else:
+                    account_id = transaction.credit_account_id
                 if account_id is None or account_id not in credit_account_ids:
                     continue
                 tx_date = transaction.transaction_date
@@ -700,13 +720,14 @@ class FinancialHealthService:
                         + self._to_decimal(transaction.amount)
                     )
 
-        # Fallback: most recent credit_payment per account (across all history)
+        # Fallback: most recent payment per account (across all history)
         last_payment_by_account: dict[int, Decimal] = {}
         last_payment_date_by_account: dict[int, datetime] = {}
-        for transaction in transactions:
-            if transaction.operation_type != "credit_payment":
-                continue
-            account_id = transaction.credit_account_id or transaction.target_account_id
+        for transaction in all_credit_txns:
+            if transaction.operation_type == "transfer":
+                account_id = transaction.target_account_id
+            else:
+                account_id = transaction.credit_account_id
             if account_id is None or account_id not in credit_account_ids:
                 continue
             tx_date = transaction.transaction_date
@@ -734,12 +755,55 @@ class FinancialHealthService:
 
         return total.quantize(TWOPLACES)
 
-    def _credit_payments_for_window(self, *, transactions: list[Transaction], window: MonthWindow) -> Decimal:
+    def _credit_payments_for_window(
+        self,
+        *,
+        transactions: list[Transaction],
+        window: MonthWindow,
+        credit_account_ids: set[int] | None = None,
+        user_id: int | None = None,
+    ) -> Decimal:
+        # After 2026-04-19: DTI = interest (expense/regular) + body (transfer→credit).
+        # Body txns have affects_analytics=False, so they're not in `transactions`.
+        # Load them separately if user_id and credit_account_ids are provided.
+        # Ref: financeapp-vault/14-Specifications §2.2, Phase 3 bugfix 2026-04-19.
+        all_txns = list(transactions)
+        if user_id is not None and credit_account_ids:
+            body_txns = (
+                self.db.query(Transaction)
+                .filter(
+                    Transaction.user_id == user_id,
+                    Transaction.operation_type == "transfer",
+                    Transaction.target_account_id.in_(list(credit_account_ids)),
+                    Transaction.credit_account_id.isnot(None),
+                )
+                .all()
+            )
+            all_txns = all_txns + body_txns
+
         total = ZERO
-        for transaction in transactions:
-            if transaction.operation_type != "credit_payment":
+        for transaction in all_txns:
+            is_interest = (
+                transaction.type == "expense"
+                and transaction.operation_type == "regular"
+                and transaction.credit_account_id is not None
+            )
+            is_body = (
+                transaction.operation_type == "transfer"
+                and transaction.target_account_id is not None
+                and transaction.credit_account_id is not None  # not a plain card top-up
+                and (
+                    credit_account_ids is None
+                    or transaction.target_account_id in credit_account_ids
+                )
+            )
+            if not (is_interest or is_body):
                 continue
-            tx_date = transaction.transaction_date.astimezone(timezone.utc).date()
+            tx_dt = transaction.transaction_date
+            if hasattr(tx_dt, "astimezone"):
+                tx_date = tx_dt.astimezone(timezone.utc).date()
+            else:
+                tx_date = tx_dt.date() if hasattr(tx_dt, "date") else tx_dt
             if window.month_start <= tx_date <= window.month_end:
                 total += self._to_decimal(transaction.amount)
         return total.quantize(TWOPLACES)
@@ -945,15 +1009,16 @@ class FinancialHealthService:
                 total += self._to_decimal(transaction.amount)
         return total.quantize(TWOPLACES)
 
-    def _safety_buffer_component(self, *, safety_goal: Goal | None) -> float:
-        if safety_goal is None:
-            return 0.0
-        target_amount = self._to_decimal(safety_goal.target_amount)
-        if target_amount <= ZERO:
-            return 0.0
-        saved_amount = self._goal_saved_amount(goal_id=safety_goal.id)
-        progress = float((saved_amount / target_amount).quantize(TWOPLACES)) if target_amount > ZERO else 0.0
-        return round(self._clamp(progress * 10, 0, 10), 2)
+    def _build_fi_score_history_v14(self, current: float) -> dict[str, float]:
+        """FI-score history using v1.4 formula current value.
+
+        previous/baseline are approximate until capital_snapshots accumulate 3+ months.
+        """
+        return {
+            "current": current,
+            "previous": round(max(0.0, current - 0.4), 1),
+            "baseline": round(max(0.0, current - 0.9), 1),
+        }
 
     def _goal_saved_amount(self, *, goal_id: int) -> Decimal:
         total = (
@@ -963,47 +1028,6 @@ class FinancialHealthService:
             .all()
         )
         return sum((self._to_decimal(row.amount) for row in total), ZERO).quantize(TWOPLACES)
-
-    def _build_weighted_fi_score(
-        self,
-        *,
-        savings_rate: float,
-        discipline: float,
-        fi_percent: float,
-        dti: float,
-        safety_buffer_score: float,
-    ) -> float:
-        return round(
-            self._clamp(savings_rate / 2, 0, 10) * 0.25
-            + self._clamp(discipline / 10, 0, 10) * 0.20
-            + self._clamp(fi_percent / 10, 0, 10) * 0.30
-            + safety_buffer_score * 0.15
-            + self._clamp((100 - dti) / 10, 0, 10) * 0.10,
-            1,
-        )
-
-    def _build_fi_score_history(
-        self,
-        *,
-        savings_rate: float,
-        discipline: float,
-        fi_percent: float,
-        dti: float,
-        safety_buffer_score: float,
-    ) -> dict[str, float]:
-        current = round(
-            self._clamp(savings_rate / 2, 0, 10) * 0.25
-            + self._clamp(discipline / 10, 0, 10) * 0.20
-            + self._clamp(fi_percent / 10, 0, 10) * 0.30
-            + safety_buffer_score * 0.15
-            + self._clamp((100 - dti) / 10, 0, 10) * 0.10,
-            1,
-        )
-        return {
-            "current": current,
-            "previous": round(max(0.0, current - 0.4), 1),
-            "baseline": round(max(0.0, current - 0.9), 1),
-        }
 
     def _last_month_windows(self, today: date, *, count: int) -> list[MonthWindow]:
         if count <= 0:
@@ -1106,11 +1130,4 @@ class FinancialHealthService:
             return "partial"
         return "dependent"
 
-    def _fi_score_zone(self, value: float) -> str:
-        if value >= 8:
-            return "freedom"
-        if value >= 6:
-            return "on_way"
-        if value >= 3:
-            return "growth"
-        return "start"
+    # _fi_score_zone removed (Phase 4): use MetricsService._get_fi_zone instead.
