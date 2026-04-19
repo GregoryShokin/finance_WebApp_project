@@ -55,3 +55,27 @@ pnpm-debug.log*
 tmp/
 dist/
 build/
+
+# --- DB / Celery runtime ---
+*.sql
+backup*.sql
+celerybeat-schedule
+celerybeat-schedule.*
+
+# --- Scratch / debug artifacts ---
+tmp_*.py
+tmp_*.pdf
+*.bak
+PROMPT*.md
+structure.txt
+archive/
+
+# --- Mockups / design ---
+*-mockup.html
+dds-*.html
+dashboard-*.html
+trilayer-*.html
+flow-widget-*.html
+
+# --- Editor local config ---
+.claude/launch.json
