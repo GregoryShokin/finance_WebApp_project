@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Remove-Item -Recurse -Force 'D:/projects/financeapp/financeapp-vault/11-problems/Кредитная логика' -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force 'D:/projects/financeapp/financeapp-vault/11-problems/К��едитная лог*' -ErrorAction SilentlyContinue\")",
+      "Bash(powershell -Command \"New-Item -ItemType Directory -Path 'D:/projects/financeapp/financeapp-vault/11-problems/Кредитная логика' -Force\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"D:/projects/financeapp/financeapp-vault/11-problems/move_files.ps1\")",
+      "Bash(powershell -Command \"Get-ChildItem 'D:\\\\projects\\\\financeapp\\\\financeapp-vault\\\\11-problems' -Directory | Select-Object Name, FullName\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"D:/projects/financeapp/financeapp-vault/11-problems/fix_folders.ps1\")",
+      "Bash(ls -la \"D:/projects/financeapp/financeapp-vault/11-problems/\"*/)",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"D:/projects/financeapp/financeapp-vault/11-problems/create_ux_folder.ps1\")",
+      "Bash(powershell -Command \"[System.IO.Directory]::CreateDirectory\\('D:\\\\projects\\\\financeapp\\\\financeapp-vault\\\\11-problems\\\\UX-packaging'\\)\")",
+      "Bash(powershell -Command \"Copy-Item 'C:\\\\Users\\\\Григорий\\\\Documents\\\\New project\\\\credit-logic-ux-analysis-draft.md' 'D:\\\\projects\\\\financeapp\\\\financeapp-vault\\\\11-problems\\\\UX-packaging\\\\credit-logic-ux-analysis-draft.md'\")",
+      "Bash(powershell -Command \"Copy-Item 'C:\\\\Users\\\\Григорий\\\\Documents\\\\New project\\\\credit-logic-ux-deep-research-2026-04-13.md' 'D:\\\\projects\\\\financeapp\\\\financeapp-vault\\\\11-problems\\\\UX-packaging\\\\credit-logic-ux-deep-research-2026-04-13.md'\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"D:/projects/financeapp/financeapp-vault/11-problems/rename.ps1\")",
+      "Bash(powershell -ExecutionPolicy Bypass -File \"D:/projects/financeapp/financeapp-vault/11-problems/cleanup.ps1\")",
+      "Bash(ls -d */)",
+      "Bash(rm -rf \"Упаковка кредитной логики\")",
+      "Bash(rm -rf \"У п а к о в к а   к р е д и т н о й   л о г и к и\")",
+      "Bash(python3 -c ':*)",
+      "Bash(python -c 'with open\\(r'\\\\''D:\\\\projects\\\\financeapp\\\\financeapp-vault\\\\11-problems\\\\Упаковка кредитной логики\\\\Концепция упрощения — контекстные вопросы вместо настройки.md'\\\\'', '\\\\''r'\\\\'', encoding='\\\\''utf-8'\\\\''\\) as f: lines = f.readlines\\(\\):*)",
+      "Bash(curl -s \"https://s.jina.ai/How+does+YNAB+envelope+budgeting+assign+transactions+to+categories+UX+workflow\")",
+      "Bash(curl -s \"https://s.jina.ai/Expensify+SAP+Concur+expense+allocation+split+transaction+multiple+projects+UX+pattern\")",
+      "Bash(curl -s \"https://s.jina.ai/Monzo+Revolut+pots+spaces+virtual+accounts+track+spending+from+pot+UX\")",
+      "WebSearch",
+      "WebFetch(domain:support.ynab.com)",
+      "WebFetch(domain:help.monarch.com)",
+      "WebFetch(domain:monzo.com)",
+      "WebFetch(domain:community.concur.com)",
+      "WebFetch(domain:www.eleken.co)",
+      "WebFetch(domain:goodbudget.com)"
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "showLineNumber": true,
+  "strictLineBreaks": false,
+  "readableLineLength": true,
+  "showFrontmatter": true,
+  "defaultViewMode": "preview",
+  "attachmentFolderPath": "_attachments",
+  "newFileLocation": "current",
+  "newLinkFormat": "shortest"
+}

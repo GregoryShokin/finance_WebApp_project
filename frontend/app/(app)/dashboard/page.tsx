@@ -1,20 +1,37 @@
-﻿'use client';
+'use client';
 
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
-import { AvgDailyExpenseWidget } from '@/components/dashboard/avg-daily-expense-widget';
-import { AvailableFinancesWidget } from '@/components/dashboard/available-finances-widget';
-import { CapitalWidget } from '@/components/dashboard/capital-widget';
-import { CreditsWidget } from '@/components/dashboard/credits-widget';
-import { DebtsWidget } from '@/components/dashboard/debts-widget';
-import { FreeNetCapitalWidget } from '@/components/dashboard/free-net-capital-widget';
-import { IncomeStructureWidget } from '@/components/dashboard/income-structure-widget';
-import { SafetyBufferWidget } from '@/components/dashboard/safety-buffer-widget';
-import { SixMonthTrendChartCard } from '@/components/dashboard/six-month-trend-chart-card';
-import { SixMonthTrendWidget } from '@/components/dashboard/six-month-trend-widget';
-import { TopExpenseCategoriesWidget } from '@/components/dashboard/top-expense-categories-widget';
 import { PageShell } from '@/components/layout/page-shell';
 import { ErrorState, LoadingState } from '@/components/states/page-state';
+import { SectionMoney } from '@/components/dashboard-new/section-money';
+import { SectionAnalytics } from '@/components/dashboard-new/section-analytics';
+import { SectionCapital } from '@/components/dashboard-new/section-capital';
+import {
+  computeFlow,
+  computeLoad,
+  computeReserve,
+  computeAverageFlow,
+  computeLoadFromSummary,
+  computeBufferFromSummary,
+  computeAvailableFinances,
+  computeMonthProgress,
+  computeSafetyBuffer,
+  computeTrend,
+  computeTopExpenses,
+  computeExpenseTotals,
+  computeIncomeStructure,
+  computeAvgDailyExpense,
+  computeCapital,
+  computeDebts,
+  computeInstallments,
+  getTransactionYears,
+  getTransactionMonths,
+  toNum,
+} from '@/components/dashboard-new/dashboard-data';
+import type { FlowType } from '@/components/dashboard-new/dashboard-data';
+import { useMetricsSummary } from '@/hooks/use-metrics-summary';
 import { getAccounts } from '@/lib/api/accounts';
 import { getBudgetProgress } from '@/lib/api/budget';
 import { getCategories } from '@/lib/api/categories';
@@ -27,6 +44,7 @@ import { useFinancialHealth } from '@/hooks/use-financial-health';
 export default function DashboardPage() {
   const currentDate = new Date();
   const currentMonth = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-01`;
+
   const healthQuery = useFinancialHealth();
   const health = healthQuery.data;
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
@@ -34,11 +52,12 @@ export default function DashboardPage() {
     queryKey: ['budget', currentMonth],
     queryFn: () => getBudgetProgress(currentMonth),
   });
-  const categoriesQuery = useQuery({ queryKey: ['categories', 'dashboard'], queryFn: () => getCategories() });
+  const categoriesQuery = useQuery({ queryKey: ['categories', 'dashboard-new'], queryFn: () => getCategories() });
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: getGoals });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
   const realAssetsQuery = useQuery({ queryKey: ['real-assets'], queryFn: getRealAssets });
-  const transactionsQuery = useQuery({ queryKey: ['transactions', 'dashboard-v2'], queryFn: () => getTransactions() });
+  const transactionsQuery = useQuery({ queryKey: ['transactions', 'dashboard-new'], queryFn: () => getTransactions() });
+  const metricsSummaryQuery = useMetricsSummary();
 
   const isLoading =
     healthQuery.isLoading ||
@@ -48,7 +67,8 @@ export default function DashboardPage() {
     goalsQuery.isLoading ||
     counterpartiesQuery.isLoading ||
     realAssetsQuery.isLoading ||
-    transactionsQuery.isLoading;
+    transactionsQuery.isLoading ||
+    metricsSummaryQuery.isLoading;
 
   const isError = Boolean(
     healthQuery.error ||
@@ -61,10 +81,117 @@ export default function DashboardPage() {
       transactionsQuery.error,
   );
 
+  const accounts = accountsQuery.data ?? [];
+  const transactions = transactionsQuery.data ?? [];
+  const categories = categoriesQuery.data ?? [];
+  const goals = goalsQuery.data ?? [];
+  const counterparties = counterpartiesQuery.data ?? [];
+  const realAssets = realAssetsQuery.data ?? [];
+  const budget = budgetQuery.data ?? [];
+
+  // ── Trend controls ──────────────────────────────────────────────
+
+  const now = new Date();
+  const [trendYear, setTrendYear] = useState(now.getFullYear());
+  const [trendMonth, setTrendMonth] = useState(now.getMonth());
+  const [flowType, setFlowType] = useState<FlowType>('full');
+  const [avgFlowType, setAvgFlowType] = useState<FlowType>('basic');
+
+  const trendYears = useMemo(() => {
+    const years = getTransactionYears(transactions);
+    const cy = now.getFullYear();
+    if (!years.includes(cy)) years.unshift(cy);
+    return years;
+  }, [transactions]);
+
+  const availableMonths = useMemo(() => {
+    const months = getTransactionMonths(transactions, trendYear);
+    // Always include current month for the current year
+    const cy = now.getFullYear();
+    const cm = now.getMonth();
+    if (trendYear === cy && !months.includes(cm)) months.push(cm);
+    months.sort((a, b) => a - b);
+    return months.length > 0 ? months : [now.getMonth()];
+  }, [transactions, trendYear]);
+
+  // Snap trendMonth to an available month when year changes
+  useEffect(() => {
+    if (availableMonths.length > 0 && !availableMonths.includes(trendMonth)) {
+      setTrendMonth(availableMonths[availableMonths.length - 1]);
+    }
+  }, [availableMonths, trendMonth]);
+
+  // ── Computed data ───────────────────────────────────────────────
+
+  const ccAccountIds = useMemo(
+    () =>
+      new Set(
+        accounts
+          .filter((a) => a.account_type === 'credit_card' || a.account_type === 'installment_card')
+          .map((a) => a.id),
+      ),
+    [accounts],
+  );
+  const metricsSummary = metricsSummaryQuery.data;
+  const flow = useMemo(
+    () => (metricsSummary ? computeAverageFlow(metricsSummary, transactions, ccAccountIds, avgFlowType) : null),
+    [metricsSummary, transactions, ccAccountIds, avgFlowType],
+  );
+  const load = useMemo(
+    () => (metricsSummary ? computeLoadFromSummary(metricsSummary) : null),
+    [metricsSummary],
+  );
+  const buffer = useMemo(
+    () => (metricsSummary ? computeBufferFromSummary(metricsSummary) : null),
+    [metricsSummary],
+  );
+
+  const availableFinances = useMemo(() => computeAvailableFinances(accounts), [accounts]);
+  const monthProgress = useMemo(() => computeMonthProgress(budget), [budget]);
+  const safetyBuffer = useMemo(() => (health ? computeSafetyBuffer(goals, health) : null), [goals, health]);
+
+  const trendMonthsCount = useMemo(() => {
+    // Find earliest transaction to determine how many months to show
+    let earliest: string | null = null;
+    for (const tx of transactions) {
+      if (tx.affects_analytics && (!earliest || tx.transaction_date < earliest)) {
+        earliest = tx.transaction_date;
+      }
+    }
+    if (!earliest) return 6;
+    const earlyYear = parseInt(earliest.slice(0, 4), 10);
+    const earlyMonth = parseInt(earliest.slice(5, 7), 10) - 1;
+    const total = (trendYear - earlyYear) * 12 + (trendMonth - earlyMonth) + 1;
+    return Math.max(total, 1);
+  }, [transactions, trendYear, trendMonth]);
+
+  const trend = useMemo(
+    () =>
+      computeTrend(transactions, {
+        endYear: trendYear,
+        endMonth: trendMonth,
+        months: trendMonthsCount,
+        flowType,
+      }),
+    [transactions, trendYear, trendMonth, trendMonthsCount, flowType],
+  );
+  const topExpenses = useMemo(() => computeTopExpenses(transactions, categories), [transactions, categories]);
+  const totalExpenses = useMemo(() => computeExpenseTotals(transactions), [transactions]);
+  const incomeStructure = useMemo(() => computeIncomeStructure(transactions, categories), [transactions, categories]);
+  const avgDailyExpense = useMemo(() => computeAvgDailyExpense(transactions), [transactions]);
+
+  const debtsData = useMemo(() => computeDebts(counterparties), [counterparties]);
+  const capitalData = useMemo(
+    () => (health ? computeCapital(accounts, realAssets, health, debtsData) : null),
+    [accounts, realAssets, health, debtsData],
+  );
+
+  const installmentCards = useMemo(() => computeInstallments(transactions), [transactions]);
+
   return (
     <PageShell
       title="Дашборд"
-      description="Ключевые финансовые показатели, динамика месяца, аналитика расходов и структура капитала в одном экране."
+      description="Ключевые финансовые показатели, динамика месяца, аналитика расходов и структура капитала."
     >
       {isLoading ? (
         <LoadingState
@@ -79,84 +206,46 @@ export default function DashboardPage() {
         />
       ) : null}
 
-      {!isLoading && !isError && health ? (
-        <>
-          {/* ── Деньги месяца ── */}
-          <section className="space-y-4">
-            <div>
-              <h3 className="text-lg font-semibold text-slate-950">Деньги месяца</h3>
-              <p className="mt-1 text-sm text-slate-500">Текущая динамика доходов, расходов и качества накоплений.</p>
-            </div>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              <AvailableFinancesWidget accounts={accountsQuery.data ?? []} isLoading={accountsQuery.isLoading} />
-              <FreeNetCapitalWidget
-                budgetProgress={budgetQuery.data ?? []}
-                transactions={transactionsQuery.data ?? []}
-                isLoading={budgetQuery.isLoading || transactionsQuery.isLoading}
-              />
-              <SafetyBufferWidget goals={goalsQuery.data ?? []} isLoading={goalsQuery.isLoading} />
-            </div>
-          </section>
+      {!isLoading && !isError && health && flow && load && buffer && safetyBuffer && capitalData ? (
+        <div className="space-y-6">
+          <SectionMoney
+            flow={flow}
+            flowType={avgFlowType}
+            onFlowTypeChange={setAvgFlowType}
+            load={load}
+            buffer={buffer}
+            availableFinances={availableFinances}
+            monthProgress={monthProgress}
+            safetyBuffer={safetyBuffer}
+          />
 
-          {/* ── Аналитика ── */}
-          <section className="space-y-4">
-            <div>
-              <h3 className="text-lg font-semibold text-slate-950">Аналитика</h3>
-              <p className="mt-1 text-sm text-slate-500">Динамика, структура расходов и ключевые аналитические показатели.</p>
-            </div>
-            <div className="grid gap-4 xl:grid-cols-[0.72fr_1.28fr] xl:items-start">
-              <SixMonthTrendWidget transactions={transactionsQuery.data ?? []} isLoading={transactionsQuery.isLoading} />
-              <SixMonthTrendChartCard transactions={transactionsQuery.data ?? []} isLoading={transactionsQuery.isLoading} />
-            </div>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 xl:items-start">
-              <TopExpenseCategoriesWidget
-                transactions={transactionsQuery.data ?? []}
-                categories={categoriesQuery.data ?? []}
-                accounts={accountsQuery.data ?? []}
-                isLoading={transactionsQuery.isLoading || categoriesQuery.isLoading}
-                className="xl:col-span-2"
-              />
-              <div className="space-y-4">
-                <IncomeStructureWidget
-                  transactions={transactionsQuery.data ?? []}
-                  categories={categoriesQuery.data ?? []}
-                  isLoading={transactionsQuery.isLoading || categoriesQuery.isLoading}
-                />
-                <AvgDailyExpenseWidget transactions={transactionsQuery.data ?? []} isLoading={transactionsQuery.isLoading} />
-              </div>
-            </div>
-          </section>
+          <SectionAnalytics
+            trend={trend}
+            topExpenses={topExpenses}
+            totalExpenses={totalExpenses}
+            incomeStructure={incomeStructure}
+            avgDailyExpense={avgDailyExpense}
+            installmentCards={installmentCards}
+            transactions={transactions}
+            categories={categories}
+            metricsSummary={metricsSummaryQuery.data ?? null}
+            ccAccountIds={ccAccountIds}
+            trendYears={trendYears}
+            trendYear={trendYear}
+            trendMonth={trendMonth}
+            flowType={flowType}
+            availableMonths={availableMonths}
+            onTrendYearChange={setTrendYear}
+            onTrendMonthChange={setTrendMonth}
+            onFlowTypeChange={setFlowType}
+          />
 
-          {/* ── Капитал и долги ── */}
-          <section className="space-y-4">
-            <div>
-              <h3 className="text-lg font-semibold text-slate-950">Капитал и долги</h3>
-              <p className="mt-1 text-sm text-slate-500">Структура активов, обязательств и кредитной нагрузки.</p>
-            </div>
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              <CapitalWidget
-                accounts={accountsQuery.data ?? []}
-                realAssets={realAssetsQuery.data ?? []}
-                health={health}
-                isLoading={accountsQuery.isLoading || realAssetsQuery.isLoading}
-                className="xl:col-span-2"
-              />
-              <div className="space-y-4">
-                <DebtsWidget
-                  counterparties={counterpartiesQuery.data ?? []}
-                  health={health}
-                  isLoading={counterpartiesQuery.isLoading}
-                />
-                <CreditsWidget
-                  accounts={accountsQuery.data ?? []}
-                  transactions={transactionsQuery.data ?? []}
-                  health={health}
-                  isLoading={accountsQuery.isLoading || transactionsQuery.isLoading}
-                />
-              </div>
-            </div>
-          </section>
-        </>
+          <SectionCapital
+            capital={capitalData}
+            debts={debtsData}
+            health={health}
+          />
+        </div>
       ) : null}
     </PageShell>
   );

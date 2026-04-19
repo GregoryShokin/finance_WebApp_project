@@ -67,9 +67,279 @@ export const TAG_CLASSES: Record<TagTone, string> = {
 
 // ── Metrics (top row) ───────────────────────────────────────────
 
-export type FlowMetric = { balance: number; label: string; tone: TagTone };
+export type FlowMetric = { balance: number; label: string; tone: TagTone; monthsCount?: number };
 export type LoadMetric = { dti: number; label: string; tone: TagTone };
 export type ReserveMetric = { months: number; label: string; tone: TagTone };
+export type BufferMetric = { months: number; label: string; tone: TagTone };
+
+// Phase 6: metrics cards driven by /metrics/summary (single source of truth).
+import type { MetricsSummary } from '@/lib/api/metrics';
+
+export function computeFlowFromSummary(summary: MetricsSummary): FlowMetric {
+  const { basic_flow, zone } = summary.flow;
+  const label = zone === 'healthy' ? 'В норме' : zone === 'tight' ? 'Впритык' : 'Дефицит';
+  const tone: TagTone = zone === 'healthy' ? 'green' : zone === 'tight' ? 'amber' : 'red';
+  return { balance: basic_flow, label, tone };
+}
+
+/**
+ * Average monthly flow over the last 12 months (including current month).
+ * Only months that contain at least one transaction count — empty months
+ * (before first activity and gaps in between) are excluded from the denominator.
+ *
+ * Badge reflects the averaged value of the selected flow type:
+ *   - basic: lifestyle share (avg basic / avg regular income) — ≥20% healthy, ≥0% tight, <0 deficit
+ *   - free/full: sign of the averaged value — >0 healthy, =0 tight, <0 deficit
+ */
+export function computeAverageFlow(
+  summary: MetricsSummary,
+  transactions: Transaction[],
+  ccAccountIds: Set<number>,
+  flowType: 'basic' | 'free' | 'full',
+): FlowMetric {
+  // Any transaction makes the month "active" — empty months are excluded.
+  const activeMonths = new Set<string>();
+  for (const tx of transactions) {
+    activeMonths.add(txMonthKey(tx));
+  }
+
+  const now = new Date();
+  const windowKeys: Array<{ year: number; month: number; key: string }> = [];
+  for (let i = 11; i >= 0; i--) {
+    const d = shiftMonth(new Date(now.getFullYear(), now.getMonth(), 1), -i);
+    windowKeys.push({ year: d.getFullYear(), month: d.getMonth(), key: monthKey(d) });
+  }
+
+  const values: number[] = [];
+  const regularIncomes: number[] = [];
+  for (const { year, month, key } of windowKeys) {
+    if (!activeMonths.has(key)) continue;
+    const m = computeFlowForPeriod(transactions, year, month, ccAccountIds);
+    const v = flowType === 'basic' ? m.basicFlow : flowType === 'free' ? m.freeCapital : m.fullFlow;
+    values.push(v);
+    // regularIncome is computed inside computeFlowForPeriod but not returned — recompute cheaply via breakdown
+    const b = computeFlowBreakdown(transactions, { year, month });
+    regularIncomes.push(b.regularIncome);
+  }
+
+  const avg = values.length > 0 ? mean(values) : 0;
+
+  // Badge: depends on flow type
+  let label: string;
+  let tone: TagTone;
+  if (values.length === 0) {
+    label = '—';
+    tone = 'slate';
+  } else if (flowType === 'basic') {
+    const avgIncome = mean(regularIncomes);
+    const share = avgIncome > 0 ? (avg / avgIncome) * 100 : avg >= 0 ? 0 : -1;
+    if (share >= 20) { label = 'В норме'; tone = 'green'; }
+    else if (share >= 0) { label = 'Впритык'; tone = 'amber'; }
+    else { label = 'Дефицит'; tone = 'red'; }
+  } else {
+    if (avg > 0) { label = 'В норме'; tone = 'green'; }
+    else if (avg === 0) { label = 'Впритык'; tone = 'amber'; }
+    else { label = 'Дефицит'; tone = 'red'; }
+  }
+
+  return { balance: avg, label, tone, monthsCount: values.length };
+}
+
+export function computeLoadFromSummary(summary: MetricsSummary): LoadMetric {
+  const dti = summary.dti.dti_percent ?? 0;
+  const zone = summary.dti.zone;
+  const label = zone === 'normal' ? 'Низкая' : zone === 'acceptable' ? 'Допустимая' : zone === 'danger' ? 'Высокая' : zone === 'critical' ? 'Критическая' : '—';
+  const tone: TagTone = zone === 'normal' ? 'green' : zone === 'acceptable' ? 'amber' : 'red';
+  return { dti, label, tone };
+}
+
+export function computeBufferFromSummary(summary: MetricsSummary): BufferMetric {
+  const months = summary.buffer_stability.months ?? 0;
+  const zone = summary.buffer_stability.zone;
+  const label =
+    zone === 'excellent' ? 'Отличный'
+    : zone === 'normal' ? 'Хороший'
+    : zone === 'minimum' ? 'Минимальный'
+    : 'Недостаточный';
+  const tone: TagTone =
+    zone === 'excellent' || zone === 'normal' ? 'green'
+    : zone === 'minimum' ? 'amber'
+    : 'red';
+  return { months, label, tone };
+}
+
+// Phase 5: detailed breakdown for three-layer FlowWidget.
+// Main aggregates (basic_flow, free_capital, full_flow) come from /metrics/summary;
+// this breakdown provides segment values (regular vs all) that API doesn't expose.
+export interface FlowBreakdown {
+  regularIncome: number;
+  regularExpenses: number;
+  allIncome: number;
+  allExpenses: number;
+  investmentBuy: number;
+  creditDisbursement: number;
+}
+
+export function computeFlowBreakdown(
+  transactions: Transaction[],
+  options?: { year?: number; month?: number },
+): FlowBreakdown {
+  const now = new Date();
+  const targetYear = options?.year ?? now.getFullYear();
+  const targetMonth = options?.month ?? now.getMonth();
+  const key = monthKey(new Date(targetYear, targetMonth, 1));
+
+  let regularIncome = 0;
+  let regularExpenses = 0;
+  let allIncome = 0;
+  let allExpenses = 0;
+  let investmentBuy = 0;
+  let creditDisbursement = 0;
+
+  for (const tx of transactions) {
+    if (txMonthKey(tx) !== key) continue;
+    const amount = toNum(tx.amount);
+
+    // Credit disbursement: physical cash inflow when loan lands on liquid account.
+    // Marked affects_analytics=False on backend, so we scan it separately before that filter.
+    if (tx.type === 'income' && tx.operation_type === 'credit_disbursement') {
+      creditDisbursement += amount;
+      continue;
+    }
+
+    if (!tx.affects_analytics) continue;
+
+    if (tx.type === 'income') {
+      allIncome += amount;
+      if (tx.is_regular) regularIncome += amount;
+    }
+    if (
+      tx.type === 'expense'
+      && tx.operation_type !== 'transfer'
+      && tx.operation_type !== 'credit_early_repayment'
+    ) {
+      allExpenses += amount;
+      if (tx.is_regular) regularExpenses += amount;
+    }
+    if (tx.operation_type === 'investment_buy') {
+      investmentBuy += amount;
+    }
+  }
+
+  return { regularIncome, regularExpenses, allIncome, allExpenses, investmentBuy, creditDisbursement };
+}
+
+/**
+ * Compute flow metrics (basic, free, full + aux) for any given period from raw transactions.
+ * Used by FlowWidget when user picks a non-current month (API /metrics/summary only returns current).
+ *
+ * Precision note: `creditBodyPayments` here is summed from transfers with credit_account_id set,
+ * which matches the backend definition for body payments but excludes the "monthly_payment × body_ratio"
+ * approximation used by backend for free_capital. So values may differ slightly from summary endpoint.
+ */
+export interface FlowPeriodMetrics {
+  basicFlow: number;
+  freeCapital: number;
+  // fullFlow = Δ liquid cash:
+  //   + allIncome + creditDisbursement
+  //   − allExpenses
+  //   − creditBody                    (loan body payment from liquid → credit loan account)
+  //   + ccCompensator                 (purchase on CC didn't drain liquid cash)
+  //   − ccRepayment                   (transfer from liquid → CC to pay off the card)
+  //   − earlyRepayment                (credit_early_repayment from liquid account)
+  fullFlow: number;
+  creditBody: number;
+  ccCompensator: number;
+  ccRepayment: number;
+  earlyRepayment: number;
+  lifestyleCurrent: number | null; // current-month basicFlow / regularIncome × 100
+}
+
+export function computeFlowForPeriod(
+  transactions: Transaction[],
+  year: number,
+  month: number,
+  ccAccountIds?: Set<number>,
+): FlowPeriodMetrics {
+  const key = monthKey(new Date(year, month, 1));
+  let regularIncome = 0;
+  let regularExpenses = 0;
+  let allIncome = 0;
+  let allExpenses = 0;
+  let creditBody = 0;
+  let creditDisbursement = 0;
+  let ccCompensator = 0;
+  let ccRepayment = 0; // transfer from liquid → CC account (outflow that fullFlow must reflect)
+  let earlyRepayment = 0; // credit_early_repayment — outflow from liquid account
+
+  for (const tx of transactions) {
+    if (txMonthKey(tx) !== key) continue;
+    const amount = toNum(tx.amount);
+
+    // Transfers: skip from income/expense, but track:
+    //   - credit body (transfer to credit loan account, flagged with credit_account_id)
+    //   - CC repayment (transfer from liquid account to credit card / installment card)
+    if (tx.operation_type === 'transfer') {
+      if (tx.credit_account_id) {
+        creditBody += amount;
+      } else if (
+        ccAccountIds
+        && tx.target_account_id != null
+        && ccAccountIds.has(tx.target_account_id)
+        && !ccAccountIds.has(tx.account_id)
+      ) {
+        ccRepayment += amount;
+      }
+      continue;
+    }
+    // Early repayment: real outflow from liquid account (account_id is the source).
+    // We assume account_id is liquid — safe, because early repayments by design debit a liquid source.
+    if (tx.operation_type === 'credit_early_repayment') {
+      earlyRepayment += amount;
+      continue;
+    }
+
+    if (tx.type === 'income') {
+      if (tx.operation_type === 'credit_disbursement') {
+        creditDisbursement += amount;
+      } else {
+        allIncome += amount;
+        if (tx.is_regular) regularIncome += amount;
+      }
+      continue;
+    }
+    if (tx.type === 'expense') {
+      allExpenses += amount;
+      if (tx.is_regular) regularExpenses += amount;
+      // CC compensator: expense from a CC account (purchase didn't reduce liquid cash)
+      if (ccAccountIds && ccAccountIds.has(tx.account_id)) {
+        ccCompensator += amount;
+      }
+    }
+  }
+
+  const basicFlow = regularIncome - regularExpenses;
+  const freeCapital = basicFlow - creditBody;
+  const fullFlow =
+    allIncome + creditDisbursement
+    - allExpenses
+    - creditBody
+    + ccCompensator
+    - ccRepayment
+    - earlyRepayment;
+  const lifestyleCurrent = regularIncome > 0 ? (basicFlow / regularIncome) * 100 : null;
+
+  return {
+    basicFlow,
+    freeCapital,
+    fullFlow,
+    creditBody,
+    ccCompensator,
+    ccRepayment,
+    earlyRepayment,
+    lifestyleCurrent: lifestyleCurrent !== null ? Math.round(lifestyleCurrent * 10) / 10 : null,
+  };
+}
 
 export function computeFlow(transactions: Transaction[]): FlowMetric {
   const now = new Date();
@@ -84,7 +354,7 @@ export function computeFlow(transactions: Transaction[]): FlowMetric {
     const amount = toNum(tx.amount);
     if (tx.type === 'income') income += amount;
     if (tx.type === 'expense') {
-      if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') {
+      if (tx.operation_type === 'credit_early_repayment') {
         creditPayments += amount;
       } else {
         expense += amount;
@@ -286,7 +556,7 @@ export function computeSafetyBuffer(goals: GoalWithProgress[], health: Financial
 
 // ── Trend (parameterized) ────────────────────────────────────────
 
-export type FlowType = 'basic' | 'full';
+export type FlowType = 'basic' | 'free' | 'full';
 
 export type TrendBreakdown = {
   activeRegular: number;
@@ -370,11 +640,11 @@ export function computeTrend(
     const bucket = buckets.get(key);
     if (!bucket) continue;
 
-    // Skip transfers and early repayments (both flows exclude these)
+    // Skip transfers and early repayments (income/expense counting excludes these)
     if (tx.operation_type === 'transfer' || tx.operation_type === 'credit_early_repayment') continue;
 
-    // For basic flow: only regular transactions
-    if (flowType === 'basic' && !tx.is_regular) continue;
+    // Basic/Free flow: only regular transactions. Full: all.
+    if ((flowType === 'basic' || flowType === 'free') && !tx.is_regular) continue;
 
     const amount = toNum(tx.amount);
 
@@ -391,20 +661,28 @@ export function computeTrend(
       }
     }
     if (tx.type === 'expense') {
-      if (tx.operation_type === 'credit_payment') {
-        bucket.creditPayments += amount;
+      bucket.expense += amount;
+      const priority = tx.category_priority;
+      const isEssential = priority === 'expense_essential';
+      if (isEssential) {
+        if (tx.is_regular) bucket.expenseBreakdown.essentialRegular += amount;
+        else bucket.expenseBreakdown.essentialIrregular += amount;
       } else {
-        bucket.expense += amount;
-        const priority = tx.category_priority;
-        const isEssential = priority === 'expense_essential';
-        if (isEssential) {
-          if (tx.is_regular) bucket.expenseBreakdown.essentialRegular += amount;
-          else bucket.expenseBreakdown.essentialIrregular += amount;
-        } else {
-          if (tx.is_regular) bucket.expenseBreakdown.secondaryRegular += amount;
-          else bucket.expenseBreakdown.secondaryIrregular += amount;
-        }
+        if (tx.is_regular) bucket.expenseBreakdown.secondaryRegular += amount;
+        else bucket.expenseBreakdown.secondaryIrregular += amount;
       }
+    }
+  }
+
+  // For 'free' flow: subtract credit body payments (transfers with credit_account_id set).
+  // Transfers have affects_analytics=False on the backend, so scan raw transactions, not `analytics`.
+  if (flowType === 'free') {
+    for (const tx of transactions) {
+      if (tx.operation_type !== 'transfer') continue;
+      if (!tx.credit_account_id) continue;
+      const bucket = buckets.get(txMonthKey(tx));
+      if (!bucket) continue;
+      bucket.creditPayments += toNum(tx.amount);
     }
   }
 
@@ -480,7 +758,7 @@ export function computeTopExpenses(
     (tx) =>
       tx.affects_analytics &&
       tx.type === 'expense' &&
-      tx.operation_type !== 'credit_payment' &&
+      
       tx.operation_type !== 'credit_early_repayment',
   );
 
@@ -562,7 +840,7 @@ export function computeExpenseTotals(transactions: Transaction[], targetYear?: n
 
   for (const tx of transactions) {
     if (!tx.affects_analytics || tx.type !== 'expense') continue;
-    if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
+    if (tx.operation_type === 'credit_early_repayment') continue;
     if (txMonthKey(tx) !== key) continue;
     total += toNum(tx.amount);
   }
@@ -612,7 +890,7 @@ export function computeIncomeStructure(
       const amount = toNum(tx.amount);
       if (tx.type === 'income') { income += amount; continue; }
       if (tx.type !== 'expense') continue;
-      if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
+      if (tx.operation_type === 'credit_early_repayment') continue;
       const priority = categoriesById.get(tx.category_id ?? -1)?.priority ?? tx.category_priority ?? null;
       if (priority === 'expense_essential') essential += amount;
       else secondary += amount;
@@ -655,7 +933,7 @@ export function computeIncomeStructure(
     }
 
     if (tx.type === 'expense') {
-      if (tx.operation_type === 'credit_payment' || tx.operation_type === 'credit_early_repayment') continue;
+      if (tx.operation_type === 'credit_early_repayment') continue;
       const priority = categoriesById.get(tx.category_id ?? -1)?.priority ?? tx.category_priority ?? null;
       if (priority === 'expense_essential') curEssential += amount;
       else curSecondary += amount;
@@ -683,7 +961,7 @@ export function computeAvgDailyExpense(transactions: Transaction[]) {
     (tx) =>
       tx.affects_analytics &&
       tx.type === 'expense' &&
-      tx.operation_type !== 'credit_payment' &&
+      
       tx.operation_type !== 'credit_early_repayment',
   );
 

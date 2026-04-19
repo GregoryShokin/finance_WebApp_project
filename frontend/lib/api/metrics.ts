@@ -5,9 +5,14 @@ export function getMetrics(month: string) {
   return apiClient<Metrics>(`/metrics?month=${month}`);
 }
 
+// Phase 5 (2026-04-19): three-layer Flow model.
+// Ref: financeapp-vault/01-Metrics/Поток.md
 export interface FlowMetric {
   basic_flow: number;
+  free_capital: number;          // Basic - credit_body_payments
   full_flow: number;
+  cc_debt_compensator: number;   // Δ долга по КК за период
+  credit_body_payments: number;  // тело обязательных платежей
   lifestyle_indicator: number | null;
   zone: 'healthy' | 'tight' | 'deficit';
   trend: number | null;
@@ -16,6 +21,10 @@ export interface FlowMetric {
 export interface CapitalMetric {
   capital: number;
   trend: number | null;
+  trend_3m?: number | null;
+  trend_6m?: number | null;
+  trend_12m?: number | null;
+  snapshots_count?: number;
 }
 
 export interface DTIMetric {
@@ -32,11 +41,19 @@ export interface ReserveMetric {
   monthly_outflow: number;
 }
 
+export interface BufferStabilityMetric {
+  months: number | null;
+  zone: 'critical' | 'minimum' | 'normal' | 'excellent' | null;
+  deposit_balance: number;
+  avg_monthly_expense: number;
+}
+
 export interface MetricsSummary {
   flow: FlowMetric;
   capital: CapitalMetric;
   dti: DTIMetric;
-  reserve: ReserveMetric;
+  buffer_stability: BufferStabilityMetric;
+  reserve: ReserveMetric;  // legacy compat
   fi_score: number;
 }
 

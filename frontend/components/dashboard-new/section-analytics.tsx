@@ -17,6 +17,7 @@ import {
   getTransactionMonths,
 } from '@/components/dashboard-new/dashboard-data';
 import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
+import { FlowWidget } from '@/components/dashboard-new/flow-widget';
 import type { Transaction } from '@/types/transaction';
 import type { Category } from '@/types/category';
 
@@ -29,6 +30,9 @@ type Props = {
   installmentCards: Array<{ name: string; monthlyPayment: number; remaining: number | null; totalAmount: number }>;
   transactions: Transaction[];
   categories: Category[];
+  // Phase 5: FlowWidget data
+  metricsSummary: import('@/lib/api/metrics').MetricsSummary | null;
+  ccAccountIds: Set<number>;
   // Trend controls
   trendYears: number[];
   trendYear: number;
@@ -878,6 +882,8 @@ export function SectionAnalytics({
   installmentCards,
   transactions,
   categories,
+  metricsSummary,
+  ccAccountIds,
   trendYears,
   trendYear,
   trendMonth,
@@ -903,12 +909,9 @@ export function SectionAnalytics({
         <p className="text-base font-semibold text-slate-800 mb-3">Денежный поток</p>
 
         <div className="grid grid-cols-[0.72fr_1.28fr] gap-4">
-          {/* Left — Trend Donut */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] relative">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">
-              {MONTH_NAMES[trendMonth]} {trendYear}
-            </p>
-            {trend ? <TrendDonut trend={trend} /> : <EmptyState text="Недостаточно данных" />}
+          {/* Left — FlowWidget (Phase 5) */}
+          <div className="self-start">
+            <FlowWidget summary={metricsSummary} transactions={transactions} ccAccountIds={ccAccountIds} />
           </div>
 
           {/* Right — Trend Chart with controls */}
@@ -945,6 +948,13 @@ export function SectionAnalytics({
                     onClick={() => onFlowTypeChange('basic')}
                   >
                     Базовый
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-lg px-2.5 py-1 transition-colors ${flowType === 'free' ? 'bg-white text-slate-900 shadow-sm font-medium' : 'cursor-pointer hover:text-slate-700'}`}
+                    onClick={() => onFlowTypeChange('free')}
+                  >
+                    Свободный
                   </button>
                   <button
                     type="button"

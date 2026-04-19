@@ -6,8 +6,9 @@ import {
   formatPercent,
   TAG_CLASSES,
   type FlowMetric,
+  type FlowType,
   type LoadMetric,
-  type ReserveMetric,
+  type BufferMetric,
   type AvailableFinancesData,
   type MonthProgressData,
   type SafetyBufferData,
@@ -16,25 +17,24 @@ import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 
 type Props = {
   flow: FlowMetric;
+  flowType: FlowType;
+  onFlowTypeChange: (type: FlowType) => void;
   load: LoadMetric;
-  reserve: ReserveMetric;
+  buffer: BufferMetric;
   availableFinances: AvailableFinancesData;
   monthProgress: MonthProgressData;
   safetyBuffer: SafetyBufferData;
 };
-
-const MONTH_NAMES = [
-  'январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
-  'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь',
-];
 
 const CARD_CLASS =
   'bg-white rounded-2xl border border-slate-200 p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] relative';
 
 export function SectionMoney({
   flow,
+  flowType,
+  onFlowTypeChange,
   load,
-  reserve,
+  buffer,
   availableFinances,
   monthProgress,
   safetyBuffer,
@@ -43,25 +43,31 @@ export function SectionMoney({
   const [progressOpen, setProgressOpen] = useState(false);
   const [bufferOpen, setBufferOpen] = useState(false);
 
-  const currentMonth = MONTH_NAMES[new Date().getMonth()];
-
   return (
     <>
       {/* ── Part 1: Metrics Row ───────────────────────────────── */}
       <div className="grid grid-cols-3 gap-4">
-        {/* Card 1 -- Поток */}
+        {/* Card 1 -- Поток (средний за последние 12 месяцев) */}
         <div className={CARD_CLASS}>
           <div className="flex items-center justify-between">
-            <span className="text-[14px] font-semibold text-slate-900">Поток</span>
-            <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold ${TAG_CLASSES[flow.tone]}`}>
-              {flow.label}
+            <span className="inline-flex items-center text-[14px] font-semibold text-slate-900">
+              Поток
+              <FlowInfoTooltip flowType={flowType} />
             </span>
+            <FlowTypeSwitcher value={flowType} onChange={onFlowTypeChange} />
           </div>
           <div className="text-2xl font-extrabold text-slate-900 mt-1">
             {flow.balance > 0 ? '+' : ''}{formatRub(flow.balance)}
           </div>
-          <div className="text-xs text-slate-400 mt-1">
-            Баланс за {currentMonth}
+          <div className="flex items-center justify-between mt-1">
+            <span className="text-xs text-slate-400">
+              {flow.monthsCount && flow.monthsCount > 0
+                ? `Среднее за ${flow.monthsCount} мес.`
+                : 'Нет данных'}
+            </span>
+            <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold ${TAG_CLASSES[flow.tone]}`}>
+              {flow.label}
+            </span>
           </div>
         </div>
 
@@ -81,19 +87,19 @@ export function SectionMoney({
           </div>
         </div>
 
-        {/* Card 3 -- Запас */}
+        {/* Card 3 -- Буфер устойчивости (Phase 6) */}
         <div className={CARD_CLASS}>
           <div className="flex items-center justify-between">
-            <span className="text-[14px] font-semibold text-slate-900">Запас</span>
-            <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold ${TAG_CLASSES[reserve.tone]}`}>
-              {reserve.label}
+            <span className="text-[14px] font-semibold text-slate-900">Буфер</span>
+            <span className={`inline-block px-2 py-0.5 rounded-full text-[11px] font-semibold ${TAG_CLASSES[buffer.tone]}`}>
+              {buffer.label}
             </span>
           </div>
           <div className="text-2xl font-extrabold text-slate-900 mt-1">
-            {reserve.months.toFixed(1)} мес.
+            {buffer.months.toFixed(1)} мес.
           </div>
           <div className="text-xs text-slate-400 mt-1">
-            Финансовая подушка
+            Вклады / среднемесячные расходы
           </div>
         </div>
       </div>
@@ -147,6 +153,85 @@ export function SectionMoney({
         />
       </div>
     </>
+  );
+}
+
+/* ================================================================
+   Flow info tooltip — explains Б / С / П semantics
+   ================================================================ */
+
+const FLOW_TOOLTIP: Record<FlowType, { title: string; body: string }> = {
+  basic: {
+    title: 'Базовый поток',
+    body: 'Регулярные доходы минус регулярные расходы. Показывает запас между привычным заработком и привычными тратами — без учёта разовых сумм и кредитных операций.',
+  },
+  free: {
+    title: 'Свободный поток',
+    body: 'Базовый поток минус тело обязательных платежей по кредитам. Столько остаётся после покрытия привычной жизни и обслуживания долга — это деньги, которые можно направить на цели или инвестиции.',
+  },
+  full: {
+    title: 'Полный поток',
+    body: 'Реальное изменение ликвидных денег: все доходы + поступления по кредитам − все расходы − тело кредитных платежей − погашения кредитных карт. Покупки с кредиток не уменьшают поток в момент оплаты, но их последующее погашение с дебетовой карты — уменьшает.',
+  },
+};
+
+function FlowInfoTooltip({ flowType }: { flowType: FlowType }) {
+  const { title, body } = FLOW_TOOLTIP[flowType];
+  return (
+    <span className="group relative ml-1.5 inline-flex items-center">
+      <span className="cursor-help text-slate-300 transition-colors hover:text-slate-500">
+        <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 3a.75.75 0 1 1 0 1.5A.75.75 0 0 1 8 4zm-.75 3h1.5v5h-1.5V7z" />
+        </svg>
+      </span>
+      <span className="pointer-events-none absolute bottom-full left-0 z-20 mb-2 w-72 -translate-x-2 rounded-lg bg-slate-800 px-3 py-2.5 text-xs leading-relaxed text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+        <span className="block font-semibold text-white">{title}</span>
+        <span className="mt-1 block text-slate-200">{body}</span>
+        <span className="absolute left-4 top-full border-4 border-transparent border-t-slate-800" />
+      </span>
+    </span>
+  );
+}
+
+/* ================================================================
+   Flow type switcher (Базовый / Свободный / Полный)
+   ================================================================ */
+
+function FlowTypeSwitcher({
+  value,
+  onChange,
+}: {
+  value: FlowType;
+  onChange: (type: FlowType) => void;
+}) {
+  const options: Array<{ key: FlowType; label: string }> = [
+    { key: 'basic', label: 'Б' },
+    { key: 'free', label: 'С' },
+    { key: 'full', label: 'П' },
+  ];
+  const titles: Record<FlowType, string> = {
+    basic: 'Базовый',
+    free: 'Свободный',
+    full: 'Полный',
+  };
+  return (
+    <div className="inline-flex rounded-full bg-slate-100 p-0.5">
+      {options.map((opt) => (
+        <button
+          key={opt.key}
+          type="button"
+          title={titles[opt.key]}
+          onClick={() => onChange(opt.key)}
+          className={`px-2 py-0.5 rounded-full text-[11px] font-semibold transition-colors ${
+            value === opt.key
+              ? 'bg-white text-slate-900 shadow-sm'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
