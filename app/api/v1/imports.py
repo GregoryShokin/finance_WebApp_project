@@ -116,6 +116,38 @@ def get_import_session(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+@router.patch("/{session_id}/account", response_model=ImportSessionResponse)
+def assign_session_account(
+    session_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Assign (or re-assign) an account to an import session and re-run transfer matching."""
+    service = ImportService(db)
+    session = service.import_repo.get_session(session_id=session_id, user_id=current_user.id)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Сессия не найдена.")
+    account_id = payload.get("account_id")
+    if not account_id:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="account_id обязателен.")
+    service.import_repo.update_session(session, account_id=int(account_id))
+    db.commit()
+    # Re-run transfer matcher so existing previewed sessions can now match against this one.
+    service.transfer_matcher.match_transfers_for_user(user_id=current_user.id)
+    db.commit()
+    db.refresh(session)
+    return {
+        "id": session.id,
+        "filename": session.filename,
+        "source_type": session.source_type,
+        "status": session.status,
+        "account_id": session.account_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+
+
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_import_session(
     session_id: int,

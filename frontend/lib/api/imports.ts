@@ -61,6 +61,13 @@ export function getImportReviewQueue() {
 }
 
 
+export function assignSessionAccount(sessionId: number, accountId: number) {
+  return apiClient<ImportSessionListItem>(`/imports/${sessionId}/account`, {
+    method: 'PATCH',
+    body: JSON.stringify({ account_id: accountId }),
+  });
+}
+
 export function updateImportRow(rowId: number, payload: ImportRowUpdatePayload) {
   return apiClient<ImportRowUpdateResponse>(`/imports/rows/${rowId}`, {
     method: 'PATCH',
