@@ -16,6 +16,7 @@ import {
 
 export function ImportQueue({ onResume }: { onResume: (id: number) => void }) {
   const queryClient = useQueryClient();
+  const [resumingId, setResumingId] = useState<number | null>(null);
   const sessionsQuery = useQuery({
     queryKey: ['import-sessions'],
     queryFn: getImportSessions,
@@ -112,8 +113,12 @@ export function ImportQueue({ onResume }: { onResume: (id: number) => void }) {
               <div className="flex shrink-0 items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => onResume(session.id)}
-                  className="inline-flex size-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900"
+                  disabled={resumingId === session.id}
+                  onClick={() => {
+                    setResumingId(session.id);
+                    onResume(session.id);
+                  }}
+                  className="inline-flex size-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
                   aria-label="Продолжить выписку"
                   title="Продолжить выписку"
                 >

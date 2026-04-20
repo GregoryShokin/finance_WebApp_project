@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -26,6 +27,7 @@ from app.services.transaction_enrichment_service import (
     TransactionEnrichmentService,
 )
 from app.services.transaction_service import NON_ANALYTICS_OPERATION_TYPES, TransactionService, TransactionValidationError
+from app.services.transfer_matcher_service import TransferMatcherService
 
 RAW_TYPE_TO_OPERATION_TYPE = {
     "purchase": "regular",
@@ -59,6 +61,7 @@ class ImportService:
         self.enrichment = TransactionEnrichmentService(db)
         self.transaction_service = TransactionService(db)
         self.category_rule_repo = TransactionCategoryRuleRepository(db)
+        self.transfer_matcher = TransferMatcherService(db)
 
     def upload_source(
         self,
@@ -86,6 +89,11 @@ class ImportService:
         delimiter: str | None = None,
         has_header: bool = True,
     ) -> dict[str, Any]:
+        file_hash = hashlib.sha256(raw_bytes).hexdigest()
+        existing = self.import_repo.find_active_by_file_hash(user_id=user_id, file_hash=file_hash)
+        if existing is not None:
+            return self._session_to_upload_response(existing)
+
         extension = self._detect_extension(filename)
         extractor = self.extractors.get(extension)
         if extractor is None:
@@ -152,11 +160,13 @@ class ImportService:
             parse_settings=parse_settings,
             source_type=extension,
         )
+        session.file_hash = file_hash
         self.import_repo.update_session(
             session,
             status="analyzed",
             mapping_json=detection,
             summary_json={},
+            account_id=suggested_account_id,
         )
         self.db.commit()
         self.db.refresh(session)
@@ -345,6 +355,14 @@ class ImportService:
                 status = "warning"
             elif action == "confirm":
                 status = "ready"
+                # If auto-detected as transfer but has no target, revert to regular
+                # so the user can confirm without a validation blocker.
+                if (
+                    str(normalized.get("operation_type") or "") == "transfer"
+                    and not normalized.get("target_account_id")
+                ):
+                    normalized["operation_type"] = "regular"
+                    normalized.pop("transfer_match", None)
             elif row_status in {"ready", "warning"}:
                 status = "warning"
 
@@ -484,8 +502,15 @@ class ImportService:
                     local_issues.append("РћСЃРЅРѕРІРЅРѕР№ РґРѕР»Рі Рё РїСЂРѕС†РµРЅС‚С‹ РЅРµ РјРѕРіСѓС‚ Р±С‹С‚СЊ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹РјРё.")
                     status = "error"
                 elif amount_decimal is not None and principal_amount + interest_amount != amount_decimal:
-                    local_issues.append("РЎСѓРјРјР° РѕСЃРЅРѕРІРЅРѕРіРѕ РґРѕР»РіР° Рё РїСЂРѕС†РµРЅС‚РѕРІ РґРѕР»Р¶РЅР° СЃРѕРІРїР°РґР°С‚СЊ СЃ РѕР±С‰РµР№ СЃСѓРјРјРѕР№ РїР»Р°С‚РµР¶Р°.")
-                    status = "error"
+                    # Bank statements sometimes round principal/interest split by a few
+                    # kopecks. If the mismatch is small (<= 1 RUB), snap interest to match
+                    # the total. Larger mismatches are real user errors.
+                    diff = amount_decimal - (principal_amount + interest_amount)
+                    if abs(diff) <= Decimal("1.00"):
+                        interest_amount = interest_amount + diff
+                    else:
+                        local_issues.append("Sum of principal + interest does not match total (off by more than 1 RUB)")
+                        status = "error"
                 normalized["credit_principal_amount"] = str(principal_amount)
                 normalized["credit_interest_amount"] = str(interest_amount)
         elif operation_type == "regular":
@@ -610,8 +635,28 @@ class ImportService:
         }
 
 
+    def get_existing_preview(self, *, user_id: int, session_id: int) -> dict[str, Any]:
+        session = self.get_session(user_id=user_id, session_id=session_id)
+        rows = self.import_repo.list_rows(session_id=session.id)
+        summary = session.summary_json or self._build_summary_from_rows(rows)
+        detection = session.mapping_json or (session.parse_settings or {}).get("detection", {})
+        return {
+            "session_id": session.id,
+            "status": session.status,
+            "summary": summary,
+            "detection": detection,
+            "rows": [self._serialize_preview_row(row) for row in rows],
+        }
+
     def build_preview(self, *, user_id: int, session_id: int, payload: ImportMappingRequest) -> dict[str, Any]:
         session = self.get_session(user_id=user_id, session_id=session_id)
+        # Serialize concurrent build_preview calls for the same session — prevents
+        # the race where two parallel requests each rebuild rows and both sets survive.
+        from sqlalchemy import text as _sa_text
+        self.db.execute(
+            _sa_text("SELECT id FROM import_sessions WHERE id = :sid FOR UPDATE"),
+            {"sid": session.id},
+        )
         account = self.account_repo.get_by_id_and_user(payload.account_id, user_id)
         if account is None:
             raise ImportValidationError("Р’С‹Р±СЂР°РЅРЅС‹Р№ СЃС‡С‘С‚ РЅРµ РЅР°Р№РґРµРЅ.")
@@ -682,6 +727,11 @@ class ImportService:
                 normalized["category_id"] = _cat_rule.category_id if _cat_rule else enrichment.get("suggested_category_id")
 
                 normalized["operation_type"] = enrichment.get("suggested_operation_type") or self._resolve_operation_type(normalized)
+
+                # Transfers and non-analytics types don't have categories — clear any
+                # rule-matched category that was assigned before operation_type was resolved.
+                if str(normalized.get("operation_type") or "") in ("transfer", *NON_ANALYTICS_OPERATION_TYPES):
+                    normalized["category_id"] = None
                 normalized["type"] = enrichment.get("suggested_type") or normalized.get("direction") or "expense"
 
                 if str(normalized["operation_type"]) == "transfer":
@@ -764,7 +814,7 @@ class ImportService:
 
                 # Р•СЃР»Рё РЅРµС‚ РїСЂР°РІРёР»Р° РґР»СЏ СЌС‚РѕР№ РѕРїРµСЂР°С†РёРё вЂ” С‚СЂРµР±СѓРµС‚СЃСЏ СЂСѓС‡РЅРѕРµ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РєР°С‚РµРіРѕСЂРёРё.
                 _requires_category = (
-                    str(normalized.get("type") or "") == "expense"
+                    str(normalized.get("operation_type") or "regular") == "regular"
                     and str(normalized.get("operation_type") or "") not in NON_ANALYTICS_OPERATION_TYPES
                 )
                 if _requires_category and not normalized.get("category_id"):
@@ -815,8 +865,6 @@ class ImportService:
 
         self.import_repo.replace_rows(session=session, rows=preview_rows)
 
-        response_rows = [self._serialize_preview_row(row) for row in preview_rows]
-
         self.import_repo.update_session(
             session,
             status="preview_ready",
@@ -827,6 +875,16 @@ class ImportService:
         )
         self.db.commit()
         self.db.refresh(session)
+
+        # Cross-session transfer matching: find pairs across all active sessions
+        # for this user and annotate rows with operation_type=transfer + target_account_id.
+        self.transfer_matcher.match_transfers_for_user(user_id=user_id)
+        self.db.commit()
+
+        # Build response AFTER matcher so the frontend sees updated transfer data.
+        updated_rows = self.import_repo.list_rows(session_id=session.id)
+        response_rows = [self._serialize_preview_row(row) for row in updated_rows]
+        summary = self._recalculate_summary(session.id)
 
         return {
             "session_id": session.id,
@@ -876,6 +934,13 @@ class ImportService:
 
     def commit_import(self, *, user_id: int, session_id: int, import_ready_only: bool = True) -> dict[str, Any]:
         session = self.get_session(user_id=user_id, session_id=session_id)
+        # Serialize concurrent commits for the same session — prevents accidental
+        # double-import when the user double-clicks or two requests arrive together.
+        from sqlalchemy import text as _sa_text
+        self.db.execute(
+            _sa_text("SELECT id FROM import_sessions WHERE id = :sid FOR UPDATE"),
+            {"sid": session.id},
+        )
         import_rows = self.import_repo.get_rows(session_id=session.id)
 
         if not import_rows:
@@ -1266,6 +1331,44 @@ class ImportService:
         if isinstance(value, str):
             return datetime.fromisoformat(value)
         raise TypeError("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ С„РѕСЂРјР°С‚ РґР°С‚С‹ С‚СЂР°РЅР·Р°РєС†РёРё.")
+
+    def _session_to_upload_response(self, session: ImportSession) -> dict[str, Any]:
+        ps = session.parse_settings or {}
+        detection = session.mapping_json or ps.get("detection", {})
+        extraction_meta = ps.get("extraction", {})
+        tables = ps.get("tables", [])
+        primary_table_name = ps.get("table_names", [None])[0]
+        sample_rows: list = []
+        total_rows = 0
+        detected_columns: list = session.detected_columns or []
+        for t in tables:
+            if isinstance(t, dict) and t.get("name") == primary_table_name:
+                sample_rows = t.get("rows", [])[:5]
+                total_rows = len(t.get("rows", []))
+                break
+
+        return {
+            "session_id": session.id,
+            "filename": session.filename,
+            "source_type": session.source_type,
+            "status": session.status,
+            "detected_columns": detected_columns,
+            "sample_rows": sample_rows,
+            "total_rows": total_rows,
+            "extraction": {
+                **extraction_meta,
+                "tables_found": len(tables),
+                "primary_table": primary_table_name,
+            },
+            "detection": detection,
+            "suggested_account_id": session.account_id,
+            "contract_number": ps.get("contract_number"),
+            "contract_match_reason": None,
+            "contract_match_confidence": None,
+            "statement_account_number": ps.get("statement_account_number"),
+            "statement_account_match_reason": None,
+            "statement_account_match_confidence": None,
+        }
 
     @staticmethod
     def _detect_extension(filename: str) -> str:

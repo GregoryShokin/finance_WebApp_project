@@ -130,6 +130,19 @@ def delete_import_session(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+@router.get("/{session_id}/preview", response_model=ImportPreviewResponse)
+def get_import_preview(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.get_existing_preview(user_id=current_user.id, session_id=session_id)
+    except ImportNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
 @router.post("/{session_id}/preview", response_model=ImportPreviewResponse)
 def preview_import(
     session_id: int,

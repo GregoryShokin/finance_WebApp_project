@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -11,6 +11,9 @@ from app.models.base import Base
 
 class ImportRow(Base):
     __tablename__ = "import_rows"
+    __table_args__ = (
+        UniqueConstraint("session_id", "row_index", name="uq_import_rows_session_row_index"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("import_sessions.id", ondelete="CASCADE"), nullable=False, index=True)

@@ -16,6 +16,7 @@ TIME_ONLY_RX = re.compile(r"^\d{2}:\d{2}(?::\d{2})?$")
 YANDEX_TIME_RX = re.compile(r"^Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР’В \s+(?P<time>\d{2}:\d{2})$")
 TBANK_START_RX = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
 OZON_START_RX = re.compile(r"^(?P<dt>\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2})\s+(?P<doc>\S+)(?:\s+(?P<rest>.*))?$")
+OZON_TIME_DOC_RX = re.compile(r"^(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<doc>\S+)(?:\s+(?P<rest>.*))?$")
 YANDEX_TIME_FALLBACK_RX = re.compile(r"^(?:\u0432\s+)?(?P<time>\d{2}:\d{2})$")
 CONTRACT_NUMBER_PATTERNS = [
     re.compile(r"\b\u043d\u043e\u043c\u0435\u0440\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430\s*:\s*([\w\-\/]+)", re.I),
@@ -797,6 +798,7 @@ class PdfExtractor(BaseExtractor):
         return bool(DATE_ONLY_RX.match(line))
 
     def _segment_blocks(self, lines: list[str]) -> list[CandidateBlock]:
+        lines = self._merge_split_ozon_datetime(lines)
         blocks: list[CandidateBlock] = []
         current: list[str] = []
         current_layout: str | None = None
@@ -817,6 +819,30 @@ class PdfExtractor(BaseExtractor):
             blocks.append(CandidateBlock(lines=current, layout=current_layout or "unknown"))
 
         return blocks
+
+    @staticmethod
+    def _merge_split_ozon_datetime(lines: list[str]) -> list[str]:
+        """Ozon Bank PDF sometimes splits long datetime cells across two lines:
+            line N:   "12.02.2026"
+            line N+1: "00:48:35 8698189137 ..."
+        Merge such pairs into a single Ozon-style header so OZON_START_RX matches.
+        """
+        merged: list[str] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            current = lines[i]
+            if (
+                DATE_ONLY_RX.match(current)
+                and i + 1 < n
+                and OZON_TIME_DOC_RX.match(lines[i + 1])
+            ):
+                merged.append(f"{current} {lines[i + 1]}")
+                i += 2
+                continue
+            merged.append(current)
+            i += 1
+        return merged
 
     def _detect_block_start(self, lines: list[str], idx: int) -> str | None:
         line = lines[idx]

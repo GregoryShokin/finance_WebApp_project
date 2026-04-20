@@ -30,6 +30,10 @@ export function previewImport(sessionId: number, payload: ImportMappingPayload) 
   });
 }
 
+export function getImportPreview(sessionId: number) {
+  return apiClient<ImportPreviewResponse>(`/imports/${sessionId}/preview`);
+}
+
 export function commitImport(sessionId: number, importReadyOnly = true) {
   return apiClient<ImportCommitResponse>(`/imports/${sessionId}/commit`, {
     method: 'POST',

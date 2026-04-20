@@ -1,6 +1,6 @@
 'use client';
 
-import { ChangeEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, ChevronDown, FileUp, Info, Plus, ShieldOff, Split, Trash2, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -9,7 +9,7 @@ import { getAccounts, createAccount } from '@/lib/api/accounts';
 import { getCategoryRules } from '@/lib/api/category-rules';
 import { getCategories, createCategory } from '@/lib/api/categories';
 import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
-import { commitImport, getImportSession, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
+import { commitImport, getImportPreview, getImportSession, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
 import { DescriptionAutocomplete } from '@/components/import/description-autocomplete';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -162,7 +162,7 @@ function normalize(value: string) {
 }
 
 function isCreditPaymentAccount(account: Account) {
-  return account.account_type === 'credit' || account.account_type === 'credit_card' || account.is_credit;
+  return account.account_type === 'credit' || account.account_type === 'credit_card' || account.account_type === 'installment_card' || account.is_credit;
 }
 
 function isSelectableTransactionAccount(account: Account) {
@@ -276,7 +276,9 @@ function mapOperationToUi(
   if (operationType === 'credit_disbursement') {
     return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'disbursement' };
   }
-  
+  if (operationType === 'credit_payment') {
+    return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'payment' };
+  }
   if (operationType === 'credit_early_repayment') {
     return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'early_repayment' };
   }
@@ -293,11 +295,14 @@ function resolveOperationFields(form: RowEditState): Pick<RowEditState, 'operati
     return { operation_type: 'debt', type: form.debt_direction === 'borrowed' || form.debt_direction === 'collected' ? 'income' : 'expense' };
   }
   if (form.main_type === 'credit_operation') {
+    const opTypeByKind: Record<CreditOperationKind, string> = {
+      '': 'credit_payment',
+      disbursement: 'credit_disbursement',
+      payment: 'credit_payment',
+      early_repayment: 'credit_early_repayment',
+    };
     return {
-      operation_type:
-        form.credit_operation_kind === 'disbursement'
-          ? 'credit_disbursement'
-          : 'credit_early_repayment',
+      operation_type: opTypeByKind[form.credit_operation_kind] ?? 'credit_payment',
       type: form.credit_operation_kind === 'disbursement' ? 'income' : 'expense',
     };
   }
@@ -317,6 +322,7 @@ function getMainTypeLabel(value: MainOperationType) {
 function getCreditOperationKindLabel(value: CreditOperationKind) {
   if (value === 'disbursement') return 'Получение кредита';
   if (value === 'payment') return 'Платёж по кредиту';
+  if (value === 'early_repayment') return 'Досрочное погашение';
   return '';
 }
 
@@ -429,17 +435,18 @@ function buildRowUpdatePayload(
       }))
     : [];
 
+  const isCreditPayLike =
+    resolved.operation_type === 'credit_payment' || resolved.operation_type === 'credit_early_repayment';
   return {
     account_id: form.account_id ? Number(form.account_id) : null,
     target_account_id: resolved.operation_type === 'transfer'
       ? (form.target_account_id ? Number(form.target_account_id) : null)
-      : resolved.operation_type === 'credit_early_repayment'
+      : isCreditPayLike
         ? (form.credit_account_id ? Number(form.credit_account_id) : null)
         : null,
-    credit_account_id:
-      resolved.operation_type === 'credit_early_repayment'
-        ? (form.credit_account_id ? Number(form.credit_account_id) : null)
-        : null,
+    credit_account_id: isCreditPayLike
+      ? (form.credit_account_id ? Number(form.credit_account_id) : null)
+      : null,
     category_id: resolved.operation_type === 'regular' || resolved.operation_type === 'refund' ? (splitPayload && splitPayload.length >= 2 ? null : form.category_id ? Number(form.category_id) : null) : null,
     counterparty_id: resolved.operation_type === 'debt' ? (form.counterparty_id ? Number(form.counterparty_id) : null) : null,
     amount: toNumericValue(form.amount),
@@ -449,12 +456,11 @@ function buildRowUpdatePayload(
     description: form.description,
     transaction_date: form.transaction_date ? new Date(form.transaction_date).toISOString() : null,
     currency: form.currency,
-    credit_principal_amount:
-      resolved.operation_type === 'credit_early_repayment'
-        ? toNumericValue(form.credit_principal_amount)
-        : null,
+    credit_principal_amount: isCreditPayLike
+      ? toNumericValue(form.credit_principal_amount)
+      : null,
     credit_interest_amount:
-      resolved.operation_type === 'credit_early_repayment'
+      resolved.operation_type === 'credit_payment'
         ? toNumericValue(form.credit_interest_amount)
         : resolved.operation_type === 'credit_early_repayment'
           ? 0
@@ -636,8 +642,27 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
     }
   }, [draftHydrated, initialSessionId]);
 
+  // After draft hydration: if we restored a previewResult from localStorage,
+  // re-fetch existing rows from server to sync with latest state (IDs, edits).
+  // Uses GET /preview (read-only) to preserve user edits — POST would
+  // rebuild rows from scratch and destroy all manual category/type changes.
+  useEffect(() => {
+    if (!draftHydrated) return;
+    if (initialSessionId) return; // handled by the other effect below
+    if (!uploadResult?.session_id) return;
+    if (!previewResult) return;
+    const sid = uploadResult.session_id;
+    getImportPreview(sid)
+      .then((fresh) => setPreviewResult(fresh))
+      .catch(() => { /* stale cache — user can rebuild manually */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftHydrated]);
+
+  const loadedSessionIdRef = useRef<number | null>(null);
   useEffect(() => {
     if (!initialSessionId || !draftHydrated || accounts.length === 0) return;
+    if (loadedSessionIdRef.current === initialSessionId) return;
+    loadedSessionIdRef.current = initialSessionId;
 
     let cancelled = false;
 
@@ -682,7 +707,18 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
         };
         const hasDetectedFields = Object.values(restoredUploadResult.detection.field_mapping ?? {}).some(Boolean);
 
-        if ((session.status === 'preview_ready' || session.status === 'analyzed') && resolvedMapping.account_id && hasDetectedFields) {
+        if (session.status === 'preview_ready') {
+          const preview = await getImportPreview(session.id);
+          if (cancelled) return;
+
+          setPreviewResult(preview);
+          setCommitResult(null);
+          setRowForms({});
+          setRowQueries({});
+          setSplitExpanded({});
+          setSplitRows({});
+          setSplitQueries({});
+        } else if (session.status === 'analyzed' && resolvedMapping.account_id && hasDetectedFields) {
           const preview = await previewImport(session.id, toPreviewPayload({
             ...resolvedMapping,
           }));
@@ -792,6 +828,7 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
   const creditOperationKindItems = useMemo<SearchSelectItem[]>(() => [
     { value: 'disbursement', label: 'Получение кредита', searchText: 'получение кредита кредит получен disbursement loan' },
     { value: 'payment', label: 'Платёж по кредиту', searchText: 'платеж по кредиту погашение кредита payment loan' },
+    { value: 'early_repayment', label: 'Досрочное погашение', searchText: 'досрочное погашение досрочка early repayment prepayment' },
   ], []);
 
   const previewMutation = useMutation({
@@ -1084,6 +1121,7 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
 
   function rebuildPreview(nextForm: MappingState) {
     if (!uploadResult) return;
+    if (previewMutation.isPending) return;
     if (!nextForm.account_id) {
       toast.error('Выбери счёт для импорта');
       return;
@@ -1346,6 +1384,18 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
           </div>
         ) : null}
       </div>
+
+      {previewResult && !mappingForm.account_id ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          ⚠️ Счёт не выбран — выбери счёт в блоке «Загрузка источника» выше, и preview пересчитается автоматически.
+        </div>
+      ) : null}
+
+      {previewResult && mappingForm.account_id && uploadResult?.suggested_account_id === null ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          ⚠️ Счёт не был определён автоматически из выписки. Убедись, что выбран правильный счёт выше — при необходимости смени его, и preview пересчитается.
+        </div>
+      ) : null}
 
       {previewResult ? (
         <Card className="rounded-3xl bg-white p-5 shadow-soft lg:p-6">
@@ -1733,12 +1783,12 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
                       {form.main_type === 'credit_operation' && (form.credit_operation_kind === 'payment' || form.credit_operation_kind === 'early_repayment') ? (
                         <>
                           <div>
-                            <label className="mb-2 block text-sm font-medium text-slate-700">???????? ????</label>
+                            <label className="mb-2 block text-sm font-medium text-slate-700">Основной долг</label>
                             <Input value={form.credit_principal_amount} onChange={(event) => updateRowForm(row.id, { credit_principal_amount: event.target.value })} />
                           </div>
                           {form.credit_operation_kind === 'payment' ? (
                             <div>
-                              <label className="mb-2 block text-sm font-medium text-slate-700">????????</label>
+                              <label className="mb-2 block text-sm font-medium text-slate-700">Проценты</label>
                               <Input value={form.credit_interest_amount} onChange={(event) => updateRowForm(row.id, { credit_interest_amount: event.target.value })} />
                             </div>
                           ) : null}

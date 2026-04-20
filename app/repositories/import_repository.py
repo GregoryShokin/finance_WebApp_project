@@ -60,6 +60,18 @@ class ImportRepository:
             .all()
         )
 
+    def find_active_by_file_hash(self, *, user_id: int, file_hash: str) -> ImportSession | None:
+        return (
+            self.db.query(ImportSession)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.file_hash == file_hash,
+                ImportSession.status != "committed",
+            )
+            .order_by(ImportSession.created_at.desc())
+            .first()
+        )
+
     def delete_session(self, session: ImportSession) -> None:
         self.db.delete(session)
         self.db.flush()
