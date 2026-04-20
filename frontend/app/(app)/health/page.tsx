@@ -5,8 +5,7 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowRight, CheckCircle2, HeartPulse, Minus, TrendingDown, TrendingUp } from 'lucide-react';
 
-import { MetricsHealthSection } from '@/components/health/metrics-health-section';
-import { SchoolMoments } from '@/components/school/school-moments';
+import { CapitalTrendChart } from '@/components/health/capital-trend-chart';
 import { PageShell } from '@/components/layout/page-shell';
 import { ErrorState, LoadingState } from '@/components/states/page-state';
 import { Card } from '@/components/ui/card';
@@ -554,14 +553,6 @@ export default function HealthPage() {
       title="Финансовое здоровье"
       description="Динамика и траектория: как меняются сбережения, кредитная нагрузка, дисциплина и движение к финансовой свободе."
     >
-      <section className={cn(SECTION_CARD)}>
-        <MetricsHealthSection />
-      </section>
-
-      <section className={cn(SECTION_CARD)}>
-        <SchoolMoments maxItems={5} />
-      </section>
-
       <section className={cn(SECTION_CARD, 'grid gap-8 xl:grid-cols-[1fr_1fr] xl:items-center')}>
         <div className="flex flex-col items-center justify-center">
           <RingScore score={health.fi_score} />
@@ -603,6 +594,8 @@ export default function HealthPage() {
           </div>
         </div>
       </section>
+
+      <CapitalTrendChart />
 
       <section className="grid gap-4 xl:grid-cols-2">
         <Card className={SECTION_CARD}>

@@ -1,8 +1,17 @@
 import { apiClient } from '@/lib/api/client';
-import type { FinancialHealth, RealAsset, RealAssetPayload } from '@/types/financial-health';
+import type {
+  CapitalHistoryPoint,
+  FinancialHealth,
+  RealAsset,
+  RealAssetPayload,
+} from '@/types/financial-health';
 
 export function getFinancialHealth(userId: number) {
   return apiClient<FinancialHealth>(`/financial-health/${userId}`);
+}
+
+export function getCapitalHistory(months = 6) {
+  return apiClient<CapitalHistoryPoint[]>(`/financial-health/capital-history?months=${months}`);
 }
 
 export function getRealAssets() {

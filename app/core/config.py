@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     TRUSTED_HOSTS: list[str] | str = ["localhost", "127.0.0.1"]
     ENABLE_HTTPS_REDIRECT: bool = False
 
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-haiku-4-5"
+    LLM_CLASSIFICATION_ENABLED: bool = False
+    LLM_MIN_CONFIDENCE: float = 0.6
+
     @field_validator("BACKEND_CORS_ORIGINS", "TRUSTED_HOSTS", mode="before")
     @classmethod
     def _parse_str_list(cls, value: Any) -> list[str] | Any:

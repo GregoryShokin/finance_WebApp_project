@@ -4,10 +4,10 @@ import { useQuery } from '@tanstack/react-query';
 import { getHealthSummary, type HealthSummary } from '@/lib/api/metrics';
 
 const FI_ZONE_LABELS: Record<string, string> = {
-  risk: '\u0420\u0438\u0441\u043A',
-  growth: '\u0420\u043E\u0441\u0442',
-  path: '\u041F\u0443\u0442\u044C',
-  freedom: '\u0421\u0432\u043E\u0431\u043E\u0434\u0430',
+  risk: 'Риск',
+  growth: 'Рост',
+  path: 'Путь',
+  freedom: 'Свобода',
 };
 
 const FI_ZONE_COLORS: Record<string, string> = {
@@ -18,10 +18,10 @@ const FI_ZONE_COLORS: Record<string, string> = {
 };
 
 const METRIC_LABELS: Record<string, string> = {
-  flow: '\u041F\u043E\u0442\u043E\u043A',
-  capital: '\u041B\u0438\u043A\u0432\u0438\u0434\u043D\u044B\u0439 \u043A\u0430\u043F\u0438\u0442\u0430\u043B',
-  dti: '\u041D\u0430\u0433\u0440\u0443\u0437\u043A\u0430',
-  reserve: '\u0417\u0430\u043F\u0430\u0441',
+  flow: 'Поток',
+  capital: 'Ликвидный капитал',
+  dti: 'Нагрузка',
+  reserve: 'Запас',
 };
 
 const ZONE_PRIORITY: Record<string, number> = {
@@ -99,7 +99,7 @@ export function MetricsHealthSection() {
   if (isError || !data) return null;
 
   const fiColor = FI_ZONE_COLORS[data.fi_zone] ?? FI_ZONE_COLORS.risk;
-  const fiLabel = FI_ZONE_LABELS[data.fi_zone] ?? '\u0420\u0438\u0441\u043A';
+  const fiLabel = FI_ZONE_LABELS[data.fi_zone] ?? 'Риск';
 
   const metrics = ['flow', 'capital', 'dti', 'reserve'] as const;
   const lifeStyle = data.metrics.flow.lifestyle_indicator;
@@ -130,7 +130,7 @@ export function MetricsHealthSection() {
                 <span className="text-sm font-medium text-slate-700">
                   {METRIC_LABELS[m]}
                   {isWeakest ? (
-                    <span className="ml-2 text-xs text-yellow-600">\u0424\u043E\u043A\u0443\u0441</span>
+                    <span className="ml-2 text-xs text-yellow-600">Фокус</span>
                   ) : null}
                 </span>
                 <span className="text-xs text-slate-500">{Math.round(pct)}%</span>
@@ -150,15 +150,13 @@ export function MetricsHealthSection() {
       {lifeStyle != null ? (
         <div className="rounded-xl border border-slate-200 bg-white p-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-slate-600">
-              \u0423\u0440\u043E\u0432\u0435\u043D\u044C \u0436\u0438\u0437\u043D\u0438
-            </span>
+            <span className="text-sm text-slate-600">Уровень жизни</span>
             <span className={`text-sm font-medium ${lifeStyle >= 20 ? 'text-green-600' : lifeStyle >= 0 ? 'text-yellow-600' : 'text-red-600'}`}>
               {lifeStyle.toFixed(1)}%
             </span>
           </div>
           <p className="mt-0.5 text-xs text-slate-400">
-            \u0414\u043E\u043B\u044F \u0434\u043E\u0445\u043E\u0434\u0430, \u043E\u0441\u0442\u0430\u044E\u0449\u0430\u044F\u0441\u044F \u043F\u043E\u0441\u043B\u0435 \u0440\u0430\u0441\u0445\u043E\u0434\u043E\u0432 \u0438 \u043A\u0440\u0435\u0434\u0438\u0442\u043E\u0432
+            Доля дохода, остающаяся после расходов и кредитов
           </p>
         </div>
       ) : null}
@@ -166,9 +164,7 @@ export function MetricsHealthSection() {
       {/* Recommendations */}
       {data.recommendations.length > 0 ? (
         <div className="space-y-2">
-          <h4 className="text-sm font-semibold text-slate-700">
-            \u0427\u0442\u043E \u0434\u0435\u043B\u0430\u0442\u044C
-          </h4>
+          <h4 className="text-sm font-semibold text-slate-700">Что делать</h4>
           {data.recommendations.map((rec) => (
             <div
               key={rec.message_key}

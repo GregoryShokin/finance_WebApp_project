@@ -31,6 +31,21 @@ class RealAssetResponse(BaseModel):
     updated_at: datetime
 
 
+class CapitalHistoryPoint(BaseModel):
+    month: str
+    label: str
+    liquid: float
+    deposit: float
+    broker: float
+    receivable: float
+    real_assets: float
+    credit_debt: float
+    counterparty_debt: float
+    total_debt: float
+    liquid_capital: float
+    net_capital: float
+
+
 class ChronicViolation(BaseModel):
     category_name: str
     months_count: int

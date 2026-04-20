@@ -7,7 +7,14 @@ from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.models.real_asset import RealAsset
 from app.models.user import User
-from app.schemas.financial_health import FinancialHealthResponse, RealAssetCreate, RealAssetResponse, RealAssetUpdate
+from app.schemas.financial_health import (
+    CapitalHistoryPoint,
+    FinancialHealthResponse,
+    RealAssetCreate,
+    RealAssetResponse,
+    RealAssetUpdate,
+)
+from app.services.capital_snapshot_service import CapitalSnapshotService
 from app.services.financial_health_service import FinancialHealthService
 
 router = APIRouter(tags=["Financial Health"])
@@ -19,6 +26,20 @@ def get_financial_health_current(
     current_user: User = Depends(get_current_user),
 ):
     return FinancialHealthService(db).get_financial_health(current_user.id)
+
+
+@router.get("/financial-health/capital-history", response_model=list[CapitalHistoryPoint])
+def get_capital_history(
+    months: int = 6,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if months < 1 or months > 24:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="months must be between 1 and 24",
+        )
+    return CapitalSnapshotService(db).get_capital_history(current_user.id, months)
 
 
 @router.get("/financial-health/{user_id}", response_model=FinancialHealthResponse)

@@ -28,8 +28,20 @@ class CapitalSnapshot(Base):
     liquid_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     deposit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     credit_debt: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    real_assets_amount: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    broker_amount: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    receivable_amount: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    counterparty_debt: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal("0"), server_default="0"
+    )
     capital: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
-    net_capital: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    net_capital: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

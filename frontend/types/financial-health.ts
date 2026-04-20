@@ -136,3 +136,18 @@ export type RealAssetPayload = {
   estimated_value: number;
   linked_account_id?: number | null;
 };
+
+export type CapitalHistoryPoint = {
+  month: string;
+  label: string;
+  liquid: number;
+  deposit: number;
+  broker: number;
+  receivable: number;
+  real_assets: number;
+  credit_debt: number;
+  counterparty_debt: number;
+  total_debt: number;
+  liquid_capital: number;
+  net_capital: number;
+};
