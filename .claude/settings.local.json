@@ -70,7 +70,23 @@
       "mcp__Claude_Preview__preview_start",
       "Bash(findstr :3000)",
       "Bash(rm -rf .next)",
-      "Bash(npx kill-port:*)"
+      "Bash(npx kill-port:*)",
+      "Bash(ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N \"\" -q)",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ~/.ssh/id_ed25519 root@37.143.10.72 \"echo ok\")",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ~/.ssh/id_ed25519 -p 2222 root@37.143.10.72 \"echo ok\")",
+      "Bash(ssh -v -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i ~/.ssh/id_ed25519 -p 2222 root@37.143.10.72 \"echo ok\")",
+      "Bash(ssh -v -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -i ~/.ssh/id_ed25519 -p 22 root@37.143.10.72 \"echo ok\")",
+      "Bash(xargs -I {} basename {})",
+      "Bash(grep -E \"\\\\.md$\")",
+      "Bash(awk '{print $NF}')",
+      "Bash(pip install *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:openclaw.ai)",
+      "WebFetch(domain:www.siliconflow.com)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(awk -F= '{print \"Длина: \"length\\($2\\)\"; префикс: \"substr\\($2,1,15\\)\"...; суффикс: ...\"substr\\($2,length\\($2\\)-5\\)}')"
     ]
   }
 }
