@@ -79,3 +79,6 @@ flow-widget-*.html
 
 # --- Editor local config ---
 .claude/launch.json
+
+# --- Obsidian vault ephemeral state ---
+financeapp-vault/.obsidian/workspace.json
