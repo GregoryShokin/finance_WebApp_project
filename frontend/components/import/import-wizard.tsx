@@ -252,9 +252,31 @@ function buildUploadResultFromSession(session: ImportSessionResponse): ImportUpl
   };
 }
 
-function statCard(label: string, value: number, tone: 'default' | 'success' | 'warning' | 'danger' = 'default') {
+function statCard(
+  label: string,
+  value: number,
+  tone: 'default' | 'success' | 'warning' | 'danger' = 'default',
+  onClick?: () => void,
+  active?: boolean,
+) {
   const toneClass =
     tone === 'success' ? 'border-emerald-100' : tone === 'warning' ? 'border-amber-100' : tone === 'danger' ? 'border-rose-100' : 'border-slate-200';
+  const activeRing = active ? 'ring-2 ring-offset-1 ' + (
+    tone === 'success' ? 'ring-emerald-400' : tone === 'warning' ? 'ring-amber-400' : tone === 'danger' ? 'ring-rose-400' : 'ring-slate-400'
+  ) : '';
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`rounded-2xl border ${toneClass} ${activeRing} bg-white p-4 shadow-soft text-left transition hover:brightness-95 active:scale-95`}
+      >
+        <div className="text-sm text-slate-500">{label}</div>
+        <div className="mt-2 text-2xl font-semibold text-slate-900">{value}</div>
+      </button>
+    );
+  }
 
   return (
     <Card className={`rounded-2xl border ${toneClass} bg-white p-4 shadow-soft`}>
@@ -267,12 +289,20 @@ function statCard(label: string, value: number, tone: 'default' | 'success' | 'w
 function mapOperationToUi(
   operationType: string | undefined,
   txType: 'income' | 'expense',
+  storedDebtDirection?: string | null,
 ): { mainType: MainOperationType; investmentDirection: InvestmentDirection; debtDirection: DebtDirection; creditOperationKind: CreditOperationKind } {
   if (operationType === 'transfer') return { mainType: 'transfer', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
   if (operationType === 'refund') return { mainType: 'refund', investmentDirection: '', debtDirection: '', creditOperationKind: '' };
   if (operationType === 'investment_buy') return { mainType: 'investment', investmentDirection: 'buy', debtDirection: '', creditOperationKind: '' };
   if (operationType === 'investment_sell') return { mainType: 'investment', investmentDirection: 'sell', debtDirection: '', creditOperationKind: '' };
-  if (operationType === 'debt') return { mainType: 'debt', investmentDirection: '', debtDirection: txType === 'income' ? 'borrowed' : 'lent', creditOperationKind: '' };
+  if (operationType === 'debt') {
+    const validDirections: DebtDirection[] = ['lent', 'borrowed', 'repaid', 'collected'];
+    const debtDirection: DebtDirection =
+      storedDebtDirection && (validDirections as string[]).includes(storedDebtDirection)
+        ? (storedDebtDirection as DebtDirection)
+        : txType === 'income' ? 'borrowed' : 'lent';
+    return { mainType: 'debt', investmentDirection: '', debtDirection, creditOperationKind: '' };
+  }
   if (operationType === 'credit_disbursement') {
     return { mainType: 'credit_operation', investmentDirection: '', debtDirection: '', creditOperationKind: 'disbursement' };
   }
@@ -329,7 +359,7 @@ function getCreditOperationKindLabel(value: CreditOperationKind) {
 function getRowEditState(row: ImportPreviewRow, accounts: Account[], fallbackAccountId = ''): RowEditState {
   const rawType = (String(row.normalized_data.type ?? 'expense') as 'income' | 'expense') ?? 'expense';
   const operationType = String(row.normalized_data.operation_type ?? 'regular');
-  const ui = mapOperationToUi(operationType, rawType);
+  const ui = mapOperationToUi(operationType, rawType, row.normalized_data.debt_direction as string | null);
   const resolvedAccountId = resolveTransactionAccountId(accounts, row.normalized_data.account_id, fallbackAccountId);
   const resolvedTargetAccountId = resolveTransactionAccountId(accounts, row.normalized_data.target_account_id, '');
   const resolvedCreditAccountId = resolveCreditAccountId(
@@ -499,6 +529,7 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
   const categoryRulesQuery = useQuery({ queryKey: ['category-rules'], queryFn: getCategoryRules });
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [uploadForm, setUploadForm] = useState<UploadFormState>(defaultUploadForm);
   const [mappingForm, setMappingForm] = useState<MappingState>({
     account_id: '',
@@ -1415,15 +1446,20 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
           </div>
 
           <div className="mt-5 grid gap-4 md:grid-cols-5">
-            {statCard('Всего строк', previewSummary?.total_rows ?? 0)}
-            {statCard('Готово', previewSummary?.ready_rows ?? 0, 'success')}
-            {statCard('Требуют внимания', previewSummary?.warning_rows ?? 0, 'warning')}
-            {statCard('Ошибки', previewSummary?.error_rows ?? 0, 'danger')}
-            {statCard('Исключено / пропущено', previewSummary?.skipped_rows ?? 0, 'default')}
+            {statCard('Всего строк', previewSummary?.total_rows ?? 0, 'default', () => setStatusFilter(null), statusFilter === null)}
+            {statCard('Готово', previewSummary?.ready_rows ?? 0, 'success', () => setStatusFilter(s => s === 'ready' ? null : 'ready'), statusFilter === 'ready')}
+            {statCard('Требуют внимания', previewSummary?.warning_rows ?? 0, 'warning', () => setStatusFilter(s => s === 'warning' ? null : 'warning'), statusFilter === 'warning')}
+            {statCard('Ошибки', previewSummary?.error_rows ?? 0, 'danger', () => setStatusFilter(s => s === 'error' ? null : 'error'), statusFilter === 'error')}
+            {statCard('Исключено / пропущено', previewSummary?.skipped_rows ?? 0, 'default', () => setStatusFilter(s => s === 'skipped' ? null : 'skipped'), statusFilter === 'skipped')}
           </div>
 
           <div className="mt-6 space-y-4">
-            {previewRows.map((row) => {
+            {previewRows.filter((row) => {
+              if (!statusFilter) return true;
+              const effectiveStatus = isRowDirty(row) && row.status === 'ready' ? 'warning' : row.status;
+              if (statusFilter === 'skipped') return effectiveStatus === 'skipped' || effectiveStatus === 'duplicate';
+              return effectiveStatus === statusFilter;
+            }).map((row) => {
               const normalized = row.normalized_data;
               const form = getRowForm(row);
               const queries = getRowQuery(row);
