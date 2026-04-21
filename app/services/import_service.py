@@ -1530,10 +1530,16 @@ class ImportService:
             # null so fingerprint inputs stay deterministic.
             bank = str(getattr(session, "source_type", None) or "unknown")
             account_id = int(normalized.get("account_id") or fallback_account_id or 0)
+            # "unknown" when direction isn't known yet — NOT "expense". A silent
+            # "expense" default would make the fingerprint unstable: once the
+            # direction is corrected later, the same row's fingerprint would
+            # drift, breaking the link to any rule already learned from it.
+            # "unknown" records the absence explicitly; when a real direction
+            # appears, the fingerprint shifts transparently.
             direction = str(
                 normalized.get("type")
                 or normalized.get("direction")
-                or "expense"
+                or "unknown"
             )
 
             tokens = v2_extract_tokens(description)

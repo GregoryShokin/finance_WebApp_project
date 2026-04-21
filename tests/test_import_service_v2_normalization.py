@@ -12,7 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
-# pypdf is pulled in via app.services.import_extractors; skip when missing locally.
+# Importing ImportService triggers app.services.import_extractors.__init__,
+# which unconditionally imports pdf_extractor → pypdf at module load. Skip
+# here when pypdf isn't installed locally; Docker/CI always has it.
 pytest.importorskip("pypdf")
 
 from app.services.import_service import ImportService
@@ -95,6 +97,27 @@ def test_v2_unknown_bank_when_source_type_missing() -> None:
     )
     # Still produces a fingerprint; "unknown" was substituted for the bank.
     assert isinstance(out["fingerprint"], str) and len(out["fingerprint"]) == 16
+
+
+def test_v2_unknown_direction_differs_from_expense() -> None:
+    # When direction isn't determined yet, we record it as "unknown" rather
+    # than defaulting to "expense". That way correcting the type later produces
+    # a visibly different fingerprint instead of a silent drift.
+    session = _session()
+    row_no_dir = {
+        "description": "Оплата в Пятёрочке 500,00 руб",
+        "account_id": 42,
+    }
+    row_expense = {**row_no_dir, "type": "expense"}
+
+    out_unknown = ImportService._apply_v2_normalization(
+        dict(row_no_dir), session, 42, 1,
+    )
+    out_expense = ImportService._apply_v2_normalization(
+        dict(row_expense), session, 42, 2,
+    )
+
+    assert out_unknown["fingerprint"] != out_expense["fingerprint"]
 
 
 def test_v2_failure_does_not_break_row(monkeypatch: pytest.MonkeyPatch) -> None:
