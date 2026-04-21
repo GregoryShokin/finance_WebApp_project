@@ -1,0 +1,7 @@
+{
+  "fixture": "yandex_split_multirow_transfer.csv",
+  "bank": "yandex_split",
+  "description": "Яндекс Сплит: один перевод 18000 разбит на две строки 17569 + 431. Кейс для расширения transfer_matcher (Phase 6.4).",
+  "status": "pending_raw_fixture",
+  "rows": []
+}

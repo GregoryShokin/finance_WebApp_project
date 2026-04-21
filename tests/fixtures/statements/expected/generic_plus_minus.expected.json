@@ -1,0 +1,7 @@
+{
+  "fixture": "generic_plus_minus.csv",
+  "bank": "generic",
+  "description": "Простой CSV с колонкой суммы вида +500 / −1200. Базовый happy-path нормализации: знак определяет direction без контекста.",
+  "status": "pending_raw_fixture",
+  "rows": []
+}

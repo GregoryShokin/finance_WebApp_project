@@ -82,3 +82,6 @@ flow-widget-*.html
 
 # --- Obsidian vault ephemeral state ---
 financeapp-vault/.obsidian/workspace.json
+
+# --- Import fixtures: raw statements stay local (contain PII) ---
+tests/fixtures/statements/raw/

@@ -1,0 +1,7 @@
+{
+  "fixture": "yandex_bank_implicit_direction.pdf",
+  "bank": "yandex_bank",
+  "description": "Яндекс Банк: строки без явного +/−; направление определяется по контексту (колонки 'Пополнение'/'Списание' или markers).",
+  "status": "pending_raw_fixture",
+  "rows": []
+}

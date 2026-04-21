@@ -1,0 +1,7 @@
+{
+  "fixture": "tbank_contract_numbers.pdf",
+  "bank": "tbank",
+  "description": "Т-Банк: внутрибанковские переводы с номерами договоров в описании. Проверка: токен contract извлекается; две строки с одинаковым договором дают одинаковый fingerprint.",
+  "status": "pending_raw_fixture",
+  "rows": []
+}

@@ -1,0 +1,7 @@
+{
+  "fixture": "credit_card_repayments.xlsx",
+  "bank": "credit_card_generic",
+  "description": "Погашения кредитной карты: строки 'Погашение кредита' / 'Платёж по кредиту'. Проверка: operation_type=transfer, target — credit-счёт того же банка (резолвер в transaction_enrichment_service).",
+  "status": "pending_raw_fixture",
+  "rows": []
+}
