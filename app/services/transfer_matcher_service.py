@@ -40,7 +40,22 @@ from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_repository import TransactionRepository
 
 MIN_SCORE = 0.60
-MAX_DATE_DIFF_HOURS = 36
+MAX_DATE_DIFF_HOURS = 12
+
+# Keywords that strongly indicate a payment/purchase — NOT an internal transfer.
+# If either candidate contains one of these, the pair score is penalized.
+_ANTI_TRANSFER_KEYWORDS = frozenset({
+    "регулярный платёж",
+    "регулярный платеж",
+    "оплата кредита",
+    "погашение кредита",
+    "ежемесячный платёж",
+    "ежемесячный платеж",
+    "оплата задолженности",
+    "оплата покупки",
+    "минимальный платёж",
+    "минимальный платеж",
+})
 
 
 @dataclass
@@ -53,6 +68,7 @@ class _Candidate:
     date: datetime
     direction: str           # "income" | "expense"
     contract_number: str | None = None
+    description: str | None = None
 
     @property
     def key(self) -> tuple:
@@ -155,6 +171,7 @@ class TransferMatcherService:
                 date=date,
                 direction=direction,
                 contract_number=contract,
+                description=str(nd.get("description") or nd.get("raw_description") or "").lower(),
             ))
 
         return candidates
@@ -231,6 +248,7 @@ class TransferMatcherService:
                 TransactionModel.user_id == user_id,
                 TransactionModel.transaction_date >= df_aware - buffer,
                 TransactionModel.transaction_date <= dt_aware,
+                TransactionModel.transfer_pair_id.is_(None),
             )
             .all()
         )
@@ -247,6 +265,7 @@ class TransferMatcherService:
                 amount=tx.amount,
                 date=parsed_date,
                 direction="income" if tx.type == "income" else "expense",
+                description=str(tx.description or "").lower(),
             ))
         return candidates
 
@@ -311,7 +330,18 @@ class TransferMatcherService:
         ):
             score = min(1.0, score + 0.05)
 
+        # Penalize pairs where either side looks like a scheduled payment,
+        # not an inter-account transfer.
+        if self._has_anti_transfer_keyword(a) or self._has_anti_transfer_keyword(b):
+            score *= 0.4
+
         return round(score, 4)
+
+    @staticmethod
+    def _has_anti_transfer_keyword(c: _Candidate) -> bool:
+        if not c.description:
+            return False
+        return any(kw in c.description for kw in _ANTI_TRANSFER_KEYWORDS)
 
     # ------------------------------------------------------------------
     # Greedy 1-to-1 assignment
@@ -342,12 +372,24 @@ class TransferMatcherService:
         assignments: list[tuple[_Candidate, _Candidate, float]],
         user_id: int,
     ) -> None:
-        row_updates: dict[int, tuple[_Candidate, float]] = {}
+        # Collect updates AND track which row is the secondary side of a cross-session pair.
+        # When two active ImportRows are paired, committing the EXPENSE side creates the
+        # matching INCOME side automatically via transfer-pair creation. So the INCOME
+        # side must be marked "duplicate" to prevent double-commit.
+        row_updates: dict[int, tuple[_Candidate, float, bool]] = {}  # bool: is_secondary
         for a, b, score in assignments:
-            if a.row_id is not None:
-                row_updates[a.row_id] = (b, score)
-            if b.row_id is not None:
-                row_updates[b.row_id] = (a, score)
+            a_is_row = a.row_id is not None
+            b_is_row = b.row_id is not None
+            # Secondary side (the one that will be auto-created by the pair's other side):
+            # - Always the INCOME side, IF both sides are active import rows.
+            # - If only one side is an active row, it's primary (other is committed tx or analyzed session).
+            both_rows = a_is_row and b_is_row
+            a_is_secondary = both_rows and a.direction == "income"
+            b_is_secondary = both_rows and b.direction == "income"
+            if a_is_row:
+                row_updates[a.row_id] = (b, score, a_is_secondary)
+            if b_is_row:
+                row_updates[b.row_id] = (a, score, b_is_secondary)
 
         if not row_updates:
             return
@@ -360,7 +402,7 @@ class TransferMatcherService:
         accounts = {acc.id: acc for acc in self.account_repo.list_by_user(user_id)}
 
         for row in rows:
-            other, score = row_updates[row.id]
+            other, score, is_secondary = row_updates[row.id]
             nd: dict = dict(row.normalized_data_json or {})
 
             other_account = accounts.get(other.account_id)
@@ -375,15 +417,16 @@ class TransferMatcherService:
                 "matched_account_name": other_account.name if other_account else None,
                 "match_confidence": score,
                 "match_source": "cross_session" if other.session_id is not None else "committed_tx",
+                "is_secondary": is_secondary,
             }
 
             row.normalized_data_json = nd
 
-            # Clear stale validation errors and promote to ready.
-            # The match resolves the two main blockers: missing target account
-            # and missing category.  Any remaining errors are re-checked on commit.
+            # Clear stale validation errors.
             row.error_message = None
-            row.status = "ready"
+            # Secondary side (income in paired cross-session match) is marked duplicate —
+            # committing the expense side auto-creates this side as the transfer pair.
+            row.status = "duplicate" if is_secondary else "ready"
 
             self.db.add(row)
 
