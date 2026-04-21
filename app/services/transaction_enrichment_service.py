@@ -250,13 +250,14 @@ class TransactionEnrichmentService:
                     account_confidence = max(account_confidence, inferred_source_confidence)
                     account_reason = inferred_source_reason
 
-        # If operation was detected as transfer but no target account was found,
-        # downgrade to regular.  The cross-session matcher will re-upgrade it when
-        # a matching row from another session is available.
+        # If operation was detected as transfer but no target account was found:
+        # - keyword-based detection (confidence >= 0.88): keep as transfer, user/matcher will resolve target
+        # - history-based detection (lower confidence): downgrade to regular to avoid false positives
         if operation_type == "transfer" and target_account_id is None:
-            operation_type = "regular"
-            operation_confidence = 0.65
-            operation_reason = "перевод без счёта получателя: понижен до regular"
+            if operation_confidence < 0.88:
+                operation_type = "regular"
+                operation_confidence = 0.65
+                operation_reason = "перевод без счёта получателя: понижен до regular"
 
         category_id, category_confidence, category_reason = self._resolve_category(
             categories=categories,
@@ -327,6 +328,30 @@ class TransactionEnrichmentService:
             "межбанковский перевод",
         ]):
             return "transfer", 0.88, "перевод по ключевым словам (между своими счетами)"
+
+        # Credit card / loan repayment from a debit account → transfer to credit account.
+        if any(t in haystack for t in [
+            "погашение кредита",
+            "погашение задолженности",
+            "погашение основного долга",
+            "погашение долга",
+            "погашение по договору",
+            "оплата кредита",
+            "платеж по кредиту",
+            "платёж по кредиту",
+        ]):
+            return "transfer", 0.90, "погашение кредита: перевод на кредитный счёт"
+
+        # Refund
+        if any(t in haystack for t in [
+            "возврат покупки",
+            "возврат средств",
+            "возврат платежа",
+            "возврат денег",
+            "возврат по операции",
+            "возврат товара",
+        ]):
+            return "refund", 0.88, "возврат по ключевым словам"
 
         # Credit disbursement
         if any(t in haystack for t in [
@@ -431,6 +456,60 @@ class TransactionEnrichmentService:
         if session_account_id is not None and transaction_type == "income":
             return session_account_id, 0.96, "Р В Р’В Р В Р вЂ№Р В Р Р‹Р Р†Р вЂљР Р‹Р В Р Р‹Р Р†Р вЂљР’ВР В Р Р‹Р Р†Р вЂљРЎв„ў Р В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В°Р В Р’В Р вЂ™Р’В·Р В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В°Р В Р Р‹Р Р†Р вЂљР Р‹Р В Р’В Р вЂ™Р’ВµР В Р’В Р В РІР‚В¦Р В Р’В Р РЋРІР‚ВР В Р Р‹Р В Р РЏ Р В Р’В Р В РІР‚В Р В Р’В Р вЂ™Р’В·Р В Р Р‹Р В Р РЏР В Р Р‹Р Р†Р вЂљРЎв„ў Р В Р’В Р РЋРІР‚ВР В Р’В Р вЂ™Р’В· Р В Р Р‹Р В РЎвЂњР В Р Р‹Р Р†Р вЂљР Р‹Р В Р Р‹Р Р†Р вЂљР’ВР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’В°, Р В Р’В Р В РІР‚В Р В Р Р‹Р Р†Р вЂљРІвЂћвЂ“Р В Р’В Р вЂ™Р’В±Р В Р Р‹Р В РІР‚С™Р В Р’В Р вЂ™Р’В°Р В Р’В Р В РІР‚В¦Р В Р’В Р В РІР‚В¦Р В Р’В Р РЋРІР‚СћР В Р’В Р РЋРІР‚вЂњР В Р’В Р РЋРІР‚Сћ Р В Р’В Р В РІР‚В  Р В Р’В Р РЋР’ВР В Р’В Р вЂ™Р’В°Р В Р Р‹Р В РЎвЂњР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’ВµР В Р Р‹Р В РІР‚С™Р В Р’В Р вЂ™Р’Вµ Р В Р’В Р РЋРІР‚ВР В Р’В Р РЋР’ВР В Р’В Р РЋРІР‚вЂќР В Р’В Р РЋРІР‚СћР В Р Р‹Р В РІР‚С™Р В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’В°"
 
+
+        # For credit repayments: prefer is_credit=True accounts that are not the source.
+        haystack_lower = description.lower()
+        is_credit_repayment = any(kw in haystack_lower for kw in [
+            "погашение кредита",
+            "погашение задолженности",
+            "погашение основного долга",
+            "погашение долга",
+            "погашение по договору",
+            "оплата кредита",
+            "платеж по кредиту",
+            "платёж по кредиту",
+        ])
+        if is_credit_repayment:
+            # Credit-target accounts include credit cards, loans, and installment cards.
+            # "КК" (кредитная карта) in description → prefer credit_card type specifically.
+            credit_type_values = {"credit_card", "credit", "installment_card"}
+            has_kk_marker = " кк" in haystack_lower or "-кк" in haystack_lower or "кк " in haystack_lower
+
+            all_credit_targets = [
+                a for a in accounts
+                if getattr(a, "account_type", "regular") in credit_type_values
+                and a.id != source_account_id
+            ]
+
+            # If description explicitly mentions КК, narrow to credit cards only
+            if has_kk_marker:
+                card_only = [a for a in all_credit_targets if getattr(a, "account_type", "") == "credit_card"]
+                if card_only:
+                    all_credit_targets = card_only
+
+            # Prefer same-bank: extract first token from source name (e.g. "Озон Дебет" → "озон")
+            source_account = next((a for a in accounts if a.id == source_account_id), None)
+            if source_account and all_credit_targets:
+                source_tokens = [t for t in (source_account.name or "").lower().split() if len(t) >= 3]
+                source_prefix = source_tokens[0] if source_tokens else None
+                if source_prefix:
+                    same_bank = [a for a in all_credit_targets if source_prefix in (a.name or "").lower()]
+                    if len(same_bank) == 1:
+                        return same_bank[0].id, 0.92, f"кредитный счёт того же банка ({source_prefix})"
+                    if len(same_bank) > 1:
+                        all_credit_targets = same_bank
+
+            if len(all_credit_targets) == 1:
+                return all_credit_targets[0].id, 0.82, "единственный подходящий кредитный счёт"
+            if len(all_credit_targets) > 1:
+                matched_credit = self._find_account_in_text(
+                    accounts=all_credit_targets,
+                    text=description,
+                    exclude_account_id=source_account_id,
+                )
+                if matched_credit is not None:
+                    return matched_credit.id, 0.90, "кредитный счёт найден в описании"
+
         matched = self._find_account_in_text(
             accounts=accounts,
             text=" ".join(filter(None, [description, counterparty])),
@@ -471,8 +550,9 @@ class TransactionEnrichmentService:
         description: str,
         counterparty: str,
     ) -> tuple[int | None, float, str]:
-        # ??? expense-?????????? ????????? ????????? ???? ???? ???? ??????? ?? ??? transfer:
-        # ?????? ?? ???/?????? ???????? ????? ???? ???????? ???????? ? ?????? ????????? ?? ???????.
+        # Transfers and refunds never need a category — they are not spending.
+        if operation_type in ("transfer", "refund"):
+            return None, 0.0, ""
         if transaction_type != "expense":
             return None, 0.0, ""
 
