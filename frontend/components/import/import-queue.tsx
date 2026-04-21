@@ -30,6 +30,7 @@ function AccountSelector({
   const [open, setOpen] = useState(false);
   const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
 
   const assignMutation = useMutation({
@@ -59,7 +60,11 @@ function AccountSelector({
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
-      if (buttonRef.current && !buttonRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        buttonRef.current && !buttonRef.current.contains(target) &&
+        dropdownRef.current && !dropdownRef.current.contains(target)
+      ) {
         setOpen(false);
       }
     }
@@ -72,6 +77,7 @@ function AccountSelector({
 
   const dropdown = open && (
     <div
+      ref={dropdownRef}
       style={dropdownStyle}
       className="rounded-2xl border border-slate-200 bg-white py-1 shadow-xl"
     >
