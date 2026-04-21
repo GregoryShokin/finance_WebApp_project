@@ -801,6 +801,7 @@ class ImportService:
                     amount=amount_decimal,
                     transaction_date=transaction_dt,
                     normalized_description=normalized.get("normalized_description"),
+                    transaction_type=str(normalized.get("type") or "expense"),
                 )
                 if duplicate and payload.skip_duplicates:
                     status = "duplicate"
@@ -1435,6 +1436,7 @@ class ImportService:
         amount: Decimal,
         transaction_date: datetime,
         normalized_description: str | None,
+        transaction_type: str = "expense",
     ) -> bool:
         # РЈСЂРѕРІРµРЅСЊ 1: СЃС‚СЂРѕРіРѕРµ СЃРѕРІРїР°РґРµРЅРёРµ вЂ” (СЃС‡С‘С‚ + СЃСѓРјРјР° + РґР°С‚Р° В±1 РґРµРЅСЊ).
         # Р‘Р°РЅРєРѕРІСЃРєРёРµ РґР°С‚С‹ РјРѕРіСѓС‚ СЃРґРІРёРіР°С‚СЊСЃСЏ РЅР° СЃСѓС‚РєРё РёР·-Р·Р° TZ. Р•СЃР»Рё С‚СЂРѕР№РєР° СЃРѕРІРїР°Р»Р°,
@@ -1446,6 +1448,7 @@ class ImportService:
             amount=amount,
             transaction_date=transaction_date,
             days_window=1,
+            transaction_type=transaction_type,
         )
         if exact_candidates:
             return True
@@ -1462,6 +1465,7 @@ class ImportService:
             amount=amount,
             transaction_date=transaction_date,
             days_window=3,
+            transaction_type=transaction_type,
         )
         return any(
             (item.normalized_description or "").strip().lower() == incoming_norm

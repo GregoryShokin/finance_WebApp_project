@@ -163,6 +163,7 @@ class TransactionRepository:
         transaction_date,
         description: str | None = None,
         days_window: int = 3,
+        transaction_type: str | None = None,
     ):
         date_from = transaction_date - timedelta(days=days_window)
         date_to = transaction_date + timedelta(days=days_window)
@@ -178,6 +179,9 @@ class TransactionRepository:
             )
             .order_by(Transaction.transaction_date.desc())
         )
+
+        if transaction_type:
+            query = query.filter(Transaction.type == transaction_type)
 
         if description:
             query = query.filter(Transaction.description == description)
