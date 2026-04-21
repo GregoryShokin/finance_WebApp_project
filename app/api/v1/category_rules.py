@@ -24,7 +24,7 @@ def list_category_rules(
             "original_description": r.original_description,
             "user_label": r.user_label,
             "category_id": r.category_id,
-            "hit_count": r.hit_count,
+            "confirms": r.confirms,
         }
         for r in rules
     ]

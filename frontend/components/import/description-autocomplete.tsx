@@ -20,7 +20,7 @@ function getSuggestions(rules: CategoryRule[], value: string, rowNormalizedDesc:
 
   return filtered
     .map((rule) => ({ rule, score: scoreRule(rule, rowNormalizedDesc) }))
-    .sort((a, b) => b.score - a.score || b.rule.hit_count - a.rule.hit_count)
+    .sort((a, b) => b.score - a.score || b.rule.confirms - a.rule.confirms)
     .slice(0, 8)
     .map(({ rule }) => rule);
 }

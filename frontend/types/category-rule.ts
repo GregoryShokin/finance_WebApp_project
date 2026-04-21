@@ -4,5 +4,5 @@ export type CategoryRule = {
   original_description: string | null;
   user_label: string;
   category_id: number;
-  hit_count: number;
+  confirms: number;
 };

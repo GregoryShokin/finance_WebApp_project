@@ -16,7 +16,7 @@ class TransactionCategoryRuleRepository:
                 TransactionCategoryRule.user_id == user_id,
                 TransactionCategoryRule.normalized_description == normalized_description,
             )
-            .order_by(TransactionCategoryRule.hit_count.desc(), TransactionCategoryRule.updated_at.desc(), TransactionCategoryRule.id.desc())
+            .order_by(TransactionCategoryRule.confirms.desc(), TransactionCategoryRule.updated_at.desc(), TransactionCategoryRule.id.desc())
             .first()
         )
 
@@ -37,13 +37,13 @@ class TransactionCategoryRuleRepository:
                 original_description=original_description,
                 user_label=user_label,
                 category_id=category_id,
-                hit_count=1,
+                confirms=1,
             )
             self.db.add(rule)
             self.db.flush()
             return rule
 
-        rule.hit_count += 1
+        rule.confirms += 1
         if original_description and not rule.original_description:
             rule.original_description = original_description
         if user_label is not None:
@@ -60,7 +60,7 @@ class TransactionCategoryRuleRepository:
                 TransactionCategoryRule.user_label.isnot(None),
                 TransactionCategoryRule.user_label != "",
             )
-            .order_by(TransactionCategoryRule.hit_count.desc(), TransactionCategoryRule.updated_at.desc())
+            .order_by(TransactionCategoryRule.confirms.desc(), TransactionCategoryRule.updated_at.desc())
             .all()
         )
 
