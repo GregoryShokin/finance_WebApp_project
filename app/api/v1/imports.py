@@ -116,7 +116,7 @@ def get_import_session(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
-@router.patch("/{session_id}/account", response_model=ImportSessionResponse)
+@router.patch("/{session_id}/account")
 def assign_session_account(
     session_id: int,
     payload: dict,
