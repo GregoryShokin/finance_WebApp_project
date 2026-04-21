@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://redis:6379/0"
 
     SECRET_KEY: str
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 2880  # 2 days
     ALGORITHM: str = "HS256"
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_BOT_NAME: str = "financeapp_import_bot"
