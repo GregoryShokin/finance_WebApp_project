@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -19,7 +20,13 @@ from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.imports import ImportMappingRequest, ImportPreviewSummary, ImportRowUpdateRequest
 from app.services.import_confidence import ImportConfidenceService
 from app.services.import_extractors import ExtractionResult, ImportExtractorRegistry
+from app.schemas.import_normalized import NormalizedDataV2
 from app.services.import_normalizer import ImportNormalizer
+from app.services.import_normalizer_v2 import (
+    extract_tokens as v2_extract_tokens,
+    fingerprint as v2_fingerprint,
+    normalize_skeleton as v2_normalize_skeleton,
+)
 from app.services.import_recognition_service import ImportRecognitionService
 from app.services.import_validator import ImportRowValidationError
 from app.services.transaction_enrichment_service import (
@@ -28,6 +35,9 @@ from app.services.transaction_enrichment_service import (
 )
 from app.services.transaction_service import NON_ANALYTICS_OPERATION_TYPES, TransactionService, TransactionValidationError
 from app.services.transfer_matcher_service import TransferMatcherService
+
+
+logger = logging.getLogger(__name__)
 
 RAW_TYPE_TO_OPERATION_TYPE = {
     "purchase": "regular",
@@ -831,6 +841,13 @@ class ImportService:
                 error_message = str(exc)
                 issues.append(str(exc))
 
+            normalized = self._apply_v2_normalization(
+                normalized=normalized,
+                session=session,
+                fallback_account_id=payload.account_id,
+                row_index=index,
+            )
+
             issues = list(dict.fromkeys(issue for issue in issues if issue))
 
             row_confidence = self.confidence.score_row(
@@ -1488,6 +1505,50 @@ class ImportService:
             amount=amount,
             transaction_date=transaction_date,
         )
+
+    @staticmethod
+    def _apply_v2_normalization(
+        normalized: dict[str, Any],
+        session: ImportSession,
+        fallback_account_id: int | None,
+        row_index: int,
+    ) -> dict[str, Any]:
+        """Run normalizer_v2 on top of the v1 normalized dict.
+
+        Additive: only the v2 keys (skeleton / fingerprint / tokens /
+        normalizer_version) are written via NormalizedDataV2.merge_into.
+        Any failure is logged and swallowed — v2 must never break import.
+        """
+        try:
+            description = (
+                normalized.get("import_original_description")
+                or normalized.get("description")
+                or ""
+            )
+            # bank_code does not exist yet (see Phase 2/3 plan). source_type
+            # is the closest stable identifier we have; "unknown" guards against
+            # null so fingerprint inputs stay deterministic.
+            bank = str(getattr(session, "source_type", None) or "unknown")
+            account_id = int(normalized.get("account_id") or fallback_account_id or 0)
+            direction = str(
+                normalized.get("type")
+                or normalized.get("direction")
+                or "expense"
+            )
+
+            tokens = v2_extract_tokens(description)
+            skeleton = v2_normalize_skeleton(description, tokens)
+            fp = v2_fingerprint(bank, account_id, direction, skeleton, tokens.contract)
+
+            model = NormalizedDataV2.from_tokens(
+                tokens=tokens, skeleton=skeleton, fingerprint=fp,
+            )
+            return model.merge_into(normalized)
+        except Exception as exc:  # noqa: BLE001 — v2 must never break import
+            logger.warning(
+                "v2 normalization failed for row %s: %s", row_index, exc,
+            )
+            return normalized
 
     @staticmethod
     def _resolve_operation_type(normalized: dict[str, Any]) -> str:
