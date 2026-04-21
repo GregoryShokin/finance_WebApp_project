@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     LLM_CLASSIFICATION_ENABLED: bool = False
     LLM_MIN_CONFIDENCE: float = 0.6
 
+    # Rule-strength thresholds (И-08 Phase 2.3).
+    RULE_ACTIVATE_CONFIRMS: int = 2
+    RULE_GENERALIZE_CONFIRMS: int = 3
+    RULE_DEACTIVATE_REJECTIONS: int = 3
+    RULE_ERROR_RATIO_CAP: float = 0.3
+
     @field_validator("BACKEND_CORS_ORIGINS", "TRUSTED_HOSTS", mode="before")
     @classmethod
     def _parse_str_list(cls, value: Any) -> list[str] | Any:
