@@ -114,6 +114,8 @@ def extract_tokens(description: str) -> ExtractedTokens:
     if not description:
         return ExtractedTokens()
 
+    description = _prepare(description)
+
     phone_m = PHONE_RX.search(description)
     contract_m = CONTRACT_RX.search(description)
     iban_m = IBAN_RX.search(description)
@@ -174,6 +176,15 @@ _PUNCT_RX = re.compile(r"[^\w\s<>]", re.UNICODE)
 _WHITESPACE_RX = re.compile(r"\s+")
 
 
+def _prepare(description: str) -> str:
+    """Collapse all whitespace (incl. NBSP/tabs/newlines) to single spaces.
+
+    Lets token regexes work on IBAN-with-spaces, multi-line descriptions,
+    and PDF-extracted text without embedding \\s+ in every pattern.
+    """
+    return _WHITESPACE_RX.sub(" ", description).strip()
+
+
 def normalize_skeleton(description: str, extracted: ExtractedTokens) -> str:
     """Return a lowercased, placeholder-anchored skeleton for fingerprinting.
 
@@ -192,7 +203,7 @@ def normalize_skeleton(description: str, extracted: ExtractedTokens) -> str:
     if not description:
         return ""
 
-    text = description
+    text = _prepare(description)
 
     # Order matters: longer / more specific patterns first so they consume
     # substrings before narrower patterns see them.

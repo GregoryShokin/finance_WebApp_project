@@ -68,6 +68,14 @@ def test_extract_iban() -> None:
     assert extract_tokens(raw).iban == "DE89370400440532013000"
 
 
+def test_whitespace_normalization_multiline_and_tabs() -> None:
+    # Mixed NBSP, tabs, newlines — all collapsed by _prepare before regex runs.
+    raw = "Перевод\tна\xa0+79161234567\nпо\r\nдоговору  №1234567"
+    tokens = extract_tokens(raw)
+    assert tokens.phone == "+79161234567"
+    assert tokens.contract == "1234567"
+
+
 # ---------------------------------------------------------------------------
 # Card
 # ---------------------------------------------------------------------------
