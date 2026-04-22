@@ -10,6 +10,8 @@ import type {
   ImportRowUpdatePayload,
   ImportRowUpdateResponse,
   ImportUploadResponse,
+  ModerationStatusResponse,
+  ParkedQueueResponse,
 } from '@/types/import';
 
 export function uploadImportFile(payload: { file: File; delimiter: string }) {
@@ -73,4 +75,47 @@ export function updateImportRow(rowId: number, payload: ImportRowUpdatePayload) 
     method: 'PATCH',
     body: JSON.stringify(payload),
   });
+}
+
+export function getModerationStatus(sessionId: number) {
+  return apiClient<ModerationStatusResponse>(`/imports/${sessionId}/moderation-status`);
+}
+
+export function startModeration(sessionId: number) {
+  return apiClient<{ session_id: number; status: string }>(`/imports/${sessionId}/moderate`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function parkImportRow(rowId: number) {
+  return apiClient<{ session_id: number; row_id: number; status: string; summary: Record<string, number> }>(
+    `/imports/rows/${rowId}/park`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
+export function unparkImportRow(rowId: number) {
+  return apiClient<{ session_id: number; row_id: number; status: string; summary: Record<string, number> }>(
+    `/imports/rows/${rowId}/unpark`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
+export function excludeImportRow(rowId: number) {
+  return apiClient<{ session_id: number; row_id: number; status: string; summary: Record<string, number> }>(
+    `/imports/rows/${rowId}/exclude`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
+export function unexcludeImportRow(rowId: number) {
+  return apiClient<{ session_id: number; row_id: number; status: string; summary: Record<string, number> }>(
+    `/imports/rows/${rowId}/unexclude`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
+export function getParkedQueue() {
+  return apiClient<ParkedQueueResponse>('/imports/parked-queue');
 }

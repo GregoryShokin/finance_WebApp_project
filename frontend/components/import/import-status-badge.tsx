@@ -8,6 +8,7 @@ const labels: Record<ImportRowStatus, string> = {
   duplicate: 'Дубликат',
   skipped: 'Исключена',
   committed: 'Импортировано',
+  parked: 'Отложено',
 };
 
 export function ImportStatusBadge({ status }: { status: ImportRowStatus }) {
@@ -21,6 +22,7 @@ export function ImportStatusBadge({ status }: { status: ImportRowStatus }) {
         status === 'duplicate' && 'bg-violet-50 text-violet-700',
         status === 'skipped' && 'bg-slate-100 text-slate-600',
         status === 'committed' && 'bg-sky-50 text-sky-700',
+        status === 'parked' && 'bg-indigo-50 text-indigo-700',
       )}
     >
       {labels[status]}

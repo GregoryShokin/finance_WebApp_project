@@ -52,6 +52,110 @@ class TransactionCategoryRuleRepository:
         self.db.flush()
         return rule
 
+    def get_active_legacy_rule(
+        self,
+        *,
+        user_id: int,
+        normalized_description: str,
+    ) -> TransactionCategoryRule | None:
+        """Legacy-scope lookup: active rules without an identifier anchor.
+
+        Used as the last-priority match in the cluster service. Critically,
+        we EXCLUDE rules that have a bound identifier_value — those are
+        meant to match only their exact identifier, not any row that shares
+        the same skeleton. This is the fix for the «перевод по договору»
+        false-green problem: before this, an exact-rule for ДГ-12345 could
+        wrongly match ДГ-99999 through the legacy `get_best_rule` path.
+        """
+        return (
+            self.db.query(TransactionCategoryRule)
+            .filter(
+                TransactionCategoryRule.user_id == user_id,
+                TransactionCategoryRule.normalized_description == normalized_description,
+                TransactionCategoryRule.is_active.is_(True),
+                TransactionCategoryRule.identifier_value.is_(None),
+            )
+            .order_by(
+                TransactionCategoryRule.confirms.desc(),
+                TransactionCategoryRule.updated_at.desc(),
+            )
+            .first()
+        )
+
+    def get_active_rule_by_identifier(
+        self,
+        *,
+        user_id: int,
+        identifier_key: str,
+        identifier_value: str,
+    ) -> TransactionCategoryRule | None:
+        """Exact-scope lookup: find an active rule bound to a specific identifier
+        (phone/contract/iban/card/person_hash). Used by the Phase 3 clusterer
+        to propose a category for a cluster that carries a known identifier."""
+        return (
+            self.db.query(TransactionCategoryRule)
+            .filter(
+                TransactionCategoryRule.user_id == user_id,
+                TransactionCategoryRule.identifier_key == identifier_key,
+                TransactionCategoryRule.identifier_value == identifier_value,
+                TransactionCategoryRule.is_active.is_(True),
+            )
+            .order_by(
+                TransactionCategoryRule.confirms.desc(),
+                TransactionCategoryRule.updated_at.desc(),
+            )
+            .first()
+        )
+
+    def get_active_rule_by_bank(
+        self,
+        *,
+        user_id: int,
+        bank_code: str,
+        normalized_description: str,
+    ) -> TransactionCategoryRule | None:
+        """Bank-scope lookup: find an active generalized rule for a given bank
+        and matching normalized description. Used as a secondary signal when
+        no exact identifier rule matched."""
+        return (
+            self.db.query(TransactionCategoryRule)
+            .filter(
+                TransactionCategoryRule.user_id == user_id,
+                TransactionCategoryRule.scope == "bank",
+                TransactionCategoryRule.bank_code == bank_code,
+                TransactionCategoryRule.normalized_description == normalized_description,
+                TransactionCategoryRule.is_active.is_(True),
+            )
+            .order_by(
+                TransactionCategoryRule.confirms.desc(),
+                TransactionCategoryRule.updated_at.desc(),
+            )
+            .first()
+        )
+
+    def list_rules(
+        self,
+        *,
+        user_id: int,
+        scope: str | None = None,
+        is_active: bool | None = None,
+    ) -> list[TransactionCategoryRule]:
+        q = self.db.query(TransactionCategoryRule).filter(
+            TransactionCategoryRule.user_id == user_id
+        )
+        if scope is not None:
+            q = q.filter(TransactionCategoryRule.scope == scope)
+        if is_active is not None:
+            q = q.filter(TransactionCategoryRule.is_active == is_active)
+        return (
+            q.order_by(
+                TransactionCategoryRule.is_active.desc(),
+                TransactionCategoryRule.confirms.desc(),
+                TransactionCategoryRule.updated_at.desc(),
+            )
+            .all()
+        )
+
     def list_with_labels(self, *, user_id: int) -> list[TransactionCategoryRule]:
         return (
             self.db.query(TransactionCategoryRule)

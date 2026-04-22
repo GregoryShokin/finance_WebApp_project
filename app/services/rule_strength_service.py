@@ -117,6 +117,12 @@ class RuleStrengthService:
 
         self.session.add(rule)
         self.session.flush()
+
+        # Layer 3: feed confirmed bank-scope rules into the global pattern learner.
+        if rule.scope == "bank" and rule.is_active:
+            from app.services.global_pattern_service import GlobalPatternService
+            GlobalPatternService(self.session).on_rule_confirmed(rule)
+
         return _transition(rule, before, event="confirmed")
 
     def on_rejected(self, rule_id: int) -> RuleTransition:

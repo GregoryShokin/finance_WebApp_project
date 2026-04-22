@@ -34,7 +34,9 @@ from app.services.transaction_enrichment_service import (
     TransactionEnrichmentService,
 )
 from app.services.transaction_service import NON_ANALYTICS_OPERATION_TYPES, TransactionService, TransactionValidationError
+from app.services.rule_strength_service import RuleNotFound, RuleStrengthService
 from app.services.transfer_matcher_service import TransferMatcherService
+from app.services.refund_matcher_service import RefundMatcherService
 
 
 logger = logging.getLogger(__name__)
@@ -320,6 +322,258 @@ class ImportService:
             "total": len(items),
         }
 
+    def list_parked_queue(self, *, user_id: int) -> dict[str, Any]:
+        """Global list of parked rows across all the user's sessions.
+
+        Parked rows are rows the user explicitly deferred — they don't get
+        committed into Transactions and therefore don't enter analytics.
+        """
+        parked_rows = self.import_repo.list_parked_queue(user_id=user_id)
+        items: list[dict[str, Any]] = []
+        for session, row in parked_rows:
+            items.append(
+                {
+                    "session_id": session.id,
+                    "session_status": session.status,
+                    "filename": session.filename,
+                    "source_type": session.source_type,
+                    "row_id": row.id,
+                    "row_index": row.row_index,
+                    "status": row.status,
+                    "raw_data": getattr(row, "raw_data", None) or (row.raw_data_json or {}),
+                    "normalized_data": getattr(row, "normalized_data", None) or (row.normalized_data_json or {}),
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                }
+            )
+        return {"items": items, "total": len(items)}
+
+    def get_moderation_status(self, *, user_id: int, session_id: int) -> dict[str, Any]:
+        """Return the LLM moderation status for a session.
+
+        Shape (always):
+          {
+            "session_id": int,
+            "status": "pending" | "running" | "ready" | "failed" | "skipped",
+            "total_clusters": int,
+            "processed_clusters": int,
+            "started_at": iso | null,
+            "finished_at": iso | null,
+            "error": str | null,
+            "clusters": [  # per-cluster hypotheses (may be empty if not started)
+                {
+                    "cluster_fingerprint": str,
+                    "status": "ready" | "skipped",
+                    "cluster_row_ids": list[int],
+                    "hypothesis": dict | null,
+                },
+                ...
+            ],
+          }
+        """
+        session = self.get_session(user_id=user_id, session_id=session_id)
+        summary = session.summary_json or {}
+        moderation = dict(summary.get("moderation") or {})
+
+        # "not_started" means the user has never clicked "Запустить модератор"
+        # for this session. The frontend uses this to decide whether to show
+        # the start button. "pending" is reserved for sessions where the API
+        # accepted the kick-off but Celery hasn't picked it up yet.
+        status_value = moderation.get("status") or "not_started"
+
+        # Join LLM hypotheses (stored on anchor rows) with cluster metadata
+        # rebuilt on the fly. Rebuilding is cheap (one grouping pass over row
+        # JSON) and gives us the Phase-7 trust fields — trust_zone,
+        # identifier_match, rule_confirms/rejections, auto_trust — which are
+        # not persisted in normalized_data.moderation.
+        from app.services.import_cluster_service import ImportClusterService
+
+        rows = self.import_repo.get_rows(session_id=session.id)
+        live_clusters = ImportClusterService(self.db).build_clusters(session)
+        cluster_meta_by_fp = {c.fingerprint: c.to_dict() for c in live_clusters}
+
+        clusters: list[dict[str, Any]] = []
+        auto_trust_rows = 0
+        attention_rows = 0
+        for row in rows:
+            normalized = getattr(row, "normalized_data", None) or (row.normalized_data_json or {})
+            mod_block = normalized.get("moderation")
+            if not mod_block:
+                continue
+            fp = mod_block.get("cluster_fingerprint")
+            cluster_entry = {
+                "cluster_fingerprint": fp,
+                "status": mod_block.get("status"),
+                "cluster_row_ids": mod_block.get("cluster_row_ids") or [],
+                "hypothesis": mod_block.get("hypothesis"),
+            }
+            live_meta = cluster_meta_by_fp.get(fp) if fp else None
+            if live_meta is not None:
+                cluster_entry.update(
+                    {
+                        "trust_zone": live_meta.get("trust_zone"),
+                        "auto_trust": live_meta.get("auto_trust", False),
+                        "confidence": live_meta.get("confidence"),
+                        "identifier_match": live_meta.get("identifier_match"),
+                        "identifier_key": live_meta.get("identifier_key"),
+                        "identifier_value": live_meta.get("identifier_value"),
+                        "rule_source": live_meta.get("rule_source"),
+                        "rule_confirms": live_meta.get("rule_confirms"),
+                        "rule_rejections": live_meta.get("rule_rejections"),
+                        "candidate_category_id": live_meta.get("candidate_category_id"),
+                        "count": live_meta.get("count"),
+                        "total_amount": live_meta.get("total_amount"),
+                        "skeleton": live_meta.get("skeleton"),
+                        "bank_code": live_meta.get("bank_code"),
+                        # Layer 1: account-context hints
+                        "account_context_operation_type": live_meta.get("account_context_operation_type"),
+                        "account_context_category_id": live_meta.get("account_context_category_id"),
+                        "account_context_label": live_meta.get("account_context_label"),
+                        # Layer 2: bank-mechanics hints
+                        "bank_mechanics_operation_type": live_meta.get("bank_mechanics_operation_type"),
+                        "bank_mechanics_category_id": live_meta.get("bank_mechanics_category_id"),
+                        "bank_mechanics_label": live_meta.get("bank_mechanics_label"),
+                        "bank_mechanics_cross_session_warning": live_meta.get("bank_mechanics_cross_session_warning"),
+                        # Layer 3: global cross-user pattern
+                        "global_pattern_category_id": live_meta.get("global_pattern_category_id"),
+                        "global_pattern_category_name": live_meta.get("global_pattern_category_name"),
+                        "global_pattern_user_count": live_meta.get("global_pattern_user_count"),
+                        "global_pattern_total_confirms": live_meta.get("global_pattern_total_confirms"),
+                    }
+                )
+                row_count = len(cluster_entry["cluster_row_ids"])
+                if live_meta.get("auto_trust"):
+                    auto_trust_rows += row_count
+                else:
+                    attention_rows += row_count
+            else:
+                attention_rows += len(cluster_entry["cluster_row_ids"])
+            clusters.append(cluster_entry)
+
+        return {
+            "session_id": session.id,
+            "status": status_value,
+            "total_clusters": moderation.get("total_clusters", 0),
+            "processed_clusters": moderation.get("processed_clusters", 0),
+            "started_at": moderation.get("started_at"),
+            "finished_at": moderation.get("finished_at"),
+            "error": moderation.get("error"),
+            "clusters": clusters,
+            "auto_trust_rows": auto_trust_rows,
+            "attention_rows": attention_rows,
+        }
+
+    def start_moderation(self, *, user_id: int, session_id: int) -> dict[str, Any]:
+        """Kick off an async LLM moderation run for a session.
+
+        The actual work is a Celery task; this method just (1) marks the
+        session as "pending" so the UI can start polling, and (2) enqueues
+        the task. It returns immediately.
+        """
+        session = self.get_session(user_id=user_id, session_id=session_id)
+        summary = dict(session.summary_json or {})
+        moderation = dict(summary.get("moderation") or {})
+        moderation.update(
+            {
+                "status": "pending",
+                "total_clusters": moderation.get("total_clusters", 0),
+                "processed_clusters": 0,
+                "started_at": None,
+                "finished_at": None,
+                "error": None,
+            }
+        )
+        summary["moderation"] = moderation
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+
+        # Import lazily to avoid circular imports at module load.
+        from app.jobs.moderate_import_session import moderate_import_session
+
+        moderate_import_session.delay(session.id)
+        return {"session_id": session.id, "status": "pending"}
+
+    def park_row(self, *, user_id: int, row_id: int) -> dict[str, Any]:
+        """Mark a row as parked — deferred from this import, kept in a global queue."""
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+
+        session, row = session_row
+        row_status = str(row.status or "").strip().lower()
+        if row.created_transaction_id is not None or row_status == "committed":
+            raise ImportValidationError("Импортированную строку нельзя отложить.")
+
+        row = self.import_repo.update_row(row, status="parked", review_required=False)
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        self.db.refresh(row)
+        self.import_repo._hydrate_row_runtime_fields(row)
+        return {"session_id": session.id, "row_id": row.id, "status": row.status, "summary": summary}
+
+    def unpark_row(self, *, user_id: int, row_id: int) -> dict[str, Any]:
+        """Restore a parked row to warning status so it can be reviewed and committed again."""
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+
+        session, row = session_row
+        row_status = str(row.status or "").strip().lower()
+        if row_status != "parked":
+            raise ImportValidationError("Только отложенные строки можно вернуть в очередь.")
+
+        row = self.import_repo.update_row(row, status="warning", review_required=True)
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        self.db.refresh(row)
+        self.import_repo._hydrate_row_runtime_fields(row)
+        return {"session_id": session.id, "row_id": row.id, "status": row.status, "summary": summary}
+
+
+    def exclude_row(self, *, user_id: int, row_id: int) -> dict[str, Any]:
+        """Mark a row as skipped — excluded from import deliberately by the user."""
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+        session, row = session_row
+        row_status = str(row.status or "").strip().lower()
+        if row.created_transaction_id is not None or row_status == "committed":
+            raise ImportValidationError("Импортированную строку нельзя исключить.")
+        row = self.import_repo.update_row(row, status="skipped", review_required=False)
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        self.db.refresh(row)
+        self.import_repo._hydrate_row_runtime_fields(row)
+        return {"session_id": session.id, "row_id": row.id, "status": row.status, "summary": summary}
+
+    def unexclude_row(self, *, user_id: int, row_id: int) -> dict[str, Any]:
+        """Restore a skipped row to warning status so it can be reviewed again."""
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+        session, row = session_row
+        row_status = str(row.status or "").strip().lower()
+        if row_status != "skipped":
+            raise ImportValidationError("Только исключённые строки можно вернуть.")
+        row = self.import_repo.update_row(row, status="warning", review_required=True)
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        self.db.refresh(row)
+        self.import_repo._hydrate_row_runtime_fields(row)
+        return {"session_id": session.id, "row_id": row.id, "status": row.status, "summary": summary}
 
     def update_row(self, *, user_id: int, row_id: int, payload: ImportRowUpdateRequest) -> dict[str, Any]:
         session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
@@ -333,10 +587,29 @@ class ImportService:
 
         normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
 
+        # Capture rule metadata before payload overwrites category_id.
+        _prior_rule_id = normalized.get("applied_rule_id")
+        _prior_rule_cat = normalized.get("applied_rule_category_id")
+
         for field in ("account_id", "target_account_id", "credit_account_id", "category_id", "counterparty_id", "amount", "type", "operation_type", "debt_direction", "description", "currency", "credit_principal_amount", "credit_interest_amount"):
             value = getattr(payload, field)
             if value is not None:
                 normalized[field] = value
+
+        # If the user explicitly changes the category away from what the rule suggested,
+        # count it as a rejection so the strength model can deactivate poor rules.
+        if (
+            _prior_rule_id is not None
+            and payload.category_id is not None
+            and payload.category_id != _prior_rule_cat
+        ):
+            from app.core.config import settings as _settings
+            try:
+                RuleStrengthService(self.db, _settings).on_rejected(_prior_rule_id)
+            except RuleNotFound:
+                pass
+            normalized.pop("applied_rule_id", None)
+            normalized.pop("applied_rule_category_id", None)
 
         if payload.split_items is not None:
             normalized["split_items"] = [
@@ -609,6 +882,7 @@ class ImportService:
             "error_rows": 0,
             "duplicate_rows": 0,
             "skipped_rows": 0,
+            "parked_rows": 0,
         }
         for row in rows:
             status = str(row.status or "").strip().lower()
@@ -623,11 +897,90 @@ class ImportService:
                 summary["skipped_rows"] += 1
             elif status == "error":
                 summary["error_rows"] += 1
+            elif status == "parked":
+                summary["parked_rows"] += 1
+                summary["skipped_rows"] += 1
         return summary
 
-    def _recalculate_summary(self, session_id: int) -> dict[str, int]:
+    def _apply_refund_matches(self, *, session_id: int) -> None:
+        """Run RefundMatcherService over the session's rows and persist pairs.
+
+        For each matched pair, both sides get `normalized_data["refund_match"]`
+        with: partner_row_id, partner_date, partner_description, amount,
+        confidence, reasons. We do NOT change the row's status or
+        operation_type — that decision stays with the user via the moderator UI.
+        Rows that already have an `operation_type='transfer'` annotation (from
+        the transfer matcher) are excluded — refund and transfer are mutually
+        exclusive labels for the same row.
+        """
         rows = self.import_repo.get_rows(session_id=session_id)
-        return self._build_summary_from_rows(rows)
+        candidates: list[dict[str, Any]] = []
+        row_by_id: dict[int, ImportRow] = {}
+        for row in rows:
+            nd = dict(row.normalized_data_json or {})
+            if str(nd.get("operation_type") or "") == "transfer":
+                continue
+            if str(row.status or "").lower() in ("duplicate", "skipped", "parked", "committed", "error"):
+                continue
+            candidates.append({
+                "row_id": row.id,
+                "amount": nd.get("amount"),
+                "direction": nd.get("direction") or nd.get("type"),
+                "transaction_date": nd.get("transaction_date") or nd.get("date"),
+                "description": nd.get("description") or "",
+                "skeleton": nd.get("skeleton") or "",
+                "tokens": nd.get("tokens") or {},
+            })
+            row_by_id[row.id] = row
+
+        if not candidates:
+            return
+
+        matches = RefundMatcherService().match(candidates)
+        if not matches:
+            return
+
+        for match in matches:
+            exp_row = row_by_id.get(match.expense_row_id)
+            inc_row = row_by_id.get(match.income_row_id)
+            if exp_row is None or inc_row is None:
+                continue
+            exp_nd = dict(exp_row.normalized_data_json or {})
+            inc_nd = dict(inc_row.normalized_data_json or {})
+            exp_nd["refund_match"] = {
+                "partner_row_id": inc_row.id,
+                "partner_date": inc_nd.get("transaction_date") or inc_nd.get("date"),
+                "partner_description": inc_nd.get("description") or "",
+                "amount": str(match.amount),
+                "confidence": match.confidence,
+                "reasons": list(match.reasons),
+                "side": "expense",
+            }
+            inc_nd["refund_match"] = {
+                "partner_row_id": exp_row.id,
+                "partner_date": exp_nd.get("transaction_date") or exp_nd.get("date"),
+                "partner_description": exp_nd.get("description") or "",
+                "amount": str(match.amount),
+                "confidence": match.confidence,
+                "reasons": list(match.reasons),
+                "side": "income",
+            }
+            self.import_repo.update_row(exp_row, normalized_data=exp_nd)
+            self.import_repo.update_row(inc_row, normalized_data=inc_nd)
+
+    def _recalculate_summary(self, session_id: int) -> dict[str, Any]:
+        # Merge fresh row counts into the existing summary so non-counter blocks
+        # (most importantly "moderation" — its absence flips the UI back to
+        # "not started" and hides the attention bucket on the next status poll)
+        # survive single-row mutations like park / exclude / update.
+        rows = self.import_repo.get_rows(session_id=session_id)
+        counts = self._build_summary_from_rows(rows)
+        session = (
+            self.db.query(ImportSession).filter(ImportSession.id == session_id).first()
+        )
+        existing = dict((session.summary_json if session else None) or {})
+        existing.update(counts)
+        return existing
 
     def _serialize_preview_row(self, row: ImportRow) -> dict[str, Any]:
         return {
@@ -687,6 +1040,18 @@ class ImportService:
                 "РЎС‚СЂСѓРєС‚СѓСЂР° СЌС‚РѕРіРѕ PDF РЅРµ СЂР°СЃРїРѕР·РЅР°РЅР° Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё. РџСЂРѕРІРµСЂСЊ РґРёР°РіРЅРѕСЃС‚РёС‡РµСЃРєСѓСЋ С‚Р°Р±Р»РёС†Сѓ РІ СЂРµР·СѓР»СЊС‚Р°С‚Рµ РёР·РІР»РµС‡РµРЅРёСЏ Рё РїСЂРёС€Р»Рё С„Р°Р№Р» РґР»СЏ СЂР°СЃС€РёСЂРµРЅРёСЏ С€Р°Р±Р»РѕРЅРѕРІ."
             )
 
+        # Store bank_code in mapping_json so _apply_v2_normalization can use it
+        # for fingerprinting without re-fetching the account from DB.
+        bank_code = account.bank.code if (account.bank is not None) else None
+        current_mapping = {**current_mapping, "bank_code": bank_code}
+
+        # Persist account_id on the session so commit_import can later save
+        # the extracted contract_number / statement_account_number back to the
+        # account. Without this, the account is always NULL at commit time.
+        if session.account_id != payload.account_id:
+            session.account_id = payload.account_id
+            self.db.add(session)
+
         detection = self.recognition_service.recognize(table=table)
         merged_detection = {**detection, "selected_table": table.name, "field_mapping": payload.field_mapping}
 
@@ -734,7 +1099,14 @@ class ImportService:
                     if _norm_desc
                     else None
                 )
-                normalized["category_id"] = _cat_rule.category_id if _cat_rule else enrichment.get("suggested_category_id")
+                if _cat_rule:
+                    normalized["category_id"] = _cat_rule.category_id
+                    normalized["applied_rule_id"] = _cat_rule.id
+                    normalized["applied_rule_category_id"] = _cat_rule.category_id
+                else:
+                    normalized["category_id"] = enrichment.get("suggested_category_id")
+                    normalized.pop("applied_rule_id", None)
+                    normalized.pop("applied_rule_category_id", None)
 
                 normalized["operation_type"] = enrichment.get("suggested_operation_type") or self._resolve_operation_type(normalized)
 
@@ -846,6 +1218,7 @@ class ImportService:
                 session=session,
                 fallback_account_id=payload.account_id,
                 row_index=index,
+                bank_code_override=bank_code,
             )
 
             issues = list(dict.fromkeys(issue for issue in issues if issue))
@@ -883,6 +1256,12 @@ class ImportService:
 
         self.import_repo.replace_rows(session=session, rows=preview_rows)
 
+        # Inject account_id and bank_code into mapping_json so downstream
+        # services (build_clusters, _apply_v2_normalization) can access them
+        # without re-fetching the account from DB.
+        merged_detection["account_id"] = payload.account_id
+        merged_detection["bank_code"] = bank_code
+
         self.import_repo.update_session(
             session,
             status="preview_ready",
@@ -897,6 +1276,13 @@ class ImportService:
         # Cross-session transfer matching: find pairs across all active sessions
         # for this user and annotate rows with operation_type=transfer + target_account_id.
         self.transfer_matcher.match_transfers_for_user(user_id=user_id)
+        self.db.commit()
+
+        # In-session refund matching: find expense+refund pairs (same amount,
+        # opposite directions, within 14 days) inside this session and write
+        # refund_match metadata to both rows. The moderator UI uses it to
+        # propose operation_type='refund' even when LLM and Layer 2 missed it.
+        self._apply_refund_matches(session_id=session.id)
         self.db.commit()
 
         # Build response AFTER matcher so the frontend sees updated transfer data.
@@ -969,9 +1355,19 @@ class ImportService:
         duplicate_count = 0
         error_count = 0
         review_count = 0
+        parked_count = 0
 
         for row in import_rows:
             row_status = str(row.status or "").strip().lower()
+
+            if row_status == "parked":
+                # Parked rows never become transactions — they are the "undecided"
+                # queue across sessions. Analytics read only Transactions, so
+                # parked rows are automatically excluded from Поток / FI-score /
+                # DTI / Buffer / Health without any aggregation-side filters.
+                parked_count += 1
+                skipped_count += 1
+                continue
 
             if row_status == "duplicate":
                 duplicate_count += 1
@@ -1090,13 +1486,30 @@ class ImportService:
                 norm_desc = normalized.get("normalized_description")
                 orig_desc = normalized.get("import_original_description") or normalized.get("description")
                 operation_type = normalized.get("operation_type") or "regular"
+                applied_rule_id = normalized.get("applied_rule_id")
+                applied_rule_cat = normalized.get("applied_rule_category_id")
                 if category_id and norm_desc and operation_type not in NON_ANALYTICS_OPERATION_TYPES:
-                    self.category_rule_repo.upsert(
-                        user_id=user_id,
-                        normalized_description=norm_desc,
-                        category_id=int(category_id),
-                        original_description=orig_desc or None,
-                    )
+                    if applied_rule_id is not None:
+                        # Rule was applied at preview; user left category unchanged → confirm.
+                        from app.core.config import settings as _settings
+                        try:
+                            RuleStrengthService(self.db, _settings).on_confirmed(applied_rule_id)
+                        except RuleNotFound:
+                            # Rule deleted between preview and commit; fall through to upsert.
+                            self.category_rule_repo.upsert(
+                                user_id=user_id,
+                                normalized_description=norm_desc,
+                                category_id=int(category_id),
+                                original_description=orig_desc or None,
+                            )
+                    else:
+                        # No prior rule match — create or increment via upsert (legacy path).
+                        self.category_rule_repo.upsert(
+                            user_id=user_id,
+                            normalized_description=norm_desc,
+                            category_id=int(category_id),
+                            original_description=orig_desc or None,
+                        )
             except (TransactionValidationError, ImportValidationError) as exc:
                 row.status = "error"
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))
@@ -1119,6 +1532,7 @@ class ImportService:
             "duplicate_count": duplicate_count,
             "error_count": error_count,
             "review_count": review_count,
+            "parked_count": parked_count,
         }
         parse_settings = session.parse_settings or {}
         contract_number = parse_settings.get("contract_number")
@@ -1146,6 +1560,7 @@ class ImportService:
             "duplicate_count": duplicate_count,
             "error_count": error_count,
             "review_count": review_count,
+            "parked_count": parked_count,
         }
 
     def _create_transfer_pair(
@@ -1512,6 +1927,7 @@ class ImportService:
         session: ImportSession,
         fallback_account_id: int | None,
         row_index: int,
+        bank_code_override: str | None = None,
     ) -> dict[str, Any]:
         """Run normalizer_v2 on top of the v1 normalized dict.
 
@@ -1525,10 +1941,15 @@ class ImportService:
                 or normalized.get("description")
                 or ""
             )
-            # bank_code does not exist yet (see Phase 2/3 plan). source_type
-            # is the closest stable identifier we have; "unknown" guards against
-            # null so fingerprint inputs stay deterministic.
-            bank = str(getattr(session, "source_type", None) or "unknown")
+            # Prefer explicit bank_code_override (passed directly from build_preview
+            # before mapping_json is saved), then mapping_json, then source_type.
+            resolved_bank_code: str | None = (
+                bank_code_override
+                or (session.mapping_json or {}).get("bank_code")
+            )
+            # Use resolved code for fingerprint; fall back to source_type sentinel
+            # only for the fingerprint string (not stored as bank_code).
+            bank = resolved_bank_code or str(getattr(session, "source_type", None) or "unknown")
             account_id = int(normalized.get("account_id") or fallback_account_id or 0)
             # "unknown" when direction isn't known yet — NOT "expense". A silent
             # "expense" default would make the fingerprint unstable: once the
@@ -1549,7 +1970,12 @@ class ImportService:
             model = NormalizedDataV2.from_tokens(
                 tokens=tokens, skeleton=skeleton, fingerprint=fp,
             )
-            return model.merge_into(normalized)
+            result = model.merge_into(normalized)
+            # Persist resolved bank_code so build_clusters can read it from
+            # normalized_data_json without re-fetching the account from DB.
+            if resolved_bank_code:
+                result["bank_code"] = resolved_bank_code
+            return result
         except Exception as exc:  # noqa: BLE001 — v2 must never break import
             logger.warning(
                 "v2 normalization failed for row %s: %s", row_index, exc,

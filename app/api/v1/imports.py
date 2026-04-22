@@ -67,6 +67,122 @@ async def upload_import_file(
 
 
 
+@router.get("/{session_id}/moderation-status")
+def get_moderation_status(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.get_moderation_status(user_id=current_user.id, session_id=session_id)
+    except ImportNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/{session_id}/moderate")
+def start_moderation(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.start_moderation(user_id=current_user.id, session_id=session_id)
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/moderation-metrics")
+def get_moderation_metrics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Aggregate moderator metrics across the user's sessions (Phase 6.1)."""
+    from app.services.moderation_metrics_service import ModerationMetricsService
+
+    metrics = ModerationMetricsService(db).compute_for_user(user_id=current_user.id)
+    return metrics.to_dict()
+
+
+@router.get("/parked-queue")
+def get_parked_queue(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    return service.list_parked_queue(user_id=current_user.id)
+
+
+@router.post("/rows/{row_id}/park")
+def park_import_row(
+    row_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.park_row(user_id=current_user.id, row_id=row_id)
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/rows/{row_id}/unpark")
+def unpark_import_row(
+    row_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.unpark_row(user_id=current_user.id, row_id=row_id)
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/rows/{row_id}/exclude")
+def exclude_import_row(
+    row_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.exclude_row(user_id=current_user.id, row_id=row_id)
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/rows/{row_id}/unexclude")
+def unexclude_import_row(
+    row_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.unexclude_row(user_id=current_user.id, row_id=row_id)
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 @router.post("/rows/{row_id}/label", response_model=ImportRowLabelResponse)
 def set_import_row_label(
     row_id: int,

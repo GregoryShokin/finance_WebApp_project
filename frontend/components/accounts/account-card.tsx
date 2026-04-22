@@ -96,7 +96,10 @@ export function AccountCard({
                 {isCreditCard ? <StatusBadge tone="warning">Кредитная карта</StatusBadge> : null}
                 {account.is_credit && !isCreditCard ? <StatusBadge tone="warning">Кредит</StatusBadge> : null}
               </div>
-              <p className="mt-1 text-sm text-slate-500">Валюта счёта: {account.currency}</p>
+              <p className="mt-1 text-sm text-slate-500">
+                {account.bank ? <span className="font-medium text-slate-700">{account.bank.name} · </span> : null}
+                {account.currency}
+              </p>
             </div>
           </div>
 

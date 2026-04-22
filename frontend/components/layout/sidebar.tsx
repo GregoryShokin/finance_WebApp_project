@@ -3,9 +3,25 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
+import { getParkedQueue } from '@/lib/api/imports';
 import { isNavGroup, navItems, type NavGroup, type NavLeaf } from './nav-items';
+
+// ── Badge hook ────────────────────────────────────────────────────────────────
+
+function useParkedQueueCount(): number {
+  const { data } = useQuery({
+    queryKey: ['imports', 'parked-queue'],
+    queryFn: () => getParkedQueue(),
+    // Refetch every minute — this runs on every authenticated page,
+    // so we don't want to hammer the server.
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  return data?.total ?? 0;
+}
 
 // ── Leaf link ─────────────────────────────────────────────────────────────────
 
@@ -13,6 +29,8 @@ function NavLeafLink({ item, indent = false }: { item: NavLeaf; indent?: boolean
   const pathname = usePathname();
   const isActive = pathname === item.href;
   const Icon = item.icon;
+  const parkedCount = useParkedQueueCount();
+  const badgeValue = item.badge === 'parked-queue' ? parkedCount : null;
 
   return (
     <Link
@@ -26,7 +44,17 @@ function NavLeafLink({ item, indent = false }: { item: NavLeaf; indent?: boolean
       )}
     >
       <Icon className="size-4" />
-      {item.label}
+      <span className="flex-1">{item.label}</span>
+      {badgeValue && badgeValue > 0 ? (
+        <span
+          className={cn(
+            'inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-xs font-semibold tabular-nums',
+            isActive ? 'bg-white text-slate-950' : 'bg-slate-200 text-slate-700',
+          )}
+        >
+          {badgeValue}
+        </span>
+      ) : null}
     </Link>
   );
 }

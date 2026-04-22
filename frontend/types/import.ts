@@ -1,5 +1,88 @@
 export type ImportSessionStatus = 'uploaded' | 'analyzed' | 'preview_ready' | 'committed' | 'failed';
-export type ImportRowStatus = 'ready' | 'warning' | 'error' | 'duplicate' | 'skipped' | 'committed';
+export type ImportRowStatus = 'ready' | 'warning' | 'error' | 'duplicate' | 'skipped' | 'committed' | 'parked';
+
+export type ModerationSessionStatus = 'not_started' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped';
+export type ClusterModerationStatus = 'ready' | 'skipped';
+
+export type ClusterHypothesis = {
+  operation_type: string;
+  direction: 'income' | 'expense' | string;
+  predicted_category_id: number | null;
+  confidence: number;
+  reasoning: string;
+  follow_up_question: string | null;
+};
+
+export type TrustZone = 'green' | 'yellow' | 'red';
+export type IdentifierMatch = 'matched' | 'absent' | 'unmatched';
+
+export type ModerationClusterEntry = {
+  cluster_fingerprint: string | null;
+  status: ClusterModerationStatus | null;
+  cluster_row_ids: number[];
+  hypothesis: ClusterHypothesis | null;
+  // Phase-7 trust signals (nullable — old sessions may not have them).
+  trust_zone?: TrustZone | null;
+  auto_trust?: boolean | null;
+  confidence?: number | null;
+  identifier_match?: IdentifierMatch | null;
+  identifier_key?: string | null;
+  identifier_value?: string | null;
+  rule_source?: string | null;
+  rule_confirms?: number | null;
+  rule_rejections?: number | null;
+  candidate_category_id?: number | null;
+  count?: number | null;
+  total_amount?: string | null;
+  skeleton?: string | null;
+  bank_code?: string | null;
+  // Layer 1: account-context hints
+  account_context_operation_type?: string | null;
+  account_context_category_id?: number | null;
+  account_context_label?: string | null;
+  // Layer 2: bank-mechanics hints
+  bank_mechanics_operation_type?: string | null;
+  bank_mechanics_category_id?: number | null;
+  bank_mechanics_label?: string | null;
+  bank_mechanics_cross_session_warning?: string | null;
+  // Layer 3: global cross-user pattern
+  global_pattern_category_id?: number | null;
+  global_pattern_category_name?: string | null;
+  global_pattern_user_count?: number | null;
+  global_pattern_total_confirms?: number | null;
+};
+
+export type ModerationStatusResponse = {
+  session_id: number;
+  status: ModerationSessionStatus;
+  total_clusters: number;
+  processed_clusters: number;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  clusters: ModerationClusterEntry[];
+  auto_trust_rows?: number;
+  attention_rows?: number;
+};
+
+export type ParkedQueueItem = {
+  session_id: number;
+  session_status: string;
+  filename: string;
+  source_type: string;
+  row_id: number;
+  row_index: number;
+  status: ImportRowStatus;
+  raw_data: Record<string, string>;
+  normalized_data: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ParkedQueueResponse = {
+  items: ParkedQueueItem[];
+  total: number;
+};
 export type ImportSourceType = 'csv' | 'xlsx' | 'pdf';
 
 export type ImportTableInfo = {

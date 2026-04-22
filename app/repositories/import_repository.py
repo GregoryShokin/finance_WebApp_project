@@ -184,6 +184,32 @@ class ImportRepository:
             self._hydrate_row_runtime_fields(row)
         return rows
 
+    def list_parked_queue(self, *, user_id: int) -> list[tuple[ImportSession, ImportRow]]:
+        rows = (
+            self.db.query(ImportSession, ImportRow)
+            .join(ImportRow, ImportRow.session_id == ImportSession.id)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportRow.status == "parked",
+                ImportRow.created_transaction_id.is_(None),
+            )
+            .order_by(ImportSession.updated_at.desc(), ImportRow.row_index.asc(), ImportRow.id.asc())
+            .all()
+        )
+        for _, row in rows:
+            self._hydrate_row_runtime_fields(row)
+        return rows
+
+    def get_row_by_transaction_id(self, *, transaction_id: int) -> ImportRow | None:
+        row = (
+            self.db.query(ImportRow)
+            .filter(ImportRow.created_transaction_id == transaction_id)
+            .first()
+        )
+        if row is not None:
+            self._hydrate_row_runtime_fields(row)
+        return row
+
     def update_row(self, row: ImportRow, **updates) -> ImportRow:
         alias_map = {
             "raw_data": "raw_data_json",

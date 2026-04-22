@@ -13,7 +13,9 @@ from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
 from app.repositories.counterparty_repository import CounterpartyRepository
 from app.repositories.transaction_repository import TransactionRepository
+from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
+from app.services.rule_strength_service import RuleNotFound, RuleStrengthService
 
 try:
     from app.services.goal_service import GoalService, GoalValidationError as _GoalValidationError
@@ -235,6 +237,7 @@ class TransactionService:
             GoalService(self.db).check_and_achieve(updated.goal_id, user_id)
 
         self._upsert_category_rule_from_payload(user_id=user_id, payload=effective)
+        self._maybe_reject_rule_on_edit(transaction=transaction, updates=updates)
 
         # Handle InstallmentPurchase create/update on transaction edit
         if _INSTALLMENT_AVAILABLE:
@@ -339,6 +342,45 @@ class TransactionService:
             category_id=int(category_id),
             original_description=(str(original_description) if original_description is not None else None),
         )
+
+    def _maybe_reject_rule_on_edit(self, *, transaction: Transaction, updates: dict[str, Any]) -> None:
+        """Reject the rule that was applied to this transaction if it is being overridden
+        within 7 days of the transaction being created (post-commit correction window)."""
+        if "category_id" not in updates and "type" not in updates and "operation_type" not in updates:
+            return
+
+        from datetime import timezone, timedelta
+        from app.core.config import settings as _settings
+
+        created_at = getattr(transaction, "created_at", None)
+        if created_at is None:
+            return
+        now = datetime.now(timezone.utc)
+        if not hasattr(created_at, "tzinfo") or created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if now - created_at > timedelta(days=7):
+            return
+
+        import_row = ImportRepository(self.db).get_row_by_transaction_id(
+            transaction_id=transaction.id
+        )
+        if import_row is None:
+            return
+
+        normalized = import_row.normalized_data or {}
+        applied_rule_id = normalized.get("applied_rule_id")
+        applied_rule_cat = normalized.get("applied_rule_category_id")
+        if applied_rule_id is None:
+            return
+
+        new_category_id = updates.get("category_id")
+        if new_category_id is None or int(new_category_id) == applied_rule_cat:
+            return
+
+        try:
+            RuleStrengthService(self.db, _settings).on_rejected(applied_rule_id)
+        except RuleNotFound:
+            pass
 
     def _build_effective_update_payload(self, *, transaction: Transaction, updates: dict[str, Any]) -> dict[str, Any]:
         """Collect all editable fields, filling gaps from the existing transaction.

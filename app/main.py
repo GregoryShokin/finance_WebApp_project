@@ -10,6 +10,7 @@ from app.models.real_asset import RealAsset  # noqa: F401 — registers mapper
 from app.models.installment_purchase import InstallmentPurchase  # noqa: F401 — registers mapper
 
 from app.api.v1.accounts import router as accounts_router
+from app.api.v1.banks import router as banks_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.categories import router as categories_router
 from app.api.v1.budget import router as budget_router
@@ -51,6 +52,7 @@ app.add_middleware(
 app.include_router(health_router, prefix=settings.API_V1_PREFIX)
 app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
 app.include_router(accounts_router, prefix=settings.API_V1_PREFIX)
+app.include_router(banks_router, prefix=settings.API_V1_PREFIX)
 app.include_router(categories_router, prefix=settings.API_V1_PREFIX)
 app.include_router(counterparties_router, prefix=settings.API_V1_PREFIX)
 app.include_router(transactions_router, prefix=settings.API_V1_PREFIX)

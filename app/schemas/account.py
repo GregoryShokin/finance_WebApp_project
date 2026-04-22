@@ -9,6 +9,15 @@ from pydantic import BaseModel, ConfigDict, Field
 AccountType = Literal['regular', 'credit', 'credit_card', 'cash', 'broker', 'deposit', 'installment_card']
 
 
+class BankRef(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    code: str
+    bik: str | None = None
+    is_popular: bool
+
+
 class AccountCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     currency: str = Field(default="RUB", min_length=3, max_length=3)
@@ -16,6 +25,7 @@ class AccountCreateRequest(BaseModel):
     is_active: bool = True
     account_type: AccountType = "regular"
     is_credit: bool = False
+    bank_id: int | None = None
 
     credit_limit_original: Decimal | None = None
     credit_current_amount: Decimal | None = None
@@ -37,6 +47,7 @@ class AccountUpdateRequest(BaseModel):
     is_active: bool | None = None
     account_type: AccountType | None = None
     is_credit: bool | None = None
+    bank_id: int | None = None
 
     credit_limit_original: Decimal | None = None
     credit_current_amount: Decimal | None = None
@@ -61,6 +72,8 @@ class AccountResponse(BaseModel):
 
     id: int
     user_id: int
+    bank_id: int | None = None
+    bank: BankRef | None = None
     name: str
     currency: str
     balance: Decimal

@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
 import { Select } from '@/components/ui/select';
-import type { Account, AccountType, CreateAccountPayload } from '@/types/account';
+import { BankPicker } from '@/components/accounts/bank-picker';
+import type { Account, AccountType, Bank, CreateAccountPayload } from '@/types/account';
 
 type AccountFormValues = CreateAccountPayload;
 type AccountTypeValue = AccountType;
@@ -54,6 +55,7 @@ export function AccountForm({
 
   const [accountType, setAccountType] = useState<AccountTypeValue>('regular');
   const [accountTypeQuery, setAccountTypeQuery] = useState('Обычный');
+  const [selectedBank, setSelectedBank] = useState<Bank | null>(null);
 
   const accountTypeItems = useMemo<SearchSelectItem[]>(
     () => [
@@ -77,6 +79,7 @@ export function AccountForm({
     );
 
     if (initialData) {
+      setSelectedBank(initialData.bank ?? null);
       reset({
         name: initialData.name,
         currency: initialData.currency,
@@ -135,6 +138,7 @@ export function AccountForm({
           ...values,
           account_type: accountType,
           is_credit: isCredit,
+          bank_id: selectedBank?.id ?? null,
           balance: isCredit ? 0 : Number(values.balance),
           credit_limit_original: isCredit || isCreditCard || isInstallmentCard ? Number(values.credit_limit_original) : null,
           credit_current_amount: isCredit || isInstallmentCard ? Number(values.credit_current_amount) : null,
@@ -160,6 +164,12 @@ export function AccountForm({
           })}
         />
         {errors.name ? <p className="mt-1 text-sm text-danger">{errors.name.message}</p> : null}
+      </div>
+
+      <div>
+        <label className="mb-1.5 block text-sm font-medium text-slate-700">Банк</label>
+        <BankPicker value={selectedBank?.id ?? null} onChange={setSelectedBank} />
+        <p className="mt-1 text-xs text-slate-400">Помогает правильно распознавать выписки и связывать счета</p>
       </div>
 
       <input type="hidden" {...register('account_type')} />

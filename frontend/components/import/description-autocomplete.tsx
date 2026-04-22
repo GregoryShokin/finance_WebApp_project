@@ -15,7 +15,7 @@ function scoreRule(rule: CategoryRule, rowNormalizedDesc: string): number {
 function getSuggestions(rules: CategoryRule[], value: string, rowNormalizedDesc: string): CategoryRule[] {
   const query = value.trim().toLowerCase();
   const filtered = query
-    ? rules.filter((rule) => rule.user_label.toLowerCase().includes(query))
+    ? rules.filter((rule) => (rule.user_label ?? '').toLowerCase().includes(query))
     : rules;
 
   return filtered
@@ -113,11 +113,11 @@ export function DescriptionAutocomplete({
                   onMouseEnter={() => setHighlightedIndex(index)}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    onChange(rule.user_label);
+                    onChange(rule.user_label ?? '');
                     setOpen(false);
                   }}
                 >
-                  <span className="truncate font-medium text-slate-900">{rule.user_label}</span>
+                  <span className="truncate font-medium text-slate-900">{rule.user_label ?? ''}</span>
                   {rule.original_description ? (
                     <span className="truncate text-xs text-slate-400">{rule.original_description}</span>
                   ) : null}
@@ -156,7 +156,7 @@ export function DescriptionAutocomplete({
             e.preventDefault();
             const selected = suggestions[highlightedIndex];
             if (selected) {
-              onChange(selected.user_label);
+              onChange(selected.user_label ?? '');
               setOpen(false);
             }
           }

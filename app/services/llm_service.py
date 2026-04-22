@@ -1,3 +1,15 @@
+"""Domain-level LLM wrapper for transaction classification (И-08 Phase 4.1 refactor).
+
+This module used to hold the Anthropic SDK integration directly. That integration
+now lives in `app.services.llm.anthropic_provider.AnthropicProvider`; this file
+only knows about business concepts (Category, transaction_type) and delegates
+the actual model call through the `LLMProvider` abstraction from
+`app.services.llm`.
+
+Kept as a separate module (instead of merging into enrichment) because it is
+used both by the import-enrichment path (legacy) and by the new moderator
+service (Phase 4.2).
+"""
 from __future__ import annotations
 
 import logging
@@ -7,6 +19,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.services.llm import LLMUnavailableError, get_provider
 
 if TYPE_CHECKING:
     from app.models.category import Category
@@ -48,27 +61,12 @@ SYSTEM_PROMPT_TEMPLATE = """Ты — классификатор банковск
 
 class LLMService:
     def __init__(self) -> None:
-        self._client = None
-        self._model = settings.ANTHROPIC_MODEL
+        self._provider = get_provider()
         self._min_confidence = settings.LLM_MIN_CONFIDENCE
-        self._enabled = bool(
-            settings.LLM_CLASSIFICATION_ENABLED and settings.ANTHROPIC_API_KEY
-        )
-
-        if self._enabled:
-            try:
-                import anthropic
-
-                self._client = anthropic.Anthropic(
-                    api_key=settings.ANTHROPIC_API_KEY
-                )
-            except Exception as exc:
-                logger.warning("Failed to init Anthropic client: %s", exc)
-                self._enabled = False
 
     @property
     def is_enabled(self) -> bool:
-        return self._enabled and self._client is not None
+        return self._provider.is_enabled
 
     def classify_transaction_category(
         self,
@@ -89,9 +87,7 @@ class LLMService:
         categories_block = "\n".join(
             f"- ID {c.id}: {c.name} ({c.kind})" for c in filtered
         )
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            categories_block=categories_block
-        )
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(categories_block=categories_block)
 
         user_message_parts = [
             f"Описание: {description or '(пусто)'}",
@@ -103,37 +99,27 @@ class LLMService:
         user_message = "\n".join(user_message_parts)
 
         try:
-            response = self._client.messages.parse(
-                model=self._model,
+            result = self._provider.generate_structured(
+                system=system_prompt,
+                user=user_message,
+                schema=TransactionClassification,
                 max_tokens=512,
-                system=[
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=[{"role": "user", "content": user_message}],
-                output_format=TransactionClassification,
+                cache_key=f"classify:{transaction_type}",
             )
-        except Exception as exc:
-            logger.warning("LLM classification failed: %s", exc)
+        except LLMUnavailableError:
             return None, 0.0, ""
 
-        parsed: TransactionClassification | None = getattr(
-            response, "parsed_output", None
-        )
-        if parsed is None:
+        if result is None:
             return None, 0.0, ""
+
+        parsed: TransactionClassification = result.parsed
 
         if parsed.category_id is None or parsed.confidence < self._min_confidence:
             return None, 0.0, ""
 
         valid_ids = {c.id for c in filtered}
         if parsed.category_id not in valid_ids:
-            logger.info(
-                "LLM returned invalid category_id=%s", parsed.category_id
-            )
+            logger.info("LLM returned invalid category_id=%s", parsed.category_id)
             return None, 0.0, ""
 
         reasoning = f"LLM: {parsed.reasoning}".strip()[:250]

@@ -1,8 +1,18 @@
 export type AccountType = 'regular' | 'credit' | 'credit_card' | 'cash' | 'broker' | 'deposit' | 'installment_card';
 
+export type Bank = {
+  id: number;
+  name: string;
+  code: string;
+  bik: string | null;
+  is_popular: boolean;
+};
+
 export type Account = {
   id: number;
   user_id: number;
+  bank_id: number | null;
+  bank: Bank | null;
   name: string;
   currency: string;
   balance: string | number;
@@ -33,6 +43,7 @@ export type CreateAccountPayload = {
   is_active: boolean;
   account_type: AccountType;
   is_credit: boolean;
+  bank_id?: number | null;
   credit_limit_original?: number | null;
   credit_current_amount?: number | null;
   credit_interest_rate?: number | null;

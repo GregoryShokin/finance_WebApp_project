@@ -74,12 +74,20 @@ class ImportMappingRequest(BaseModel):
     currency: str = Field(default="RUB", min_length=3, max_length=8)
     date_format: str = Field(default="%Y-%m-%d", min_length=2, max_length=32)
     table_name: str | None = None
-    field_mapping: dict[str, str | None]
+    field_mapping: dict[str, str | None] = Field(default_factory=dict)
     skip_duplicates: bool = True
 
     @model_validator(mode="after")
     def validate_required_fields(self):
+        # field_mapping имеет смысл только для табличных источников (CSV/XLSX),
+        # где user сам выбирает колонки. Для PDF-выписок (Yandex, Ozon, Т-Банк)
+        # парсер извлекает поля из текста через regex, и mapping пустой — это
+        # нормально. Frontend для PDF может прислать как пустой dict, так и
+        # {date: null, description: null, amount: null} — оба случая считаем
+        # «mapping не задан» и пропускаем валидацию.
         field_mapping = self.field_mapping or {}
+        if not any(field_mapping.values()):
+            return self
         if not field_mapping.get("date"):
             raise ValueError("Нужно указать колонку даты.")
         if not field_mapping.get("description"):

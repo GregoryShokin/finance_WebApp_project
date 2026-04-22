@@ -7,10 +7,12 @@ import { toast } from 'sonner';
 
 import { getAccounts, createAccount } from '@/lib/api/accounts';
 import { getCategoryRules } from '@/lib/api/category-rules';
+import type { CategoryRule } from '@/types/category-rule';
 import { getCategories, createCategory } from '@/lib/api/categories';
 import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
 import { commitImport, getImportPreview, getImportSession, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
 import { DescriptionAutocomplete } from '@/components/import/description-autocomplete';
+import { ImportModerationPanel } from '@/components/import/import-moderation-panel';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -526,7 +528,7 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'import-preview'], queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties', 'import-preview'], queryFn: getCounterparties });
-  const categoryRulesQuery = useQuery({ queryKey: ['category-rules'], queryFn: getCategoryRules });
+  const categoryRulesQuery = useQuery({ queryKey: ['category-rules'], queryFn: () => getCategoryRules() });
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
@@ -559,7 +561,7 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
   const accounts = accountsQuery.data ?? [];
   const categories = categoriesQuery.data ?? [];
   const counterparties = counterpartiesQuery.data ?? [];
-  const categoryRules = categoryRulesQuery.data ?? [];
+  const categoryRules: CategoryRule[] = categoryRulesQuery.data ?? [];
   const previewRows = previewResult?.rows ?? [];
 
   const isRowDirty = (row: ImportPreviewRow) => {
@@ -737,6 +739,10 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
           currency: session.currency ?? nextMapping.currency,
         };
         const hasDetectedFields = Object.values(restoredUploadResult.detection.field_mapping ?? {}).some(Boolean);
+        // PDF-источники не требуют user-side колонок-маппинга — extractor парсит
+        // текст regex-ами. Значит для них preview можно строить даже когда
+        // detection.field_mapping пустой.
+        const canBuildPreview = hasDetectedFields || session.source_type === 'pdf';
 
         if (session.status === 'preview_ready') {
           const preview = await getImportPreview(session.id);
@@ -749,7 +755,7 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
           setSplitExpanded({});
           setSplitRows({});
           setSplitQueries({});
-        } else if (session.status === 'analyzed' && resolvedMapping.account_id && hasDetectedFields) {
+        } else if (session.status === 'analyzed' && resolvedMapping.account_id && canBuildPreview) {
           const preview = await previewImport(session.id, toPreviewPayload({
             ...resolvedMapping,
           }));
@@ -1157,8 +1163,14 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
       toast.error('Выбери счёт для импорта');
       return;
     }
-    const hasDetectedFields = Object.values(uploadResult.detection.field_mapping).some(Boolean);
-    if (!hasDetectedFields) return;
+    // For PDF sources the table-mapping is not used — the extractor pulls
+    // rows from text via regex (Yandex Credit, Ozon, etc.). Only require
+    // detected fields for CSV/XLSX, where the user maps columns explicitly.
+    const isTableSource = uploadResult.source_type !== 'pdf';
+    if (isTableSource) {
+      const hasDetectedFields = Object.values(uploadResult.detection.field_mapping).some(Boolean);
+      if (!hasDetectedFields) return;
+    }
     setMappingForm(nextForm);
     previewMutation.mutate({ sessionId: uploadResult.session_id, payload: toPreviewPayload(nextForm) });
   }
@@ -1429,10 +1441,20 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
       ) : null}
 
       {previewResult ? (
+        <ImportModerationPanel
+          sessionId={previewResult.session_id}
+          onClustersChanged={() => {
+            // Refresh the preview so parked rows disappear from the commit list.
+            getImportPreview(previewResult.session_id).then((fresh) => setPreviewResult(fresh));
+          }}
+        />
+      ) : null}
+
+      {previewResult ? (
         <Card className="rounded-3xl bg-white p-5 shadow-soft lg:p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
-              <h3 className="text-lg font-semibold text-slate-900">2. Импорт перед коммитом</h3>
+              <h3 className="text-lg font-semibold text-slate-900">3. Импорт перед коммитом</h3>
               <p className="mt-1 text-sm text-slate-500">Исправляй тип, счёт, категорию и разбивку прямо внутри каждой строки. Блок сопоставления убран из сценария.</p>
             </div>
             <div className="flex flex-wrap gap-3">
