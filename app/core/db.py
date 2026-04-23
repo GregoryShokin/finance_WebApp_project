@@ -12,4 +12,14 @@ def get_db():
     try:
         yield db
     finally:
-        db.close()
+        # ВАЖНО: rollback ДО close, иначе любая транзакция, которую
+        # endpoint не закоммитил явно (например, GET /categories — там нет
+        # commit), остаётся открытой при возврате connection в pool.
+        # Connection попадает в pool как "idle in transaction" и держит
+        # row-locks, заблокированные неявно через autoflush. Это вызывало
+        # зависания preview: новый запрос на SELECT FOR UPDATE на сессии
+        # стоял в очереди за такой повисшей транзакцией предыдущего GET.
+        try:
+            db.rollback()
+        finally:
+            db.close()
