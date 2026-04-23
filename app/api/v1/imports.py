@@ -114,13 +114,13 @@ def rematch_transfers(
     """Re-run the global transfer matcher across all user sessions.
 
     Use when sessions were uploaded/removed and cross-session pairs may have
-    shifted. Cheap — pure DB work, no LLM.
+    shifted. Cheap — pure DB work, no LLM. Goes through the debounced matcher
+    so manual + automatic triggers coalesce into a single run.
     """
-    from app.services.transfer_matcher_service import TransferMatcherService
+    from app.jobs.transfer_matcher_debounced import schedule_transfer_match
 
-    TransferMatcherService(db).match_transfers_for_user(user_id=current_user.id)
-    db.commit()
-    return {"status": "ok"}
+    schedule_transfer_match(current_user.id)
+    return {"status": "queued"}
 
 
 @router.get("/parked-queue")
@@ -283,9 +283,13 @@ def assign_session_account(
             except Exception:
                 pass
 
-    # Re-run transfer matcher so existing previewed sessions can now match against this one.
-    service.transfer_matcher.match_transfers_for_user(user_id=current_user.id)
-    db.commit()
+    # Trigger the debounced global transfer matcher so existing previewed
+    # sessions can now match against this one.
+    try:
+        from app.jobs.transfer_matcher_debounced import schedule_transfer_match
+        schedule_transfer_match(current_user.id)
+    except Exception:
+        pass
     return {
         "id": session.id,
         "filename": session.filename,

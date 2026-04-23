@@ -116,36 +116,17 @@ def auto_preview_import_session(session_id: int) -> dict[str, Any]:
             db.add(session)
             db.commit()
 
-        # Schedule a global rematch a few seconds later. When multiple sessions
-        # are auto-previewed in parallel (e.g. user drops 6 files in the queue),
-        # the matcher inside each build_preview only sees rows already in the DB
-        # at the moment it runs — a later session's rows won't retro-match
-        # earlier ones. A delayed global rematch converges the state.
+        # Trigger the debounced global transfer matcher. `build_preview` already
+        # fires the same trigger, but calling it again here is harmless — the
+        # debounce layer coalesces rapid successive calls into a single run.
         if user_id is not None:
             try:
-                rematch_user_transfers.apply_async(args=[user_id], countdown=5)
+                from app.jobs.transfer_matcher_debounced import schedule_transfer_match
+                schedule_transfer_match(user_id)
             except Exception:
-                logger.exception("rematch_user_transfers enqueue failed for user %s", user_id)
+                logger.exception("schedule_transfer_match failed for user %s", user_id)
 
         return {"status": "ready"}
-    finally:
-        db.close()
-
-
-@celery_app.task(name="rematch_user_transfers")
-def rematch_user_transfers(user_id: int) -> dict[str, Any]:
-    """Re-run TransferMatcherService globally for a user. Idempotent + cheap."""
-    from app.services.transfer_matcher_service import TransferMatcherService
-
-    db = SessionLocal()
-    try:
-        TransferMatcherService(db).match_transfers_for_user(user_id=user_id)
-        db.commit()
-        return {"status": "ok"}
-    except Exception as exc:
-        logger.exception("rematch_user_transfers failed for user %s", user_id)
-        db.rollback()
-        return {"status": "failed", "error": str(exc)}
     finally:
         db.close()
 

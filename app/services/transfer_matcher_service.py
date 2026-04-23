@@ -90,6 +90,23 @@ _ANTI_TRANSFER_KEYWORDS = frozenset({
     "google",
 })
 
+# Keywords that strongly indicate an internal transfer between the user's own
+# accounts. If BOTH sides of a candidate pair contain one of these, we add a
+# small bonus to the score. Applied BEFORE anti-penalty — a scheduled payment
+# that happens to have "перевод" in the description still gets cut by ×0.4.
+_PRO_TRANSFER_KEYWORDS = frozenset({
+    "перевод",
+    "transfer",
+    "между счетами",
+    "между своими",
+    "с карты на карту",
+    "card to card",
+    "card-to-card",
+    "own transfer",
+    "own account",
+    "c2c",
+})
+
 
 @dataclass
 class _Candidate:
@@ -251,6 +268,19 @@ class TransferMatcherService:
                 if amount <= 0:
                     continue
 
+                # Raw description for pro/anti keyword scoring. Extractors use
+                # varying field names (description / purpose / raw_description),
+                # so merge them into one lowered string for keyword matching.
+                desc_parts = [
+                    raw_row.get("description"),
+                    raw_row.get("purpose"),
+                    raw_row.get("raw_description"),
+                    raw_row.get("details"),
+                ]
+                description = " ".join(
+                    str(p) for p in desc_parts if p is not None and str(p).strip()
+                ).lower() or None
+
                 # row_id=None marks this as an analyzed (not-yet-imported) candidate;
                 # _apply_assignments skips it, but it participates in scoring.
                 candidates.append(_Candidate(
@@ -262,6 +292,7 @@ class TransferMatcherService:
                     date=date,
                     direction=direction,
                     contract_number=contract,
+                    description=description,
                 ))
 
         return candidates
@@ -363,6 +394,16 @@ class TransferMatcherService:
         ):
             score = min(1.0, score + 0.05)
 
+        # Pro-transfer keyword bonus: both sides contain an explicit transfer
+        # keyword like "перевод" / "transfer" / "с карты на карту". Strong signal
+        # that this is an internal movement, not two unrelated transactions that
+        # happen to match on amount + time.
+        if (
+            self._has_pro_transfer_keyword(a)
+            and self._has_pro_transfer_keyword(b)
+        ):
+            score = min(1.0, score + 0.1)
+
         # Penalize pairs where either side looks like a scheduled payment,
         # not an inter-account transfer. BUT: if both sides match exactly on
         # amount AND date-to-the-second (a unique fingerprint of an internal
@@ -383,6 +424,12 @@ class TransferMatcherService:
         if not c.description:
             return False
         return any(kw in c.description for kw in _ANTI_TRANSFER_KEYWORDS)
+
+    @staticmethod
+    def _has_pro_transfer_keyword(c: _Candidate) -> bool:
+        if not c.description:
+            return False
+        return any(kw in c.description for kw in _PRO_TRANSFER_KEYWORDS)
 
     # ------------------------------------------------------------------
     # Greedy 1-to-1 assignment

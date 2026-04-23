@@ -232,6 +232,7 @@ class ImportService:
             rows = self.import_repo.list_rows(session_id=session.id)
             summary = session.summary_json or {}
             auto_preview = (summary.get("auto_preview") or {}).get("status")
+            transfer_match = (summary.get("transfer_match") or {}).get("status")
             items.append({
                 "id": session.id,
                 "filename": session.filename,
@@ -244,6 +245,7 @@ class ImportService:
                 "ready_count": sum(1 for r in rows if r.status == "ready"),
                 "error_count": sum(1 for r in rows if r.status == "error"),
                 "auto_preview_status": auto_preview,
+                "transfer_match_status": transfer_match,
             })
         return {"sessions": items, "total": len(items)}
 
@@ -1344,10 +1346,15 @@ class ImportService:
         self.db.commit()
         self.db.refresh(session)
 
-        # Cross-session transfer matching: find pairs across all active sessions
-        # for this user and annotate rows with operation_type=transfer + target_account_id.
-        self.transfer_matcher.match_transfers_for_user(user_id=user_id)
-        self.db.commit()
+        # Cross-session transfer matching: debounced, runs in Celery worker.
+        # Any state change (this build_preview, account assignment, auto_preview
+        # on another session) routes through schedule_transfer_match so a single
+        # matcher run converges the state of all active sessions for the user.
+        try:
+            from app.jobs.transfer_matcher_debounced import schedule_transfer_match
+            schedule_transfer_match(user_id)
+        except Exception:
+            pass
 
         # In-session refund matching: find expense+refund pairs (same amount,
         # opposite directions, within 14 days) inside this session and write
@@ -1356,7 +1363,8 @@ class ImportService:
         self._apply_refund_matches(session_id=session.id)
         self.db.commit()
 
-        # Build response AFTER matcher so the frontend sees updated transfer data.
+        # Response rows are serialized now — transfer_match metadata is filled in
+        # by the debounced matcher a few seconds later and picked up via polling.
         updated_rows = self.import_repo.list_rows(session_id=session.id)
         response_rows = [self._serialize_preview_row(row) for row in updated_rows]
         summary = self._recalculate_summary(session.id)

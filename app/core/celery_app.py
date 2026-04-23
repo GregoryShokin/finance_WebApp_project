@@ -12,6 +12,7 @@ celery_app = Celery(
         "app.jobs.monthly_capital_snapshot",
         "app.jobs.moderate_import_session",
         "app.jobs.auto_preview_import_session",
+        "app.jobs.transfer_matcher_debounced",
     ],
 )
 celery_app.conf.update(

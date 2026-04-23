@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { CategoryDialog } from '@/components/categories/category-dialog';
 import {
+  commitImport,
   excludeImportRow,
   getImportPreview,
   getModerationStatus,
@@ -89,9 +90,30 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
     },
   });
 
+  // Mount timestamp for a grace window during which we poll preview even when
+  // `summary.transfer_match` has not yet been set — the debounced matcher
+  // writes the flag a moment after build_preview returns, so the very first
+  // GET may land before the pending record exists.
+  const previewMountedAtRef = useRef<number>(Date.now());
+  if (previewMountedAtRef.current === 0) previewMountedAtRef.current = Date.now();
+
   const previewQuery = useQuery({
     queryKey: ['imports', sessionId, 'preview'],
     queryFn: () => getImportPreview(sessionId),
+    // Keep refetching while the global transfer matcher is in-flight, so the
+    // "Переводы и дубли" block fills in without a manual reload.
+    refetchInterval: (query) => {
+      const data = query.state.data as ImportPreviewResponse | undefined;
+      const summary = (data?.summary ?? {}) as Record<string, any>;
+      const tm = (summary.transfer_match ?? {}) as Record<string, any>;
+      const tmStatus = typeof tm.status === 'string' ? tm.status : null;
+      if (tmStatus === 'pending' || tmStatus === 'running') return 2000;
+      if (tmStatus === 'ready' || tmStatus === 'failed') return false;
+      // No flag yet — poll for up to 15 seconds after mount so we catch
+      // the matcher's status write even if it lands after the first response.
+      const grace = Date.now() - previewMountedAtRef.current < 15000;
+      return grace ? 2000 : false;
+    },
   });
 
   const categoriesQuery = useQuery({
@@ -163,8 +185,20 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
   const remainingFeed = activeFeed.filter(
     (f) => f.operationType !== 'transfer' && !f.isDuplicateSide,
   );
-  const autoTrustFeed = remainingFeed.filter((f) => f.cluster?.auto_trust === true);
-  const attentionFeed = remainingFeed.filter((f) => f.cluster?.auto_trust !== true);
+  // Single bucket now: everything that needs the user's attention OR has been
+  // confirmed (manually or auto-trusted by LLM). Confirmed/auto rows render in
+  // collapsed form; the rest — as full editable cards.
+  const isConfirmedOrAuto = (f: FeedRow) => f.cluster?.auto_trust === true || f.row.status === 'ready';
+  const attentionCount = remainingFeed.filter((f) => !isConfirmedOrAuto(f)).length;
+  const confirmedCount = remainingFeed.length - attentionCount;
+  // Sort: still-needs-attention first, confirmed/auto rows last so the user
+  // sees outstanding work at the top.
+  const orderedRemainingFeed = [...remainingFeed].sort((a, b) => {
+    const aDone = isConfirmedOrAuto(a) ? 1 : 0;
+    const bDone = isConfirmedOrAuto(b) ? 1 : 0;
+    if (aDone !== bDone) return aDone - bDone;
+    return b.date.localeCompare(a.date);
+  });
 
   const startMutation = useMutation({
     mutationFn: () => startModeration(sessionId),
@@ -176,6 +210,29 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
     },
     onError: (error: Error) => toast.error(`Не удалось запустить: ${error.message}`),
   });
+
+  const commitMutation = useMutation({
+    mutationFn: () => commitImport(sessionId, true),
+    onSuccess: async (data) => {
+      if (data.imported_count > 0) {
+        toast.success(`Импортировано ${data.imported_count} транзакций`);
+      } else {
+        toast.info('Нет готовых транзакций для импорта');
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'preview'] }),
+        queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'moderation-status'] }),
+        queryClient.invalidateQueries({ queryKey: ['import-sessions'] }),
+        queryClient.invalidateQueries({ queryKey: ['transactions'] }),
+        queryClient.invalidateQueries({ queryKey: ['accounts'] }),
+      ]);
+      onClustersChanged?.();
+    },
+    onError: (error: Error) => toast.error(error.message || 'Не удалось импортировать'),
+  });
+
+  const readyCount =
+    ((previewQuery.data?.summary as Record<string, any> | undefined)?.ready_rows as number | undefined) ?? 0;
 
   const status = statusQuery.data;
   const notStarted = !status || status.status === 'not_started';
@@ -199,6 +256,9 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
         isRunning={isRunning}
         onStart={() => startMutation.mutate()}
         startPending={startMutation.isPending}
+        readyCount={readyCount}
+        onCommit={() => commitMutation.mutate()}
+        commitPending={commitMutation.isPending}
       />
 
       <ModerationProgress status={status} />
@@ -225,16 +285,16 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
       {feedReady ? (
         <div className="mt-5 space-y-5">
           <AutomationGauge
-            autoRows={autoTrustFeed.length + transferFeed.length}
-            attentionRows={attentionFeed.length}
+            autoRows={confirmedCount + transferFeed.length}
+            attentionRows={attentionCount}
           />
 
           <TransfersBucket rows={transferFeed} accountById={accountById} />
 
-          <AutoTrustBucket rows={autoTrustFeed} categoryById={categoryById} />
-
           <AttentionBucket
-            rows={attentionFeed}
+            rows={orderedRemainingFeed}
+            attentionCount={attentionCount}
+            confirmedCount={confirmedCount}
             categoryById={categoryById}
             accountById={accountById}
             onAfterAction={afterMutation}
@@ -256,11 +316,17 @@ function Header({
   isRunning,
   onStart,
   startPending,
+  readyCount,
+  onCommit,
+  commitPending,
 }: {
   status?: ModerationStatusResponse;
   isRunning: boolean;
   onStart: () => void;
   startPending: boolean;
+  readyCount: number;
+  onCommit: () => void;
+  commitPending: boolean;
 }) {
   return (
     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -273,14 +339,28 @@ function Header({
           Что уверено на 99%+ — в «Готово к импорту». Остальное требует твоего внимания: выбери категорию или отложи.
         </p>
       </div>
-      {!isRunning && (
-        <Button variant="primary" onClick={onStart} disabled={startPending}>
-          <Sparkles className="size-4" />
-          {status && !['not_started', 'pending'].includes(status.status)
-            ? 'Перезапустить'
-            : 'Запустить модератор'}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="primary"
+          onClick={onCommit}
+          disabled={commitPending || readyCount === 0}
+          title={readyCount === 0 ? 'Подтверди категории в «Требуют внимания», чтобы появились готовые строки' : undefined}
+        >
+          {commitPending ? (
+            <><Loader2 className="size-4 animate-spin" /> Импортируем…</>
+          ) : (
+            <>Импортировать готовые{readyCount > 0 ? ` (${readyCount})` : ''}</>
+          )}
         </Button>
-      )}
+        {!isRunning && (
+          <Button variant="secondary" onClick={onStart} disabled={startPending}>
+            <Sparkles className="size-4" />
+            {status && !['not_started', 'pending'].includes(status.status)
+              ? 'Перезапустить'
+              : 'Запустить модератор'}
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -394,7 +474,7 @@ function TransfersBucket({ rows, accountById }: { rows: FeedRow[]; accountById: 
             </tbody>
           </table>
           <p className="mt-2 text-xs text-slate-400">
-            Дубли не импортируются повторно. Переводы создадутся как парные транзакции.
+            Переводы между своими счетами создадутся как одна парная транзакция — вторая сторона уже учтена. Настоящие дубли (повтор одной и той же выписки) не импортируются повторно.
           </p>
         </div>
       )}
@@ -403,7 +483,7 @@ function TransfersBucket({ rows, accountById }: { rows: FeedRow[]; accountById: 
 }
 
 function TransferRow({ feedRow, accountById }: { feedRow: FeedRow; accountById: Map<number, Account> }) {
-  const { row, date, description, amount, direction, targetAccountId, isDuplicateSide } = feedRow;
+  const { row, date, description, amount, direction, targetAccountId, isDuplicateSide, transferMatchMeta } = feedRow;
 
   const shortDesc = description.length > 55 ? description.slice(0, 55).trim() + '…' : description;
 
@@ -415,23 +495,51 @@ function TransferRow({ feedRow, accountById }: { feedRow: FeedRow; accountById: 
     ? (accountById.get(targetAccountId)?.name ?? `#${targetAccountId}`)
     : null;
 
-  const linkLabel = isDuplicateSide
-    ? 'Дубль · другая сессия'
-    : sourceName && targetName
-      ? `${sourceName} → ${targetName}`
-      : sourceName && targetAccountId
-        ? `${sourceName} → счёт #${targetAccountId}`
-        : targetName
-          ? `→ ${targetName}`
-          : 'перевод между своими';
-  const linkClass = isDuplicateSide ? 'text-slate-400' : 'text-indigo-700 font-medium';
+  // A row marked duplicate-by-transfer-match (is_secondary) is NOT a real
+  // duplicate — it's the income leg of an internal transfer whose expense leg
+  // will auto-create it on commit. Show it as a proper transfer (source → target)
+  // with a "учтётся как пара" hint, not as an opaque "Дубль".
+  const isPairSecondary = !!transferMatchMeta && transferMatchMeta.is_secondary === true;
+  const isRealDuplicate = isDuplicateSide && !isPairSecondary;
+
+  // For the secondary (income) leg, target = THIS row's account, source = the paired account.
+  const pairLabel = (() => {
+    if (isPairSecondary) {
+      const pairedName = transferMatchMeta?.matched_account_name as string | undefined;
+      const thisName = sourceName;
+      if (pairedName && thisName) return `${pairedName} → ${thisName}`;
+      if (pairedName) return `${pairedName} → ${direction === 'income' ? 'этот счёт' : 'другой счёт'}`;
+    }
+    if (sourceName && targetName) return `${sourceName} → ${targetName}`;
+    if (sourceName && targetAccountId) return `${sourceName} → счёт #${targetAccountId}`;
+    if (targetName) return `→ ${targetName}`;
+    return 'перевод между своими';
+  })();
+
+  const linkLabel = isRealDuplicate ? 'Дубль · другая сессия' : pairLabel;
+  const linkClass = isRealDuplicate
+    ? 'text-slate-400'
+    : isPairSecondary
+      ? 'text-indigo-500 font-medium'
+      : 'text-indigo-700 font-medium';
+
+  const rowClass = isRealDuplicate ? 'text-slate-400 italic' : 'text-slate-800';
+  const amountClass = [
+    'px-2 py-2 text-right tabular-nums',
+    direction === 'income' ? 'text-emerald-600' : 'text-slate-900',
+    isRealDuplicate ? 'line-through' : '',
+  ].join(' ');
+
+  const titleHint = isPairSecondary
+    ? `${description}\n\nПеревод учтётся как пара — эта строка не создаст отдельную транзакцию.`
+    : description;
 
   return (
-    <tr className={isDuplicateSide ? 'text-slate-400 italic' : 'text-slate-800'}>
+    <tr className={rowClass}>
       <td className="px-2 py-2 tabular-nums">{formatDateShort(date)}</td>
-      <td className="px-2 py-2 truncate" title={description}>{shortDesc}</td>
+      <td className="px-2 py-2 truncate" title={titleHint}>{shortDesc}</td>
       <td className={`px-2 py-2 text-xs ${linkClass}`}>{linkLabel}</td>
-      <td className={`px-2 py-2 text-right tabular-nums ${direction === 'income' ? 'text-emerald-600' : 'text-slate-900'} ${isDuplicateSide ? 'line-through' : ''}`}>
+      <td className={amountClass}>
         {formatSignedAmount(amount, direction)}
       </td>
     </tr>
@@ -439,114 +547,20 @@ function TransferRow({ feedRow, accountById }: { feedRow: FeedRow; accountById: 
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Bucket 1: Готово к импорту — таблица отдельных транзакций
-// ───────────────────────────────────────────────────────────────────────────
-
-function AutoTrustBucket({
-  rows,
-  categoryById,
-}: {
-  rows: FeedRow[];
-  categoryById: Map<number, Category>;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  if (rows.length === 0) {
-    return (
-      <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-        🌱 Пока нет строк с полным доверием. Подтверди категории в «Требуют внимания» — в следующий раз их станет больше.
-      </div>
-    );
-  }
-  const totalAmount = rows.reduce((s, r) => s + Math.abs(Number(r.amount) || 0), 0);
-
-  return (
-    <div className="rounded-2xl border-2 border-emerald-200 bg-emerald-50 p-4">
-      <button
-        type="button"
-        className="flex w-full items-start gap-3 text-left"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-emerald-500">
-          <CheckCircle2 className="size-5 text-white" />
-        </div>
-        <div className="flex-1">
-          <p className="text-base font-semibold text-slate-950">Готово к импорту</p>
-          <p className="text-sm text-slate-600">
-            {rows.length} транзакций · {formatMoney(totalAmount)} · уверенность ≥ 99%
-          </p>
-        </div>
-        <span className="shrink-0 text-xs text-emerald-600 self-center">{expanded ? '▲ Скрыть' : '▼ Показать'}</span>
-      </button>
-
-      {expanded && (
-        <div className="mt-3 rounded-2xl bg-white p-3 ring-1 ring-emerald-200">
-          <table className="w-full text-sm table-fixed">
-            <thead>
-              <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
-                <th className="px-2 py-2 w-14">Дата</th>
-                <th className="px-2 py-2">Описание</th>
-                <th className="px-2 py-2 w-36">Категория</th>
-                <th className="px-2 py-2 text-right w-28">Сумма</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {rows.map((feedRow) => (
-                <AutoTrustTableRow
-                  key={feedRow.row.id}
-                  feedRow={feedRow}
-                  categoryById={categoryById}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AutoTrustTableRow({
-  feedRow,
-  categoryById,
-}: {
-  feedRow: FeedRow;
-  categoryById: Map<number, Category>;
-}) {
-  const { cluster, date, description, amount, direction } = feedRow;
-  const catId = cluster?.candidate_category_id ?? cluster?.hypothesis?.predicted_category_id ?? null;
-  const catName = catId ? categoryById.get(catId)?.name ?? '—' : '—';
-  const signal = cluster?.identifier_value
-    ? `Тот же ${cluster.identifier_value}, ${cluster.rule_confirms ?? 0}×`
-    : `Правило, ${cluster?.rule_confirms ?? 0} подтв.`;
-
-  return (
-    <tr className="text-slate-800">
-      <td className="px-2 py-2 tabular-nums text-slate-500">{formatDateShort(date)}</td>
-      <td className="px-2 py-2 truncate" title={`${description}\n${signal}`}>{description}</td>
-      <td className="px-2 py-2 truncate">
-        <span className="inline-flex max-w-full truncate rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
-          {catName}
-        </span>
-      </td>
-      <td className={`px-2 py-2 text-right tabular-nums ${direction === 'income' ? 'text-emerald-600' : 'text-slate-900'}`}>
-        {formatSignedAmount(amount, direction)}
-      </td>
-    </tr>
-  );
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// Bucket 2: Требуют внимания — лента карточек-транзакций
+// Единая лента: требующие внимания + проверенные/auto-trust (collapsed)
 // ───────────────────────────────────────────────────────────────────────────
 
 function AttentionBucket({
   rows,
+  attentionCount,
+  confirmedCount,
   categoryById,
   accountById,
   onAfterAction,
 }: {
   rows: FeedRow[];
+  attentionCount: number;
+  confirmedCount: number;
   categoryById: Map<number, Category>;
   accountById: Map<number, Account>;
   onAfterAction: () => void;
@@ -554,18 +568,25 @@ function AttentionBucket({
   if (rows.length === 0) {
     return (
       <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-        🎉 Все строки в «Готово к импорту». Ничего разбирать не надо.
+        🎉 Нет строк для разбора.
       </div>
     );
   }
 
+  const headerLabel = attentionCount > 0
+    ? `Требуют твоего внимания (${attentionCount})`
+    : `Все строки разобраны (${confirmedCount} проверено)`;
+  const subLabel = attentionCount > 0
+    ? (confirmedCount > 0
+        ? `Проверено: ${confirmedCount}. Подтверди оставшиеся или отложи.`
+        : 'Выбери категорию, подтверди или отложи')
+    : 'Можно жать «Импортировать готовые» в шапке';
+
   return (
     <div>
       <div className="mb-2 flex items-center justify-between">
-        <p className="text-base font-semibold text-slate-900">
-          Требуют твоего внимания ({rows.length} транзакций)
-        </p>
-        <p className="text-xs text-slate-500">Выбери категорию, подтверди или отложи</p>
+        <p className="text-base font-semibold text-slate-900">{headerLabel}</p>
+        <p className="text-xs text-slate-500">{subLabel}</p>
       </div>
       <div className="space-y-2">
         {rows.map((feedRow) => (
@@ -594,6 +615,10 @@ function AttentionCard({
   onAfterAction: () => void;
 }) {
   const { row, cluster, date, description, amount, direction, refundMatch } = feedRow;
+  const isAutoTrust = cluster?.auto_trust === true;
+  const isConfirmed = row.status === 'ready';
+  // Auto-trust rows start collapsed; confirmed rows also collapse after apply.
+  const [collapsed, setCollapsed] = useState(isAutoTrust);
   const zone = cluster?.trust_zone ?? 'yellow';
   const zoneClass: Record<string, string> = {
     yellow: 'border-slate-200 bg-white',
@@ -664,6 +689,28 @@ function AttentionCard({
   const [creditPrincipal, setCreditPrincipal] = useState<string>('');
   const [creditInterest, setCreditInterest] = useState<string>('');
   const [pickedCatId, setPickedCatId] = useState<number | null>(suggestedCatId);
+  // Credit account (for credit_payment / disbursement / early_repayment) +
+  // target account (for transfer). Initialized from normalized_data so re-opens
+  // of an already-confirmed row preserve the user's prior choice.
+  const initialCreditAccountId = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.credit_account_id;
+    return v ? Number(v) : null;
+  })();
+  const initialTargetAccountId = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.target_account_id;
+    return v ? Number(v) : null;
+  })();
+  const [pickedCreditAccountId, setPickedCreditAccountId] = useState<number | null>(initialCreditAccountId);
+  const [pickedTargetAccountId, setPickedTargetAccountId] = useState<number | null>(initialTargetAccountId);
+
+  const creditAccounts = useMemo(
+    () => Array.from(accountById.values()).filter((a) => a.is_credit || a.account_type === 'credit' || a.account_type === 'credit_card' || a.account_type === 'installment_card'),
+    [accountById],
+  );
+  const transferAccounts = useMemo(
+    () => Array.from(accountById.values()).sort((a, b) => a.name.localeCompare(b.name, 'ru')),
+    [accountById],
+  );
 
   // ── Разбивка на части (split) ──────────────────────────────────────────────
   // Каждая часть — мини-транзакция со своим типом, суммой и нужными полями.
@@ -773,12 +820,17 @@ function AttentionCard({
     if (hasSplitDraft) return splitValid;
     if (mainOp === 'regular' || mainOp === 'refund') return Boolean(pickedCatId);
     if (mainOp === 'debt') return Boolean(pickedCatId);
-    if (mainOp === 'credit_operation' && creditKind === 'payment') {
-      const p = parseFloat(creditPrincipal.replace(',', '.'));
-      const i = parseFloat(creditInterest.replace(',', '.'));
-      return Number.isFinite(p) && p >= 0 && Number.isFinite(i) && i >= 0;
+    if (mainOp === 'transfer') return Boolean(pickedTargetAccountId);
+    if (mainOp === 'credit_operation') {
+      if (!pickedCreditAccountId) return false;
+      if (creditKind === 'payment') {
+        const p = parseFloat(creditPrincipal.replace(',', '.'));
+        const i = parseFloat(creditInterest.replace(',', '.'));
+        return Number.isFinite(p) && p >= 0 && Number.isFinite(i) && i >= 0;
+      }
+      return true;
     }
-    // transfer, investment, credit_disbursement, credit_early_repayment — применяем всегда
+    // investment — применяем всегда
     return true;
   })();
 
@@ -810,14 +862,19 @@ function AttentionCard({
       };
       if (needsCategory) payload.category_id = pickedCatId;
       if (mainOp === 'debt') payload.debt_direction = debtDir;
-      if (mainOp === 'credit_operation' && creditKind === 'payment') {
-        payload.credit_principal_amount = parseFloat(creditPrincipal.replace(',', '.')) || 0;
-        payload.credit_interest_amount = parseFloat(creditInterest.replace(',', '.')) || 0;
+      if (mainOp === 'transfer') payload.target_account_id = pickedTargetAccountId;
+      if (mainOp === 'credit_operation') {
+        payload.credit_account_id = pickedCreditAccountId;
+        if (creditKind === 'payment') {
+          payload.credit_principal_amount = parseFloat(creditPrincipal.replace(',', '.')) || 0;
+          payload.credit_interest_amount = parseFloat(creditInterest.replace(',', '.')) || 0;
+        }
       }
       await updateImportRow(row.id, payload);
     },
     onSuccess: () => {
       toast.success(`Применено к строке #${row.row_index}`);
+      setCollapsed(true);
       onAfterAction();
     },
     onError: (error: Error) => toast.error(`Не удалось применить: ${error.message}`),
@@ -828,8 +885,58 @@ function AttentionCard({
   const displayDescription =
     description.length > 100 ? description.slice(0, 100).trim() + '…' : description;
 
+  // ── Compact (collapsed) view for confirmed / auto-trust rows ─────────────
+  if (collapsed) {
+    const catId =
+      cluster?.candidate_category_id ?? cluster?.hypothesis?.predicted_category_id ?? pickedCatId ?? null;
+    const catName = catId ? categoryById.get(catId)?.name ?? '—' : '—';
+    const badgeText = isConfirmed && !isAutoTrust ? '✓ Проверено' : '✓ Авто';
+    const badgeClass = isConfirmed && !isAutoTrust
+      ? 'bg-indigo-100 text-indigo-700'
+      : 'bg-emerald-100 text-emerald-700';
+    const borderClass = isConfirmed && !isAutoTrust
+      ? 'border-indigo-200 bg-indigo-50/40'
+      : 'border-emerald-200 bg-emerald-50/40';
+    return (
+      <div className={`overflow-hidden rounded-2xl border p-2.5 ${borderClass}`}>
+        <div className="flex items-center gap-3">
+          <span className="shrink-0 w-12 text-xs font-medium tabular-nums text-slate-500">
+            {formatDateShort(date)}
+          </span>
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <p
+              className="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium text-slate-900"
+              title={description}
+            >
+              {displayDescription}
+            </p>
+          </div>
+          <span className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${badgeClass}`}>
+            {badgeText}
+          </span>
+          <span className="inline-flex max-w-[10rem] shrink-0 truncate rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+            {catName}
+          </span>
+          <span className={`shrink-0 w-24 text-right text-sm font-semibold tabular-nums ${direction === 'income' ? 'text-emerald-600' : 'text-slate-900'}`}>
+            {formatSignedAmount(amount, direction)}
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setCollapsed(false)}
+            title="Изменить разметку"
+          >
+            Изменить
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`overflow-hidden rounded-2xl border p-3 ${zoneClass[zone] ?? zoneClass.yellow}`}>
+    <div className={`overflow-hidden rounded-2xl border p-3 ${
+      isConfirmed ? 'border-indigo-200 bg-indigo-50/30' : (zoneClass[zone] ?? zoneClass.yellow)
+    }`}>
       {/* Row 1: date + description + amount — компактная одна строка */}
       <div className="flex items-start gap-3">
         <span className="shrink-0 w-12 text-xs font-medium tabular-nums text-slate-500 pt-0.5">
@@ -849,6 +956,14 @@ function AttentionCard({
           ) : null}
         </div>
         <div className="shrink-0 flex items-center gap-2">
+          {isConfirmed && (
+            <span
+              className="inline-flex items-center gap-0.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-indigo-700"
+              title="Эта строка уже проверена и подтверждена"
+            >
+              ✓ Проверено
+            </span>
+          )}
           <span
             className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
               direction === 'income'
@@ -956,10 +1071,36 @@ function AttentionCard({
             categories={availableCategories}
             kindHint={kindFilter}
           />
-        ) : mainOp !== 'credit_operation' || creditKind === 'payment' ? null : (
-          <span className="text-xs text-slate-500">
-            Счёт назначь в секции «Импорт перед коммитом» ниже
-          </span>
+        ) : null}
+
+        {/* Целевой счёт перевода */}
+        {mainOp === 'transfer' && (
+          <select
+            value={pickedTargetAccountId ?? ''}
+            onChange={(e) => setPickedTargetAccountId(e.target.value ? Number(e.target.value) : null)}
+            className="h-8 max-w-[14rem] rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
+          >
+            <option value="">Куда перевод…</option>
+            {transferAccounts.map((acc) => (
+              <option key={acc.id} value={acc.id}>{acc.name}</option>
+            ))}
+          </select>
+        )}
+
+        {/* Кредитный счёт — для всех видов credit_operation */}
+        {mainOp === 'credit_operation' && (
+          <select
+            value={pickedCreditAccountId ?? ''}
+            onChange={(e) => setPickedCreditAccountId(e.target.value ? Number(e.target.value) : null)}
+            className="h-8 max-w-[16rem] rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
+          >
+            <option value="">
+              {creditAccounts.length === 0 ? 'Нет кредитных счетов' : 'Какой кредит…'}
+            </option>
+            {creditAccounts.map((acc) => (
+              <option key={acc.id} value={acc.id}>{acc.name}</option>
+            ))}
+          </select>
         )}
 
         <div className="ml-auto flex items-center gap-1">

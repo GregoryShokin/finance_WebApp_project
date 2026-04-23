@@ -129,12 +129,15 @@ export function ImportQueue({ onResume }: { onResume: (id: number) => void }) {
   const sessionsQuery = useQuery({
     queryKey: ['import-sessions'],
     queryFn: getImportSessions,
-    // Poll while any session is still auto-processing so the UI transitions
-    // from "обрабатывается" → "готова" without a manual reload.
+    // Poll while any session is still auto-processing (build_preview pipeline)
+    // OR while the debounced global transfer matcher is pending/running for
+    // any of the user's sessions. Either signal means the queue's "Переводы и
+    // дубли" view can still change — keep refreshing until both are quiet.
     refetchInterval: (query) => {
-      const data = query.state.data as { sessions?: Array<{ auto_preview_status?: string | null; status?: string }> } | undefined;
+      const data = query.state.data as { sessions?: Array<{ auto_preview_status?: string | null; transfer_match_status?: string | null; status?: string }> } | undefined;
       const inflight = (data?.sessions ?? []).some((s) =>
         s.auto_preview_status === 'pending' || s.auto_preview_status === 'running'
+        || s.transfer_match_status === 'pending' || s.transfer_match_status === 'running'
       );
       return inflight ? 2000 : false;
     },
