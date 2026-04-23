@@ -133,6 +133,7 @@ export function AccountForm({
   return (
     <form
       className="space-y-4"
+      autoComplete="off"
       onSubmit={handleSubmit((values) => {
         const payload: AccountFormValues = {
           ...values,
@@ -158,6 +159,10 @@ export function AccountForm({
         <Input
           id="account-name"
           placeholder="Например, Основная карта или Ипотека"
+          // Browser autofill (Chrome history) was suggesting account names
+          // entered by other users on the same machine. autoComplete="off"
+          // is enough for non-credential text inputs.
+          autoComplete="off"
           {...register('name', {
             required: 'Укажи название счёта',
             minLength: { value: 1, message: 'Название не должно быть пустым' },

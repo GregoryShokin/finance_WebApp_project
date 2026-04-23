@@ -14,7 +14,7 @@
  *   2. «Требуют твоего внимания» — карточки строк, всё остальное.
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, CheckCircle2, Loader2, Plus, Sparkles } from 'lucide-react';
@@ -236,6 +236,7 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
           <AttentionBucket
             rows={attentionFeed}
             categoryById={categoryById}
+            accountById={accountById}
             onAfterAction={afterMutation}
           />
 
@@ -542,10 +543,12 @@ function AutoTrustTableRow({
 function AttentionBucket({
   rows,
   categoryById,
+  accountById,
   onAfterAction,
 }: {
   rows: FeedRow[];
   categoryById: Map<number, Category>;
+  accountById: Map<number, Account>;
   onAfterAction: () => void;
 }) {
   if (rows.length === 0) {
@@ -570,6 +573,7 @@ function AttentionBucket({
             key={feedRow.row.id}
             feedRow={feedRow}
             categoryById={categoryById}
+            accountById={accountById}
             onAfterAction={onAfterAction}
           />
         ))}
@@ -581,10 +585,12 @@ function AttentionBucket({
 function AttentionCard({
   feedRow,
   categoryById,
+  accountById,
   onAfterAction,
 }: {
   feedRow: FeedRow;
   categoryById: Map<number, Category>;
+  accountById: Map<number, Account>;
   onAfterAction: () => void;
 }) {
   const { row, cluster, date, description, amount, direction, refundMatch } = feedRow;
@@ -659,6 +665,39 @@ function AttentionCard({
   const [creditInterest, setCreditInterest] = useState<string>('');
   const [pickedCatId, setPickedCatId] = useState<number | null>(suggestedCatId);
 
+  // ── Разбивка на части (split) ──────────────────────────────────────────────
+  // Каждая часть — мини-транзакция со своим типом, суммой и нужными полями.
+  // Сумма частей должна точно совпадать с суммой исходной строки.
+  type SplitPart = {
+    operation_type: 'regular' | 'transfer' | 'refund' | 'debt';
+    amount: string;
+    category_id: number | null;
+    target_account_id: number | null;
+    debt_direction: 'borrowed' | 'lent' | 'repaid' | 'collected';
+    description: string;
+  };
+  const emptyPart = (): SplitPart => ({
+    operation_type: 'regular',
+    amount: '',
+    category_id: null,
+    target_account_id: null,
+    debt_direction: 'borrowed',
+    description: '',
+  });
+  const [splitOpen, setSplitOpen] = useState<boolean>(false);
+  const [splitParts, setSplitParts] = useState<SplitPart[]>(() => [emptyPart(), emptyPart()]);
+  const totalAmount = Math.abs(parseFloat(amount.replace(',', '.')) || 0);
+  const splitSum = splitParts.reduce((acc, p) => acc + (parseFloat(p.amount.replace(',', '.')) || 0), 0);
+  const splitRemaining = +(totalAmount - splitSum).toFixed(2);
+  const splitValid = splitOpen && splitParts.length >= 2 && Math.abs(splitRemaining) < 0.01 && splitParts.every((p) => {
+    const amt = parseFloat(p.amount.replace(',', '.')) || 0;
+    if (amt <= 0) return false;
+    if ((p.operation_type === 'regular' || p.operation_type === 'refund') && !p.category_id) return false;
+    if (p.operation_type === 'transfer' && !p.target_account_id) return false;
+    if (p.operation_type === 'debt' && !p.category_id) return false;
+    return true;
+  });
+
   // Cluster meta (hypothesis + L1/L2 hints) приходит из /moderation-status
   // отдельным запросом, обычно ПОЗЖЕ первого рендера карточки. useState-инициализатор
   // отрабатывает один раз на пустых данных и оставляет mainOp='regular',
@@ -724,8 +763,14 @@ function AttentionCard({
     onError: (error: Error) => toast.error(`Не удалось исключить: ${error.message}`),
   });
 
+  // У строки есть «черновик» разбивки, если в state хоть одна часть имеет
+  // непустую сумму. Это не зависит от того, открыта ли модалка.
+  const hasSplitDraft = splitParts.some((p) => p.amount && parseFloat(p.amount.replace(',', '.')) > 0);
+
   // Проверяем готовность «Применить»:
   const canApply = (() => {
+    // Split-режим: если разбивка введена — обязательно валидной должна быть.
+    if (hasSplitDraft) return splitValid;
     if (mainOp === 'regular' || mainOp === 'refund') return Boolean(pickedCatId);
     if (mainOp === 'debt') return Boolean(pickedCatId);
     if (mainOp === 'credit_operation' && creditKind === 'payment') {
@@ -739,6 +784,25 @@ function AttentionCard({
 
   const applyMutation = useMutation({
     mutationFn: async () => {
+      // Split mode: отправляем разбивку. Сама строка остаётся regular —
+      // backend на коммите создаст N транзакций по частям, каждая со своим типом.
+      if (hasSplitDraft) {
+        const payload: Record<string, unknown> = {
+          type: direction,
+          operation_type: 'regular',
+          action: 'confirm',
+          split_items: splitParts.map((p) => ({
+            operation_type: p.operation_type,
+            amount: parseFloat(p.amount.replace(',', '.')) || 0,
+            category_id: p.category_id,
+            target_account_id: p.target_account_id,
+            debt_direction: p.operation_type === 'debt' ? p.debt_direction : null,
+            description: p.description || null,
+          })),
+        };
+        await updateImportRow(row.id, payload);
+        return;
+      }
       const payload: Record<string, unknown> = {
         type: mainOp === 'refund' ? 'income' : direction,
         operation_type: actualOpType,
@@ -898,7 +962,11 @@ function AttentionCard({
           </span>
         )}
 
-        <div className="ml-auto flex gap-1">
+        <div className="ml-auto flex items-center gap-1">
+          <SplitButton
+            active={splitOpen || splitParts.some((p) => p.amount)}
+            onClick={() => setSplitOpen(true)}
+          />
           <Button
             variant="secondary"
             size="sm"
@@ -925,6 +993,427 @@ function AttentionCard({
             Применить
           </Button>
         </div>
+      </div>
+
+      {/* Если у строки уже есть валидная разбивка — показываем компактный
+          summary вместо обычной (одной) категории, чтобы пользователь видел,
+          что разбивка сохранена и готова к применению. */}
+      {splitValid ? (
+        <div className="mt-1.5 ml-14 flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="font-semibold text-indigo-700">🔀 Разбито на {splitParts.length}:</span>
+          {splitParts.map((p, i) => {
+            const cat = p.category_id ? categoryById.get(p.category_id) : null;
+            const tgt = p.target_account_id ? accountById.get(p.target_account_id) : null;
+            const label = p.operation_type === 'transfer'
+              ? `→ ${tgt?.name ?? 'счёт'}`
+              : p.operation_type === 'debt'
+                ? `Долг (${p.debt_direction})`
+                : (cat?.name ?? '—');
+            return (
+              <span key={i} className="rounded-md bg-indigo-50 px-2 py-0.5 text-indigo-900">
+                {p.amount} ₽ · {label}
+              </span>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {/* Modal-портал с FLIP-анимацией из точки клика на иконку разбивки. */}
+      <SplitModal
+        isOpen={splitOpen}
+        onClose={() => setSplitOpen(false)}
+        sourceRow={{ amount: totalAmount, direction: direction === 'income' ? 'income' : 'expense', description: displayDescription }}
+      >
+        <SplitEditor
+          parts={splitParts}
+          setParts={setSplitParts}
+          totalAmount={totalAmount}
+          remaining={splitRemaining}
+          direction={direction === 'income' ? 'income' : 'expense'}
+          categoryById={categoryById}
+          accountById={accountById}
+          excludeAccountId={row.normalized_data?.account_id ? Number(row.normalized_data.account_id) : null}
+        />
+        <div className="mt-4 flex items-center justify-end gap-2 border-t border-slate-100 pt-4">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setSplitOpen(false)}
+          >
+            Готово
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={!splitValid}
+            onClick={() => setSplitOpen(false)}
+            title={splitValid ? 'Сохранить разбивку и закрыть окно' : 'Сначала распредели всю сумму'}
+          >
+            Сохранить разбивку
+          </Button>
+        </div>
+      </SplitModal>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Split icon button — стрелка с одним основанием и двумя вершинами
+// ───────────────────────────────────────────────────────────────────────────
+
+function SplitButton({ active, onClick }: { active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        // Save click coordinates so the modal can FLIP-animate from the icon
+        // (not from screen center). Read by SplitModal on next render.
+        (window as any).__lastSplitClick = { x: e.clientX, y: e.clientY };
+        onClick();
+      }}
+      title="Разбить операцию на несколько с разными типами"
+      className={`flex items-center justify-center h-8 w-8 rounded-md border transition ${
+        active
+          ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+          : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+      }`}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
+        <path d="M12 22V12" />
+        <path d="M12 12 L4 4" />
+        <path d="M12 12 L20 4" />
+        <path d="M2 4 L6 4 L6 8" />
+        <path d="M22 4 L18 4 L18 8" />
+      </svg>
+    </button>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Split modal — FLIP-анимация из точки клика, как у дашборда expandable-card
+// ───────────────────────────────────────────────────────────────────────────
+
+function SplitModal({
+  isOpen,
+  onClose,
+  sourceRow,
+  children,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  sourceRow: { amount: number; direction: 'income' | 'expense'; description: string };
+  children: React.ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [phase, setPhase] = useState<'closed' | 'measure' | 'enter' | 'open' | 'exit'>('closed');
+  const originRef = useRef<{ x: number; y: number } | null>(null);
+  const DURATION = 320;
+  const EASING = 'cubic-bezier(0.4, 0, 0.15, 1)';
+
+  // Captures click coordinates at the moment the modal is opened — used as the
+  // origin point for the FLIP animation. Falls back to viewport center.
+  useEffect(() => {
+    if (isOpen && phase === 'closed') {
+      const lastClick = (window as any).__lastSplitClick as { x: number; y: number } | undefined;
+      originRef.current = lastClick ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      setPhase('measure');
+    }
+  }, [isOpen, phase]);
+
+  useLayoutEffect(() => {
+    if (phase !== 'measure') return;
+    const panel = panelRef.current;
+    const origin = originRef.current;
+    if (!panel || !origin) return;
+    panel.style.transition = 'none';
+    panel.style.transform = 'translate(-50%, -50%) scale(1)';
+    panel.style.opacity = '0';
+    const rect = panel.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const dx = origin.x - centerX;
+    const dy = origin.y - centerY;
+    panel.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.05)`;
+    panel.getBoundingClientRect();
+    panel.style.transition = `transform ${DURATION}ms ${EASING}, opacity ${Math.round(DURATION * 0.6)}ms ease`;
+    panel.style.transform = 'translate(-50%, -50%) scale(1)';
+    panel.style.opacity = '1';
+    setPhase('enter');
+  }, [phase]);
+
+  useEffect(() => {
+    if (!isOpen && phase !== 'closed' && phase !== 'exit') {
+      const panel = panelRef.current;
+      const origin = originRef.current;
+      if (!panel || !origin) {
+        setPhase('closed');
+        return;
+      }
+      const rect = panel.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const dx = origin.x - centerX;
+      const dy = origin.y - centerY;
+      panel.style.transition = `transform ${DURATION}ms ${EASING}, opacity ${Math.round(DURATION * 0.5)}ms ease`;
+      panel.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.05)`;
+      panel.style.opacity = '0';
+      setPhase('exit');
+    }
+  }, [isOpen, phase]);
+
+  const handleTransitionEnd = useCallback(
+    (e: React.TransitionEvent) => {
+      if (e.propertyName !== 'transform') return;
+      if (phase === 'enter') setPhase('open');
+      if (phase === 'exit') setPhase('closed');
+    },
+    [phase],
+  );
+
+  useEffect(() => {
+    if (phase !== 'exit') return;
+    const t = setTimeout(() => setPhase('closed'), DURATION + 100);
+    return () => clearTimeout(t);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase === 'closed') return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', onKey);
+    const sw = window.innerWidth - document.documentElement.clientWidth;
+    document.body.style.overflow = 'hidden';
+    if (sw > 0) document.body.style.paddingRight = `${sw}px`;
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = '';
+      document.body.style.paddingRight = '';
+    };
+  }, [phase, onClose]);
+
+  if (phase === 'closed' || typeof document === 'undefined') return null;
+  const backdropVisible = phase === 'enter' || phase === 'open';
+
+  return createPortal(
+    <>
+      <div
+        onClick={onClose}
+        className="fixed inset-0 z-[100]"
+        style={{
+          backgroundColor: 'rgba(0,0,0,0.25)',
+          opacity: backdropVisible ? 1 : 0,
+          transition: `opacity ${DURATION}ms ease`,
+        }}
+      />
+      <div
+        ref={panelRef}
+        onTransitionEnd={handleTransitionEnd}
+        className="fixed left-1/2 top-1/2 z-[101] max-h-[85vh] w-[720px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-3xl bg-white p-6 shadow-[0_25px_80px_rgba(0,0,0,0.18)]"
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-4 top-4 z-10 flex size-8 items-center justify-center rounded-full bg-slate-100 text-base text-slate-500 transition hover:bg-slate-200"
+        >
+          ✕
+        </button>
+        <div className="mb-3 pr-10">
+          <h3 className="text-base font-semibold text-slate-900">Разбивка операции</h3>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {sourceRow.direction === 'income' ? '↓ Доход' : '↑ Расход'} · {sourceRow.amount.toFixed(2)} ₽ · {sourceRow.description}
+          </p>
+        </div>
+        <div className={phase === 'open' ? 'overflow-y-auto max-h-[calc(85vh-9rem)]' : ''}>
+          {children}
+        </div>
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Split editor — несколько частей, каждая со своим типом
+// ───────────────────────────────────────────────────────────────────────────
+
+function SplitEditor({
+  parts,
+  setParts,
+  totalAmount,
+  remaining,
+  direction,
+  categoryById,
+  accountById,
+  excludeAccountId,
+}: {
+  parts: Array<{
+    operation_type: 'regular' | 'transfer' | 'refund' | 'debt';
+    amount: string;
+    category_id: number | null;
+    target_account_id: number | null;
+    debt_direction: 'borrowed' | 'lent' | 'repaid' | 'collected';
+    description: string;
+  }>;
+  setParts: React.Dispatch<React.SetStateAction<typeof parts>>;
+  totalAmount: number;
+  remaining: number;
+  direction: 'income' | 'expense';
+  categoryById: Map<number, Category>;
+  accountById: Map<number, Account>;
+  excludeAccountId: number | null;
+}) {
+  const updatePart = (idx: number, patch: Partial<typeof parts[number]>) => {
+    setParts((prev) => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
+  };
+  const removePart = (idx: number) => {
+    setParts((prev) => (prev.length <= 2 ? prev : prev.filter((_, i) => i !== idx)));
+  };
+  const addPart = () => {
+    setParts((prev) => [...prev, {
+      operation_type: 'regular',
+      amount: '',
+      category_id: null,
+      target_account_id: null,
+      debt_direction: 'borrowed',
+      description: '',
+    }]);
+  };
+
+  // Категории, доступные для каждой части — фильтруем по типу.
+  const categoriesByKind = useMemo(() => {
+    const out: Record<string, Category[]> = { income: [], expense: [] };
+    for (const c of categoryById.values()) {
+      if (c.kind === 'income') out.income.push(c);
+      else out.expense.push(c);
+    }
+    out.income.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    out.expense.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    return out;
+  }, [categoryById]);
+
+  const accountsForTransfer = useMemo(
+    () => Array.from(accountById.values()).filter((a) => a.id !== excludeAccountId),
+    [accountById, excludeAccountId],
+  );
+
+  const remainingAbs = Math.abs(remaining);
+  const remainingClass = remainingAbs < 0.01
+    ? 'text-emerald-700'
+    : remaining > 0 ? 'text-amber-800' : 'text-rose-700';
+  const remainingLabel = remainingAbs < 0.01
+    ? '✓ суммы совпали'
+    : remaining > 0
+      ? `осталось распределить ${remaining.toFixed(2)} ₽`
+      : `превышение на ${Math.abs(remaining).toFixed(2)} ₽`;
+
+  return (
+    <div className="mt-2 ml-14 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-indigo-900">
+          Разбивка на {parts.length} {parts.length === 1 ? 'часть' : 'части'} · всего {totalAmount.toFixed(2)} ₽
+        </p>
+        <span className={`text-xs font-medium tabular-nums ${remainingClass}`}>{remainingLabel}</span>
+      </div>
+
+      {parts.map((part, idx) => {
+        const partKind: 'income' | 'expense' = part.operation_type === 'refund' ? 'income' : direction;
+        const partCategories = categoriesByKind[partKind] ?? [];
+        const needsCategory = part.operation_type === 'regular' || part.operation_type === 'refund' || part.operation_type === 'debt';
+        const needsTarget = part.operation_type === 'transfer';
+        const needsDebtDir = part.operation_type === 'debt';
+        return (
+          <div key={idx} className="rounded-xl border border-indigo-100 bg-white p-2 flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-slate-500 w-6">#{idx + 1}</span>
+            <select
+              value={part.operation_type}
+              onChange={(e) => updatePart(idx, {
+                operation_type: e.target.value as typeof part.operation_type,
+                category_id: null,
+                target_account_id: null,
+              })}
+              className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs"
+            >
+              <option value="regular">Обычная</option>
+              <option value="refund">Возврат</option>
+              <option value="transfer">Перевод</option>
+              <option value="debt">Долг</option>
+            </select>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={part.amount}
+              onChange={(e) => updatePart(idx, { amount: e.target.value })}
+              placeholder="Сумма"
+              className="h-8 w-24 rounded-lg border border-slate-200 bg-white px-2 text-xs tabular-nums text-right"
+            />
+            {needsCategory ? (
+              <select
+                value={part.category_id ?? ''}
+                onChange={(e) => updatePart(idx, { category_id: e.target.value ? Number(e.target.value) : null })}
+                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs min-w-[10rem]"
+              >
+                <option value="">— категория —</option>
+                {partCategories.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            ) : null}
+            {needsDebtDir ? (
+              <select
+                value={part.debt_direction}
+                onChange={(e) => updatePart(idx, { debt_direction: e.target.value as typeof part.debt_direction })}
+                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs"
+              >
+                <option value="borrowed">Мне заняли / взял</option>
+                <option value="lent">Я одолжил</option>
+                <option value="repaid">Я вернул долг</option>
+                <option value="collected">Мне вернули</option>
+              </select>
+            ) : null}
+            {needsTarget ? (
+              <select
+                value={part.target_account_id ?? ''}
+                onChange={(e) => updatePart(idx, { target_account_id: e.target.value ? Number(e.target.value) : null })}
+                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs min-w-[10rem]"
+              >
+                <option value="">— счёт назначения —</option>
+                {accountsForTransfer.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+            ) : null}
+            <input
+              type="text"
+              value={part.description}
+              onChange={(e) => updatePart(idx, { description: e.target.value })}
+              placeholder="Описание (опц.)"
+              className="h-8 flex-1 min-w-[8rem] rounded-lg border border-slate-200 bg-white px-2 text-xs"
+            />
+            <button
+              type="button"
+              onClick={() => removePart(idx)}
+              disabled={parts.length <= 2}
+              className="h-8 px-2 text-xs text-rose-600 disabled:text-slate-300"
+              title={parts.length <= 2 ? 'Нужно минимум 2 части' : 'Удалить часть'}
+            >
+              ✕
+            </button>
+          </div>
+        );
+      })}
+
+      <div className="flex items-center justify-between pt-1">
+        <button
+          type="button"
+          onClick={addPart}
+          className="text-xs font-medium text-indigo-700 hover:text-indigo-900"
+        >
+          + Добавить часть
+        </button>
+        <p className="text-[10px] text-slate-500">
+          Применить можно когда сумма частей точно равна сумме операции.
+        </p>
       </div>
     </div>
   );

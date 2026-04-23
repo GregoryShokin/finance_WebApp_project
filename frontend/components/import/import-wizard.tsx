@@ -13,6 +13,7 @@ import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib
 import { commitImport, getImportPreview, getImportSession, previewImport, updateImportRow, uploadImportFile } from '@/lib/api/imports';
 import { DescriptionAutocomplete } from '@/components/import/description-autocomplete';
 import { ImportModerationPanel } from '@/components/import/import-moderation-panel';
+import { PreviewProgressCard } from '@/components/import/preview-progress-card';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -756,18 +757,13 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
           setSplitRows({});
           setSplitQueries({});
         } else if (session.status === 'analyzed' && resolvedMapping.account_id && canBuildPreview) {
-          const preview = await previewImport(session.id, toPreviewPayload({
-            ...resolvedMapping,
-          }));
-          if (cancelled) return;
-
-          setPreviewResult(preview);
-          setCommitResult(null);
-          setRowForms({});
-          setRowQueries({});
-          setSplitExpanded({});
-          setSplitRows({});
-          setSplitQueries({});
+          // Прогоняем preview через previewMutation, а не через прямой
+          // previewImport — иначе previewMutation.isPending остаётся false
+          // и пользователь не видит прогресс-бар (вместо него висит EmptyState).
+          previewMutation.mutate({
+            sessionId: session.id,
+            payload: toPreviewPayload({ ...resolvedMapping }),
+          });
         }
 
         dequeueImportSession(session.id);
@@ -784,7 +780,15 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
     return () => {
       cancelled = true;
     };
-  }, [accounts, draftHydrated, initialSessionId, mappingForm.account_id]);
+    // ВАЖНО: не включаем mappingForm.account_id в deps. Внутри loadSession мы
+    // сами зовём setMappingForm({ account_id: session.account_id }), и если
+    // dep будет следить за account_id — useEffect re-fires, cleanup ставит
+    // cancelled=true для уже текущего loadSession, и setPreviewResult после
+    // await getImportPreview никогда не вызывается. В итоге preview скачивается
+    // (видно в Network как 200 OK), но в state не попадает — UI показывает
+    // «Preview пока нет» при загруженных в БД 600 строках.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts, draftHydrated, initialSessionId]);
 
   useEffect(() => {
     if (!draftHydrated || typeof window === 'undefined') return;
@@ -1945,8 +1949,10 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
             </div>
           ) : null}
         </Card>
+      ) : previewMutation.isPending ? (
+        <PreviewProgressCard rowCount={uploadResult?.total_rows ?? null} />
       ) : (
-        <EmptyState title="Preview пока нет" description={previewMutation.isPending ? 'Строим preview...' : 'После загрузки файла preview появится здесь автоматически.'} />
+        <EmptyState title="Preview пока нет" description="После загрузки файла preview появится здесь автоматически." />
       )}
 
       <AccountDialog

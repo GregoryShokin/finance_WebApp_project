@@ -7,7 +7,11 @@ import { ImportQueue } from '@/components/import/import-queue';
 import { AccountFreshnessBlock } from '@/components/import/account-freshness-block';
 
 export default function Page() {
-  const [resumeSessionId, setResumeSessionId] = useState<number | undefined>();
+  // Resume хранится с nonce, чтобы повторный клик на ТУ ЖЕ сессию в очереди
+  // тоже триггерил пересоздание ImportWizard (через key) и заново запускал
+  // auto-preview. Без nonce setState с тем же id — это no-op в React, и
+  // wizard думает, что ничего не изменилось.
+  const [resume, setResume] = useState<{ id: number; nonce: number } | undefined>();
 
   return (
     <PageShell
@@ -17,9 +21,9 @@ export default function Page() {
       <div className="space-y-6">
         <AccountFreshnessBlock />
         <ImportWizard
-          key={resumeSessionId ?? 'new'}
-          initialSessionId={resumeSessionId}
-          onSessionCreated={() => setResumeSessionId(undefined)}
+          key={resume ? `${resume.id}-${resume.nonce}` : 'new'}
+          initialSessionId={resume?.id}
+          onSessionCreated={() => setResume(undefined)}
           sidebar={(
             <div className="space-y-3">
               <div>
@@ -28,7 +32,7 @@ export default function Page() {
                   Выписки ожидающие проверки. Нажми чтобы продолжить.
                 </p>
               </div>
-              <ImportQueue onResume={(id) => setResumeSessionId(id)} />
+              <ImportQueue onResume={(id) => setResume({ id, nonce: Date.now() })} />
             </div>
           )}
         />
