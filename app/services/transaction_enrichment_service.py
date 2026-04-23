@@ -264,15 +264,6 @@ class TransactionEnrichmentService:
                 operation_confidence = 0.65
                 operation_reason = "перевод без счёта получателя: понижен до regular"
 
-        # Income transfer without a resolved source account is not a real inter-account
-        # transfer — the source is external (credit disbursement, bank transfer, etc.).
-        # Rule: every transfer must have both sides identified. If source is unknown → regular.
-        if operation_type == "transfer" and transaction_type == "income":
-            source_known = account_id is not None and account_id != session_account_id
-            if not source_known:
-                operation_type = "regular"
-                operation_confidence = 0.60
-                operation_reason = "доходный перевод без определённого источника: понижен до regular"
 
         category_id, category_confidence, category_reason = self._resolve_category(
             categories=categories,
