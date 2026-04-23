@@ -168,6 +168,10 @@ class TransactionEnrichmentService:
         user_id: int,
         session_account_id: int | None,
         normalized_payload: dict[str, Any],
+        accounts_cache: list | None = None,
+        categories_cache: list | None = None,
+        history_sample_cache: list | None = None,
+        skip_llm: bool = True,
     ) -> dict[str, Any]:
         description = str(normalized_payload.get("description") or "").strip()
         raw_type = str(normalized_payload.get("operation_type") or normalized_payload.get("type") or "").strip()
@@ -181,9 +185,10 @@ class TransactionEnrichmentService:
         history = self._find_history(
             user_id=user_id,
             normalized_description=normalized_description,
+            history_sample=history_sample_cache,
         )
-        accounts = self.account_repo.list_by_user(user_id)
-        categories = self.category_repo.list(user_id=user_id)
+        accounts = accounts_cache if accounts_cache is not None else self.account_repo.list_by_user(user_id)
+        categories = categories_cache if categories_cache is not None else self.category_repo.list(user_id=user_id)
 
         operation_type, operation_confidence, operation_reason = self._resolve_operation_type(
             description=description,
@@ -251,13 +256,23 @@ class TransactionEnrichmentService:
                     account_reason = inferred_source_reason
 
         # If operation was detected as transfer but no target account was found:
-        # - keyword-based detection (confidence >= 0.88): keep as transfer, user/matcher will resolve target
-        # - history-based detection (lower confidence): downgrade to regular to avoid false positives
+        # - strong keyword (confidence 0.92): явно свой счёт → keep as transfer
+        # - weak keyword (confidence 0.70) or history (< 0.88): downgrade to regular when no target found
         if operation_type == "transfer" and target_account_id is None:
             if operation_confidence < 0.88:
                 operation_type = "regular"
                 operation_confidence = 0.65
                 operation_reason = "перевод без счёта получателя: понижен до regular"
+
+        # Income transfer without a resolved source account is not a real inter-account
+        # transfer — the source is external (credit disbursement, bank transfer, etc.).
+        # Rule: every transfer must have both sides identified. If source is unknown → regular.
+        if operation_type == "transfer" and transaction_type == "income":
+            source_known = account_id is not None and account_id != session_account_id
+            if not source_known:
+                operation_type = "regular"
+                operation_confidence = 0.60
+                operation_reason = "доходный перевод без определённого источника: понижен до regular"
 
         category_id, category_confidence, category_reason = self._resolve_category(
             categories=categories,
@@ -267,6 +282,7 @@ class TransactionEnrichmentService:
             transaction_type=transaction_type,
             description=description,
             counterparty=counterparty,
+            skip_llm=skip_llm,
         )
 
         review_reasons: list[str] = []
@@ -320,14 +336,26 @@ class TransactionEnrichmentService:
         # Transfer keywords — только переводы между СВОИМИ счетами.
         # "Внешний перевод по номеру телефона" — это платёж другому человеку,
         # он остаётся regular с категорией (врач, аренда и т.д.).
+        #
+        # STRONG (confidence 0.92): явно между своими счетами → keeper даже без target.
+        if any(t in haystack for t in [
+            "перевод между счетами",
+            "перевод на свой счет",
+            "перевод на свой счёт",
+            "пополнение своего счета",
+            "пополнение своего счёта",
+        ]):
+            return "transfer", 0.92, "перевод по ключевым словам (явно между своими счетами)"
+
+        # WEAK (confidence 0.70): банковский термин — может быть договор/кредит/ссуда.
+        # Если target_account_id не найден → downgrade до regular (порог 0.88 в caller).
         if any(t in haystack for t in [
             "внутрибанковский перевод",
             "внутренний перевод",
-            "перевод между счетами",
             "зачислено по договору",
             "межбанковский перевод",
         ]):
-            return "transfer", 0.88, "перевод по ключевым словам (между своими счетами)"
+            return "transfer", 0.70, "возможный перевод по ключевым словам (требует подтверждения счёта)"
 
         # Credit card / loan repayment from a debit account → transfer to credit account.
         if any(t in haystack for t in [
@@ -549,6 +577,7 @@ class TransactionEnrichmentService:
         transaction_type: str,
         description: str,
         counterparty: str,
+        skip_llm: bool = False,
     ) -> tuple[int | None, float, str]:
         # Transfers and refunds never need a category — they are not spending.
         if operation_type in ("transfer", "refund"):
@@ -592,7 +621,7 @@ class TransactionEnrichmentService:
         if best_category is not None and best_score >= 1.2:
             confidence = 0.8 if best_score >= 2.4 else 0.72
             return best_category.id, confidence, "Р В Р’В Р РЋРІвЂћСћР В Р’В Р вЂ™Р’В°Р В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’ВµР В Р’В Р РЋРІР‚вЂњР В Р’В Р РЋРІР‚СћР В Р Р‹Р В РІР‚С™Р В Р’В Р РЋРІР‚ВР В Р Р‹Р В Р РЏ Р В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В°Р В Р’В Р Р†РІР‚С›РІР‚вЂњР В Р’В Р СћРІР‚ВР В Р’В Р вЂ™Р’ВµР В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В° Р В Р’В Р РЋРІР‚вЂќР В Р’В Р РЋРІР‚Сћ Р В Р’В Р РЋРІР‚СњР В Р’В Р вЂ™Р’В»Р В Р Р‹Р В РІР‚в„–Р В Р Р‹Р Р†Р вЂљР Р‹Р В Р’В Р вЂ™Р’ВµР В Р’В Р В РІР‚В Р В Р Р‹Р Р†Р вЂљРІвЂћвЂ“Р В Р’В Р РЋР’В Р В Р Р‹Р В РЎвЂњР В Р’В Р вЂ™Р’В»Р В Р’В Р РЋРІР‚СћР В Р’В Р В РІР‚В Р В Р’В Р вЂ™Р’В°Р В Р’В Р РЋР’В Р В Р’В Р РЋРІР‚В Р В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В°Р В Р’В Р вЂ™Р’В·Р В Р’В Р В РІР‚В Р В Р’В Р вЂ™Р’В°Р В Р’В Р В РІР‚В¦Р В Р’В Р РЋРІР‚ВР В Р Р‹Р В РІР‚в„– Р В Р’В Р РЋРІР‚СћР В Р’В Р РЋРІР‚вЂќР В Р’В Р вЂ™Р’ВµР В Р Р‹Р В РІР‚С™Р В Р’В Р вЂ™Р’В°Р В Р Р‹Р Р†Р вЂљР’В Р В Р’В Р РЋРІР‚ВР В Р’В Р РЋРІР‚В"
-        if self.llm_service.is_enabled:
+        if not skip_llm and self.llm_service.is_enabled:
             llm_category_id, llm_confidence, llm_reason = self.llm_service.classify_transaction_category(
                 description=description or "",
                 amount=None,
@@ -645,11 +674,11 @@ class TransactionEnrichmentService:
         confidence = 0.86 if overlap_score >= 4 else 0.78
         return category.id, confidence, "Р В Р’В Р РЋРІвЂћСћР В Р’В Р вЂ™Р’В°Р В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’ВµР В Р’В Р РЋРІР‚вЂњР В Р’В Р РЋРІР‚СћР В Р Р‹Р В РІР‚С™Р В Р’В Р РЋРІР‚ВР В Р Р‹Р В Р РЏ Р В Р’В Р РЋРІР‚СћР В Р’В Р РЋРІР‚вЂќР В Р Р‹Р В РІР‚С™Р В Р’В Р вЂ™Р’ВµР В Р’В Р СћРІР‚ВР В Р’В Р вЂ™Р’ВµР В Р’В Р вЂ™Р’В»Р В Р’В Р вЂ™Р’ВµР В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В° Р В Р’В Р РЋРІР‚вЂќР В Р’В Р РЋРІР‚Сћ Р В Р’В Р РЋРІР‚вЂќР В Р’В Р РЋРІР‚СћР В Р Р‹Р Р†Р вЂљР’В¦Р В Р’В Р РЋРІР‚СћР В Р’В Р вЂ™Р’В¶Р В Р’В Р РЋРІР‚ВР В Р’В Р РЋР’В Р В Р’В Р РЋРІР‚СћР В Р’В Р РЋРІР‚вЂќР В Р’В Р РЋРІР‚ВР В Р Р‹Р В РЎвЂњР В Р’В Р вЂ™Р’В°Р В Р’В Р В РІР‚В¦Р В Р’В Р РЋРІР‚ВР В Р Р‹Р В Р РЏР В Р’В Р РЋР’В Р В Р’В Р РЋРІР‚ВР В Р’В Р вЂ™Р’В· Р В Р’В Р РЋРІР‚ВР В Р Р‹Р В РЎвЂњР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р РЋРІР‚СћР В Р Р‹Р В РІР‚С™Р В Р’В Р РЋРІР‚ВР В Р’В Р РЋРІР‚В"
 
-    def _find_history(self, *, user_id: int, normalized_description: str | None) -> list[Transaction]:
+    def _find_history(self, *, user_id: int, normalized_description: str | None, history_sample: list | None = None) -> list[Transaction]:
         if not normalized_description:
             return []
 
-        sample = self.transaction_repo.list_transactions(
+        sample = history_sample if history_sample is not None else self.transaction_repo.list_transactions(
             user_id=user_id,
         )[:300]
 
