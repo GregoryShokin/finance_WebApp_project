@@ -45,6 +45,7 @@ MAX_DATE_DIFF_HOURS = 12
 # Keywords that strongly indicate a payment/purchase — NOT an internal transfer.
 # If either candidate contains one of these, the pair score is penalized.
 _ANTI_TRANSFER_KEYWORDS = frozenset({
+    # Кредитные/регулярные платежи
     "регулярный платёж",
     "регулярный платеж",
     "оплата кредита",
@@ -55,6 +56,43 @@ _ANTI_TRANSFER_KEYWORDS = frozenset({
     "оплата покупки",
     "минимальный платёж",
     "минимальный платеж",
+    # Оплата услуг — общий маркер платёжки. Без него Megafon/MTS/Beeline и
+    # любые «Оплата услуг X» легко спариваются как «перевод» по совпадению
+    # суммы — они ведь такие же expense, просто другая сессия имеет income
+    # 500 ₽ той же датой, и matcher делает ложно-положительную пару.
+    "оплата услуг",
+    "оплата товаров",
+    # Мобильные операторы и популярные сервисы
+    "mbank",
+    "м.банк",
+    "megafon",
+    "мегафон",
+    "mts",
+    "мтс",
+    "beeline",
+    "билайн",
+    "tele2",
+    "теле2",
+    "yota",
+    "йота",
+    # Магазины / маркетплейсы — им явно не нужен matcher по переводу
+    "yandex",
+    "яндекс",
+    "ozon",
+    "озон",
+    "wildberries",
+    "вайлдберриз",
+    "spbu",
+    "kassa",
+    "касса",
+    # Подписки и сервисы
+    "подписк",
+    "subscription",
+    "spotify",
+    "youtube",
+    "netflix",
+    "apple",
+    "google",
 })
 
 

@@ -129,9 +129,14 @@ class ImportPreviewResponse(BaseModel):
 
 
 class ImportSplitItemRequest(BaseModel):
-    category_id: int
+    # Each split part is a self-contained mini-transaction with its own type.
+    # operation_type defaults to 'regular' for backwards compat with the old
+    # split UI (which only knew about regular splits with a category).
+    operation_type: str = "regular"
+    category_id: int | None = None       # required for regular / refund / debt
+    target_account_id: int | None = None  # required when operation_type='transfer'
+    debt_direction: str | None = None    # required when operation_type='debt'
     amount: Decimal
-    debt_direction: str | None = None
     description: str | None = None
 
 

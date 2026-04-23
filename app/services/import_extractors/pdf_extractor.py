@@ -999,7 +999,7 @@ class PdfExtractor(BaseExtractor):
                 balance_after = normalized_balance
 
         description_parts: list[str] = []
-        cleaned_header = SIGNED_AMOUNT_RX.sub("", header_line).strip(" -Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р вЂ Р В РІР‚С™Р РЋРЎв„ўР В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р вЂ Р В РІР‚С™Р РЋРЎС™\t")
+        cleaned_header = SIGNED_AMOUNT_RX.sub("", header_line).strip(" -₽—–−	")
         if cleaned_header:
             description_parts.append(cleaned_header)
 
@@ -1086,7 +1086,7 @@ class PdfExtractor(BaseExtractor):
         normalized = value.replace("₽", "").strip()
         normalized = normalized.replace("\u2013", "-").replace("\u2212", "-")
         sign = ""
-        if normalized and normalized[0] in "+-Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р вЂ Р В РІР‚С™Р РЋРЎв„ўР В Р’В Р В РІР‚В Р В Р вЂ Р Р†Р вЂљРЎв„ўР вЂ™Р’В¬Р В Р вЂ Р В РІР‚С™Р Р†РІР‚С›РЎС›":
+        if normalized and normalized[0] in "+-₽—–−":
             sign = cls._normalize_sign(normalized[0])
             normalized = normalized[1:].strip()
         normalized_amount = cls._normalize_amount(normalized)
