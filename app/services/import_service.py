@@ -614,7 +614,10 @@ class ImportService:
         if payload.split_items is not None:
             normalized["split_items"] = [
                 {
+                    "operation_type": (item.operation_type or "regular"),
                     "category_id": item.category_id,
+                    "target_account_id": item.target_account_id,
+                    "debt_direction": item.debt_direction,
                     "amount": str(item.amount),
                     "description": item.description,
                 }
@@ -800,37 +803,79 @@ class ImportService:
             split_items = normalized.get("split_items") or []
             normalized["target_account_id"] = None
             if split_items:
+                # Split parts can each have their own operation_type — one bank
+                # debit may economically be a regular expense + a debt slice +
+                # a transfer slice, etc. Validate each part by its own type
+                # instead of forcing them all to be regular.
+                ALLOWED_PART_TYPES = {
+                    "regular", "transfer", "refund", "debt",
+                    "investment_buy", "investment_sell",
+                    "credit_disbursement", "credit_payment", "credit_early_repayment",
+                }
+                ALLOWED_DEBT_DIRS = {"borrowed", "lent", "repaid", "collected"}
                 valid_split = True
                 split_total = Decimal("0")
                 cleaned_split_items: list[dict[str, Any]] = []
                 for item in split_items:
-                    category_id = item.get("category_id") if isinstance(item, dict) else None
-                    raw_amount = item.get("amount") if isinstance(item, dict) else None
-                    description = item.get("description") if isinstance(item, dict) else None
-                    if category_id in (None, "", 0):
+                    if not isinstance(item, dict):
                         valid_split = False
-                        local_issues.append("Р’ СЂР°Р·Р±РёРІРєРµ РґР»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё РЅСѓР¶РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
+                        local_issues.append("Разбивка заполнена некорректно.")
                         break
+
+                    part_op = str(item.get("operation_type") or "regular").lower()
+                    if part_op not in ALLOWED_PART_TYPES:
+                        valid_split = False
+                        local_issues.append(f"Неизвестный тип операции в части разбивки: {part_op}.")
+                        break
+
+                    raw_amount = item.get("amount")
+                    description = item.get("description")
                     try:
                         split_amount = self._to_decimal(raw_amount)
                     except (ValueError, TypeError, InvalidOperation):
                         valid_split = False
-                        local_issues.append("Р Р°Р·Р±РёРІРєР° Р·Р°РїРѕР»РЅРµРЅР° РЅРµРєРѕСЂСЂРµРєС‚РЅРѕ.")
+                        local_issues.append("Разбивка заполнена некорректно.")
                         break
                     if split_amount <= 0:
                         valid_split = False
-                        local_issues.append("Р’ СЂР°Р·Р±РёРІРєРµ РєР°Р¶РґР°СЏ С‡Р°СЃС‚СЊ РґРѕР»Р¶РЅР° Р±С‹С‚СЊ Р±РѕР»СЊС€Рµ РЅСѓР»СЏ.")
+                        local_issues.append("В разбивке каждая часть должна быть больше нуля.")
                         break
-                    split_total += split_amount
+
+                    category_id = item.get("category_id")
+                    target_account_id = item.get("target_account_id")
+                    debt_direction = item.get("debt_direction")
+
+                    # Per-type required fields. Refuse silently-incomplete
+                    # parts up front instead of letting commit_import blow up.
+                    if part_op in ("regular", "refund"):
+                        if category_id in (None, "", 0):
+                            valid_split = False
+                            local_issues.append("В разбивке для каждой части нужна категория.")
+                            break
+                    if part_op == "debt":
+                        if not debt_direction or str(debt_direction).lower() not in ALLOWED_DEBT_DIRS:
+                            valid_split = False
+                            local_issues.append("В части-долге укажи направление: занял/одолжил/возврат/получил.")
+                            break
+                    if part_op == "transfer":
+                        if target_account_id in (None, "", 0):
+                            valid_split = False
+                            local_issues.append("В части-переводе укажи счёт назначения.")
+                            break
+
                     cleaned_split_items.append({
-                        "category_id": int(category_id),
+                        "operation_type": part_op,
+                        "category_id": int(category_id) if category_id not in (None, "", 0) else None,
+                        "target_account_id": int(target_account_id) if target_account_id not in (None, "", 0) else None,
+                        "debt_direction": str(debt_direction).lower() if debt_direction else None,
                         "amount": str(split_amount),
                         "description": description,
                     })
+                    split_total += split_amount
 
                 if valid_split and amount_decimal is not None and split_total != amount_decimal:
                     valid_split = False
-                    local_issues.append("РЎСѓРјРјР° СЂР°Р·Р±РёРІРєРё РґРѕР»Р¶РЅР° СЃРѕРІРїР°РґР°С‚СЊ СЃ СЃСѓРјРјРѕР№ С‚СЂР°РЅР·Р°РєС†РёРё.")
+                    local_issues.append("Сумма разбивки должна совпадать с суммой транзакции.")
 
                 if valid_split and len(cleaned_split_items) >= 2:
                     normalized["split_items"] = cleaned_split_items
@@ -840,7 +885,8 @@ class ImportService:
             else:
                 normalized["split_items"] = []
                 if normalized.get("category_id") in (None, "", 0):
-                    local_issues.append("РќРµ РІС‹Р±СЂР°РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
+                    local_issues.append("Не выбрана категория.")
+                    status = "warning"
                     status = "warning"
         elif operation_type == "refund":
             normalized["target_account_id"] = None
@@ -1067,6 +1113,12 @@ class ImportService:
 
         effective_currency = (payload.currency or account.currency or "RUB").upper()
 
+        # Prefetch once before the loop — accounts/categories/history don't
+        # change during a single preview run so fetching them 600 times is waste.
+        _accounts_cache = self.enrichment.account_repo.list_by_user(user_id)
+        _categories_cache = self.enrichment.category_repo.list(user_id=user_id)
+        _history_cache = self.enrichment.transaction_repo.list_transactions(user_id=user_id)[:300]
+
         for index, raw_row in enumerate(table.rows, start=1):
             normalized: dict[str, Any] = {}
             status = "ready"
@@ -1086,6 +1138,9 @@ class ImportService:
                 enrichment = self.enrichment.enrich_import_row(
                     user_id=user_id,
                     session_account_id=payload.account_id,
+                    accounts_cache=_accounts_cache,
+                    categories_cache=_categories_cache,
+                    history_sample_cache=_history_cache,
                     normalized_payload=normalized,
                 )
                 normalized.update(enrichment)
@@ -1471,10 +1526,22 @@ class ImportService:
                         imported_count += 1
                 else:
                     for payload in payloads:
-                        last_transaction = self.transaction_service.create_transaction(
-                            user_id=user_id,
-                            payload=payload,
-                        )
+                        part_op = str(payload.get("operation_type") or "regular").lower()
+                        if part_op == "transfer" and payload.get("target_account_id") not in (None, "", 0):
+                            # Split-part transfer: create a transfer pair just like
+                            # the row-level transfer branch above. Each pair counts
+                            # as one imported transaction (the income side is
+                            # auto-created and isn't a separate user-visible row).
+                            expense_tx, _income_tx = self._create_transfer_pair(
+                                user_id=user_id,
+                                payload=payload,
+                            )
+                            last_transaction = expense_tx
+                        else:
+                            last_transaction = self.transaction_service.create_transaction(
+                                user_id=user_id,
+                                payload=payload,
+                            )
                         imported_count += 1
                 self.import_repo.update_row(
                     row,
@@ -1725,23 +1792,51 @@ class ImportService:
 
         split_items = normalized.get("split_items") or []
         if str(operation_type) == "regular" and isinstance(split_items, list) and len(split_items) >= 2:
+            # Each part may carry its OWN operation_type. Inherit common fields
+            # from base_payload (account, currency, date), but rebuild the
+            # type-specific slice from the part's own values.
             payloads: list[dict[str, Any]] = []
             for item in split_items:
                 if not isinstance(item, dict):
-                    raise ValueError("Р Р°Р·Р±РёРІРєР° Р·Р°РїРѕР»РЅРµРЅР° РЅРµРєРѕСЂСЂРµРєС‚РЅРѕ.")
-                category_id = item.get("category_id")
-                if category_id in (None, "", 0):
-                    raise ValueError("Р’ СЂР°Р·Р±РёРІРєРµ РґР»СЏ РєР°Р¶РґРѕР№ С‡Р°СЃС‚Рё РЅСѓР¶РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
+                    raise ValueError("Разбивка заполнена некорректно.")
+                part_op = str(item.get("operation_type") or "regular").lower()
                 split_amount = ImportService._to_decimal(item.get("amount"))
                 description = (item.get("description") or base_payload["description"] or "")[:1000]
+                part_category_id = item.get("category_id")
+                part_target_account_id = item.get("target_account_id")
+                part_debt_direction = item.get("debt_direction")
+
+                if part_op in ("regular", "refund") and part_category_id in (None, "", 0):
+                    raise ValueError("В разбивке для каждой части нужна категория.")
+                if part_op == "transfer" and part_target_account_id in (None, "", 0):
+                    raise ValueError("В части-переводе нужно указать счёт назначения.")
+                if part_op == "debt" and not part_debt_direction:
+                    raise ValueError("В части-долге нужно указать направление долга.")
+
+                # type/direction for the part: regular/debt/transfer keep the
+                # original direction (expense — money leaves the source account).
+                # refund inverts to income (money returned to the source account).
+                if part_op == "refund":
+                    part_type = "income"
+                else:
+                    part_type = base_payload["type"]
+
                 payloads.append({
                     **base_payload,
-                    "category_id": int(category_id),
+                    "operation_type": part_op,
+                    "type": part_type,
                     "amount": split_amount,
                     "description": description,
+                    "category_id": int(part_category_id) if part_category_id not in (None, "", 0) else None,
+                    "target_account_id": int(part_target_account_id) if part_target_account_id not in (None, "", 0) else None,
+                    "debt_direction": str(part_debt_direction).lower() if part_debt_direction else None,
+                    # Credit/investment slice fields — not relevant for individual
+                    # parts; they always come from the original row, not split.
+                    "credit_account_id": None,
+                    "credit_principal_amount": None,
+                    "credit_interest_amount": None,
                 })
             return payloads
-
         return [base_payload]
 
     @staticmethod
