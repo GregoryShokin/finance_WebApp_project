@@ -14,17 +14,24 @@
  *   2. «Требуют твоего внимания» — карточки строк, всё остальное.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CheckCircle2, Loader2, Plus, Sparkles } from 'lucide-react';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
+import { AnimatePresence, motion } from 'framer-motion';
+import { AlertTriangle, CheckCircle2, Loader2, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Collapsible, CollapsibleChevron } from '@/components/ui/collapsible';
+import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
+import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 import { CategoryDialog } from '@/components/categories/category-dialog';
 import {
+  attachRowToCluster,
   commitImport,
   excludeImportRow,
+  getBulkClusters,
   getImportPreview,
   getModerationStatus,
   parkImportRow,
@@ -32,10 +39,12 @@ import {
   unexcludeImportRow,
   updateImportRow,
 } from '@/lib/api/imports';
+import { ClusterCard, type ClusterCardMeta } from '@/components/import/cluster-card';
 import { getAccounts } from '@/lib/api/accounts';
 import { createCategory, getCategories } from '@/lib/api/categories';
 import type { Account } from '@/types/account';
 import type {
+  BulkClustersResponse,
   ClusterHypothesis,
   ModerationClusterEntry,
   ModerationStatusResponse,
@@ -126,6 +135,16 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
     queryFn: () => getAccounts(),
   });
 
+  // Bulk-clusters (И-08 Этап 2/3): only fetched once moderation reached
+  // preview-ready — clusters need normalized rows, which only exist after
+  // build_preview. Refetched on preview/moderation-status invalidation so
+  // a bulk-apply result immediately shrinks the card list.
+  const bulkClustersQuery = useQuery({
+    queryKey: ['imports', sessionId, 'bulk-clusters'],
+    queryFn: () => getBulkClusters(sessionId),
+    enabled: true,
+  });
+
   const categoryById = useMemo(() => {
     const map = new Map<number, Category>();
     for (const cat of categoriesQuery.data ?? []) map.set(cat.id, cat);
@@ -179,11 +198,25 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
   const excludedFeed = feed.filter((f) => f.isExcluded);
   const activeFeed = feed.filter((f) => !f.isExcluded);
 
+  // Row IDs that are already covered by a bulk-cluster card — user handles them
+  // there (one click for the whole group). Remove them from the attention queue
+  // so they don't show up twice.
+  const bulkClusterRowIds = useMemo<Set<number>>(() => {
+    const ids = new Set<number>();
+    for (const c of bulkClustersQuery.data?.fingerprint_clusters ?? []) {
+      for (const id of c.row_ids) ids.add(id);
+    }
+    return ids;
+  }, [bulkClustersQuery.data]);
+
   const transferFeed = activeFeed.filter(
     (f) => f.operationType === 'transfer' || f.isDuplicateSide,
   );
   const remainingFeed = activeFeed.filter(
-    (f) => f.operationType !== 'transfer' && !f.isDuplicateSide,
+    (f) =>
+      f.operationType !== 'transfer' &&
+      !f.isDuplicateSide &&
+      !bulkClusterRowIds.has(f.row.id),
   );
   // Single bucket now: everything that needs the user's attention OR has been
   // confirmed (manually or auto-trusted by LLM). Confirmed/auto rows render in
@@ -241,11 +274,12 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
   const isFailed = status?.status === 'failed';
   const isSkipped = status?.status === 'skipped';
 
-  const afterMutation = () => {
+  const afterMutation = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'moderation-status'] });
     queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'preview'] });
+    queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'bulk-clusters'] });
     onClustersChanged?.();
-  };
+  }, [queryClient, sessionId, onClustersChanged]);
 
   const feedReady = status && (isReady || status.processed_clusters > 0) && feed.length > 0;
 
@@ -291,12 +325,22 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
 
           <TransfersBucket rows={transferFeed} accountById={accountById} />
 
+          <BulkClustersBucket
+            sessionId={sessionId}
+            bulkClusters={bulkClustersQuery.data}
+            rows={previewQuery.data?.rows ?? []}
+            categories={categoriesQuery.data ?? []}
+            onApplied={afterMutation}
+          />
+
           <AttentionBucket
             rows={orderedRemainingFeed}
             attentionCount={attentionCount}
             confirmedCount={confirmedCount}
             categoryById={categoryById}
             accountById={accountById}
+            sessionId={sessionId}
+            bulkClusters={bulkClustersQuery.data}
             onAfterAction={afterMutation}
           />
 
@@ -435,49 +479,69 @@ function TransfersBucket({ rows, accountById }: { rows: FeedRow[]; accountById: 
   const duplicateRows = rows.filter((r) => r.isDuplicateSide);
   const totalAmount = primaryRows.reduce((s, r) => s + Math.abs(Number(r.amount) || 0), 0);
 
+  const summaryNode = (
+    <div className="flex w-full items-start gap-3">
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-indigo-500 text-white">
+        <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4M16 17H4m0 0l4 4m-4-4l4-4"/>
+        </svg>
+      </div>
+      <div className="flex-1">
+        <p className="text-base font-semibold text-slate-950">Переводы и дубли</p>
+        <p className="text-sm text-slate-600">
+          {primaryRows.length} перевод{primaryRows.length !== 1 ? 'а' : ''} на {formatMoney(totalAmount)} · {duplicateRows.length} дубл{duplicateRows.length === 1 ? 'ь' : 'я'} — система распознала автоматически
+        </p>
+      </div>
+    </div>
+  );
+
+  const collapsedNode = (
+    <div className="flex w-full items-start gap-3">
+      <div className="flex-1">{summaryNode}</div>
+      <CollapsibleChevron open={expanded} className="size-4 shrink-0 self-center text-indigo-500" />
+    </div>
+  );
+
+  const expandedNode = (
+    <div className="flex flex-col gap-3">
+      <div className="pr-10">
+        {summaryNode}
+      </div>
+      <div
+        className="overflow-y-auto rounded-2xl bg-white p-3 ring-1 ring-indigo-200"
+        style={{ maxHeight: 'min(58vh, 600px)' }}
+      >
+        <table className="w-full text-sm table-fixed">
+          <thead>
+            <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
+              <th className="px-2 py-2 w-14">Дата</th>
+              <th className="px-2 py-2">Описание</th>
+              <th className="px-2 py-2 w-44">Счета</th>
+              <th className="px-2 py-2 text-right w-28">Сумма</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {rows.map((feedRow) => (
+              <TransferRow key={feedRow.row.id} feedRow={feedRow} accountById={accountById} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-xs text-slate-400">
+        Переводы между своими счетами создадутся как одна парная транзакция — вторая сторона уже учтена. Настоящие дубли (повтор одной и той же выписки) не импортируются повторно.
+      </p>
+    </div>
+  );
+
   return (
     <div className="rounded-2xl border-2 border-indigo-200 bg-indigo-50 p-4">
-      <button
-        type="button"
-        className="flex w-full items-start gap-3 text-left"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-indigo-500 text-white">
-          <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4M16 17H4m0 0l4 4m-4-4l4-4"/>
-          </svg>
-        </div>
-        <div className="flex-1">
-          <p className="text-base font-semibold text-slate-950">Переводы и дубли</p>
-          <p className="text-sm text-slate-600">
-            {primaryRows.length} перевод{primaryRows.length !== 1 ? 'а' : ''} на {formatMoney(totalAmount)} · {duplicateRows.length} дубл{duplicateRows.length === 1 ? 'ь' : 'я'} — система распознала автоматически
-          </p>
-        </div>
-        <span className="shrink-0 text-xs text-indigo-500 self-center">{expanded ? '▲ Скрыть' : '▼ Показать'}</span>
-      </button>
-
-      {expanded && (
-        <div className="mt-3 rounded-2xl bg-white p-3 ring-1 ring-indigo-200">
-          <table className="w-full text-sm table-fixed">
-            <thead>
-              <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
-                <th className="px-2 py-2 w-14">Дата</th>
-                <th className="px-2 py-2">Описание</th>
-                <th className="px-2 py-2 w-44">Счета</th>
-                <th className="px-2 py-2 text-right w-28">Сумма</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {rows.map((feedRow) => (
-                <TransferRow key={feedRow.row.id} feedRow={feedRow} accountById={accountById} />
-              ))}
-            </tbody>
-          </table>
-          <p className="mt-2 text-xs text-slate-400">
-            Переводы между своими счетами создадутся как одна парная транзакция — вторая сторона уже учтена. Настоящие дубли (повтор одной и той же выписки) не импортируются повторно.
-          </p>
-        </div>
-      )}
+      <ExpandableCard
+        isOpen={expanded}
+        onToggle={() => setExpanded((v) => !v)}
+        expandedWidth="860px"
+        collapsed={collapsedNode}
+        expanded={expandedNode}
+      />
     </div>
   );
 }
@@ -547,6 +611,106 @@ function TransferRow({ feedRow, accountById }: { feedRow: FeedRow; accountById: 
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Bulk clusters — массовое подтверждение паттернов (И-08 Этап 2/3)
+// ───────────────────────────────────────────────────────────────────────────
+
+function BulkClustersBucket({
+  sessionId,
+  bulkClusters,
+  rows,
+  categories,
+  onApplied,
+}: {
+  sessionId: number;
+  bulkClusters: BulkClustersResponse | undefined;
+  rows: ImportPreviewRow[];
+  categories: Category[];
+  onApplied: () => void;
+}) {
+  const rowsById = useMemo(() => {
+    const map = new Map<number, ImportPreviewRow>();
+    for (const r of rows) map.set(r.id, r);
+    return map;
+  }, [rows]);
+
+  // Build cards: brand clusters first (biggest wins), then fingerprint
+  // clusters that aren't already included in any brand group.
+  const cards = useMemo<Array<{ key: string; meta: ClusterCardMeta }>>(() => {
+    if (!bulkClusters) return [];
+    const fpById = new Map<string, typeof bulkClusters.fingerprint_clusters[number]>();
+    for (const c of bulkClusters.fingerprint_clusters) fpById.set(c.fingerprint, c);
+
+    const coveredByBrand = new Set<string>();
+    const result: Array<{ key: string; meta: ClusterCardMeta }> = [];
+
+    for (const brand of bulkClusters.brand_clusters) {
+      const members = brand.fingerprint_cluster_ids
+        .map((id) => fpById.get(id))
+        .filter((m): m is typeof bulkClusters.fingerprint_clusters[number] => !!m);
+      if (members.length === 0) continue;
+      for (const m of members) coveredByBrand.add(m.fingerprint);
+      result.push({
+        key: `brand:${brand.brand}:${brand.direction}`,
+        meta: {
+          kind: 'brand',
+          brand: brand.brand,
+          direction: brand.direction,
+          count: brand.count,
+          totalAmount: brand.total_amount,
+          members,
+        },
+      });
+    }
+
+    const standalone = bulkClusters.fingerprint_clusters.filter(
+      (c) => !coveredByBrand.has(c.fingerprint),
+    );
+    for (const c of standalone) {
+      result.push({
+        key: `fp:${c.fingerprint}`,
+        meta: { kind: 'fingerprint', cluster: c },
+      });
+    }
+    return result;
+  }, [bulkClusters]);
+
+  if (!bulkClusters || cards.length === 0) return null;
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <p className="text-base font-semibold text-slate-900">
+          Группы похожих операций ({cards.length})
+        </p>
+        <p className="text-xs text-slate-500">
+          Подтверди сразу весь паттерн одним действием
+        </p>
+      </div>
+      <div className="space-y-2">
+        <AnimatePresence initial={false}>
+          {cards.map((card, index) => (
+            <motion.div
+              key={card.key}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0, transition: { delay: Math.min(index, 10) * 0.02 } }}
+              exit={{ opacity: 0, x: 24, transition: { duration: 0.14 } }}
+            >
+              <ClusterCard
+                meta={card.meta}
+                sessionId={sessionId}
+                rowsById={rowsById}
+                categories={categories}
+                onApplied={onApplied}
+              />
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Единая лента: требующие внимания + проверенные/auto-trust (collapsed)
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -556,6 +720,8 @@ function AttentionBucket({
   confirmedCount,
   categoryById,
   accountById,
+  sessionId,
+  bulkClusters,
   onAfterAction,
 }: {
   rows: FeedRow[];
@@ -563,6 +729,8 @@ function AttentionBucket({
   confirmedCount: number;
   categoryById: Map<number, Category>;
   accountById: Map<number, Account>;
+  sessionId: number;
+  bulkClusters: BulkClustersResponse | undefined;
   onAfterAction: () => void;
 }) {
   if (rows.length === 0) {
@@ -588,30 +756,130 @@ function AttentionBucket({
         <p className="text-base font-semibold text-slate-900">{headerLabel}</p>
         <p className="text-xs text-slate-500">{subLabel}</p>
       </div>
-      <div className="space-y-2">
-        {rows.map((feedRow) => (
-          <AttentionCard
-            key={feedRow.row.id}
-            feedRow={feedRow}
-            categoryById={categoryById}
-            accountById={accountById}
-            onAfterAction={onAfterAction}
-          />
-        ))}
-      </div>
+      {rows.length <= VIRTUAL_LIST_THRESHOLD ? (
+        <div className="space-y-2">
+          {rows.map((feedRow) => (
+            <AttentionCard
+              key={feedRow.row.id}
+              feedRow={feedRow}
+              categoryById={categoryById}
+              accountById={accountById}
+              sessionId={sessionId}
+              bulkClusters={bulkClusters}
+              onAfterAction={onAfterAction}
+            />
+          ))}
+        </div>
+      ) : (
+        <VirtualAttentionList
+          rows={rows}
+          categoryById={categoryById}
+          accountById={accountById}
+          sessionId={sessionId}
+          bulkClusters={bulkClusters}
+          onAfterAction={onAfterAction}
+        />
+      )}
     </div>
   );
 }
 
-function AttentionCard({
+// Below this threshold we render the plain list — virtualization has its own
+// overhead (scroll-margin math, measureElement ResizeObservers) that is not
+// worth paying for short sessions.
+const VIRTUAL_LIST_THRESHOLD = 30;
+
+function VirtualAttentionList({
+  rows,
+  categoryById,
+  accountById,
+  sessionId,
+  bulkClusters,
+  onAfterAction,
+}: {
+  rows: FeedRow[];
+  categoryById: Map<number, Category>;
+  accountById: Map<number, Account>;
+  sessionId: number;
+  bulkClusters: BulkClustersResponse | undefined;
+  onAfterAction: () => void;
+}) {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+
+  // useWindowVirtualizer needs the parent's offsetTop as scrollMargin so it
+  // knows where this list starts in the document. Recompute on layout changes
+  // (sections above this one can collapse/expand and shift the offset).
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const update = () => setScrollMargin(el.getBoundingClientRect().top + window.scrollY);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(document.body);
+    window.addEventListener('resize', update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, []);
+
+  const virtualizer = useWindowVirtualizer({
+    count: rows.length,
+    estimateSize: () => 160,
+    overscan: 4,
+    scrollMargin,
+  });
+
+  const items = virtualizer.getVirtualItems();
+  const totalSize = virtualizer.getTotalSize();
+
+  return (
+    <div ref={parentRef} style={{ position: 'relative', height: totalSize }}>
+      {items.map((virtualRow) => {
+        const feedRow = rows[virtualRow.index];
+        return (
+          <div
+            key={feedRow.row.id}
+            data-index={virtualRow.index}
+            ref={virtualizer.measureElement}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+              paddingBottom: 8,
+            }}
+          >
+            <AttentionCard
+              feedRow={feedRow}
+              categoryById={categoryById}
+              accountById={accountById}
+              sessionId={sessionId}
+              bulkClusters={bulkClusters}
+              onAfterAction={onAfterAction}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AttentionCardImpl({
   feedRow,
   categoryById,
   accountById,
+  sessionId,
+  bulkClusters,
   onAfterAction,
 }: {
   feedRow: FeedRow;
   categoryById: Map<number, Category>;
   accountById: Map<number, Account>;
+  sessionId: number;
+  bulkClusters: BulkClustersResponse | undefined;
   onAfterAction: () => void;
 }) {
   const { row, cluster, date, description, amount, direction, refundMatch } = feedRow;
@@ -808,6 +1076,24 @@ function AttentionCard({
     mutationFn: () => excludeImportRow(row.id),
     onSuccess: () => { toast.success(`Исключено #${row.row_index}`); onAfterAction(); },
     onError: (error: Error) => toast.error(`Не удалось исключить: ${error.message}`),
+  });
+
+  const [attachPickerOpen, setAttachPickerOpen] = useState(false);
+  const attachMutation = useMutation({
+    mutationFn: (targetFingerprint: string) =>
+      attachRowToCluster(sessionId, row.id, targetFingerprint),
+    onSuccess: (data) => {
+      setAttachPickerOpen(false);
+      const targetTitle = bulkClusters?.fingerprint_clusters.find(
+        (c) => c.fingerprint === data.target_fingerprint,
+      );
+      const label = targetTitle
+        ? headerFromClusterForToast(targetTitle)
+        : 'кластер';
+      toast.success(`Добавлено в ${label}`);
+      onAfterAction();
+    },
+    onError: (error: Error) => toast.error(`Не удалось добавить: ${error.message}`),
   });
 
   // У строки есть «черновик» разбивки, если в state хоть одна часть имеет
@@ -1075,38 +1361,44 @@ function AttentionCard({
 
         {/* Целевой счёт перевода */}
         {mainOp === 'transfer' && (
-          <select
-            value={pickedTargetAccountId ?? ''}
-            onChange={(e) => setPickedTargetAccountId(e.target.value ? Number(e.target.value) : null)}
-            className="h-8 max-w-[14rem] rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
-          >
-            <option value="">Куда перевод…</option>
-            {transferAccounts.map((acc) => (
-              <option key={acc.id} value={acc.id}>{acc.name}</option>
-            ))}
-          </select>
+          <CompactSelect
+            value={pickedTargetAccountId ? String(pickedTargetAccountId) : ''}
+            onChange={(v) => setPickedTargetAccountId(v ? Number(v) : null)}
+            options={transferAccounts.map((acc) => ({ value: String(acc.id), label: acc.name }))}
+            placeholder="Куда перевод…"
+            widthClassName="w-48"
+            ariaLabel="Счёт назначения перевода"
+          />
         )}
 
         {/* Кредитный счёт — для всех видов credit_operation */}
         {mainOp === 'credit_operation' && (
-          <select
-            value={pickedCreditAccountId ?? ''}
-            onChange={(e) => setPickedCreditAccountId(e.target.value ? Number(e.target.value) : null)}
-            className="h-8 max-w-[16rem] rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
-          >
-            <option value="">
-              {creditAccounts.length === 0 ? 'Нет кредитных счетов' : 'Какой кредит…'}
-            </option>
-            {creditAccounts.map((acc) => (
-              <option key={acc.id} value={acc.id}>{acc.name}</option>
-            ))}
-          </select>
+          <CompactSelect
+            value={pickedCreditAccountId ? String(pickedCreditAccountId) : ''}
+            onChange={(v) => setPickedCreditAccountId(v ? Number(v) : null)}
+            options={creditAccounts.map((acc) => ({ value: String(acc.id), label: acc.name }))}
+            placeholder={creditAccounts.length === 0 ? 'Нет кредитных счетов' : 'Какой кредит…'}
+            widthClassName="w-56"
+            ariaLabel="Кредитный счёт"
+          />
         )}
 
         <div className="ml-auto flex items-center gap-1">
           <SplitButton
             active={splitOpen || splitParts.some((p) => p.amount)}
             onClick={() => setSplitOpen(true)}
+          />
+          <AttachToClusterButton
+            open={attachPickerOpen}
+            setOpen={setAttachPickerOpen}
+            clusters={bulkClusters?.fingerprint_clusters ?? []}
+            sourceDirection={direction === 'income' ? 'income' : 'expense'}
+            sourceFingerprint={(row.normalized_data as Record<string, any>)?.fingerprint ?? null}
+            sourceAmount={totalAmount}
+            sourceDescription={displayDescription}
+            onAttach={(fp) => attachMutation.mutate(fp)}
+            isPending={attachMutation.isPending}
+            categoryById={categoryById}
           />
           <Button
             variant="secondary"
@@ -1228,6 +1520,341 @@ function SplitButton({ active, onClick }: { active: boolean; onClick: () => void
       </svg>
     </button>
   );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Attach-to-cluster — кнопка + picker
+// Anchored popover with type-ahead filter; lists every existing cluster in
+// the current session so the user can redirect a stray row into a cluster.
+// ───────────────────────────────────────────────────────────────────────────
+
+function AttachToClusterButton({
+  open,
+  setOpen,
+  clusters,
+  sourceDirection,
+  sourceFingerprint,
+  sourceAmount,
+  sourceDescription,
+  onAttach,
+  isPending,
+  categoryById,
+}: {
+  open: boolean;
+  setOpen: (next: boolean) => void;
+  clusters: BulkClustersResponse['fingerprint_clusters'];
+  sourceDirection: 'income' | 'expense';
+  sourceFingerprint: string | null;
+  sourceAmount: number;
+  sourceDescription: string;
+  onAttach: (targetFingerprint: string) => void;
+  isPending: boolean;
+  categoryById: Map<number, Category>;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(e) => {
+          // Save click coords so the modal can FLIP-animate from the icon.
+          (window as any).__lastAttachClick = { x: e.clientX, y: e.clientY };
+          setOpen(true);
+        }}
+        title="Добавить в существующий кластер"
+        disabled={isPending}
+        className={`flex items-center justify-center h-8 w-8 rounded-md border transition ${
+          open
+            ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+            : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+        } disabled:opacity-50`}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
+          {/* "merge-into" icon: two lines joining into one */}
+          <path d="M6 4v4l-3 3" />
+          <path d="M18 4v4l3 3" />
+          <path d="M12 11v10" />
+          <path d="M3 11h18" />
+        </svg>
+      </button>
+      <AttachClusterModal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        sourceRow={{ amount: sourceAmount, direction: sourceDirection, description: sourceDescription }}
+      >
+        <AttachClusterPicker
+          clusters={clusters}
+          sourceDirection={sourceDirection}
+          sourceFingerprint={sourceFingerprint}
+          onPick={onAttach}
+          isPending={isPending}
+          categoryById={categoryById}
+        />
+      </AttachClusterModal>
+    </>
+  );
+}
+
+// FLIP-modal for "Attach to cluster" — same pattern as SplitModal (animates
+// from the click point to screen center and back).
+function AttachClusterModal({
+  isOpen,
+  onClose,
+  sourceRow,
+  children,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  sourceRow: { amount: number; direction: 'income' | 'expense'; description: string };
+  children: React.ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [phase, setPhase] = useState<'closed' | 'measure' | 'enter' | 'open' | 'exit'>('closed');
+  const originRef = useRef<{ x: number; y: number } | null>(null);
+  const DURATION = 320;
+  const EASING = 'cubic-bezier(0.4, 0, 0.15, 1)';
+
+  useEffect(() => {
+    if (isOpen && phase === 'closed') {
+      const lastClick = (window as any).__lastAttachClick as { x: number; y: number } | undefined;
+      originRef.current = lastClick ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      setPhase('measure');
+    }
+  }, [isOpen, phase]);
+
+  useLayoutEffect(() => {
+    if (phase !== 'measure') return;
+    const panel = panelRef.current;
+    const origin = originRef.current;
+    if (!panel || !origin) return;
+    panel.style.transition = 'none';
+    panel.style.transform = 'translate(-50%, -50%) scale(1)';
+    panel.style.opacity = '0';
+    const rect = panel.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const dx = origin.x - centerX;
+    const dy = origin.y - centerY;
+    panel.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.05)`;
+    panel.getBoundingClientRect();
+    panel.style.transition = `transform ${DURATION}ms ${EASING}, opacity ${Math.round(DURATION * 0.6)}ms ease`;
+    panel.style.transform = 'translate(-50%, -50%) scale(1)';
+    panel.style.opacity = '1';
+    setPhase('enter');
+  }, [phase]);
+
+  useEffect(() => {
+    if (!isOpen && phase !== 'closed' && phase !== 'exit') {
+      const panel = panelRef.current;
+      const origin = originRef.current;
+      if (!panel || !origin) {
+        setPhase('closed');
+        return;
+      }
+      const rect = panel.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const dx = origin.x - centerX;
+      const dy = origin.y - centerY;
+      panel.style.transition = `transform ${DURATION}ms ${EASING}, opacity ${Math.round(DURATION * 0.5)}ms ease`;
+      panel.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.05)`;
+      panel.style.opacity = '0';
+      setPhase('exit');
+    }
+  }, [isOpen, phase]);
+
+  const handleTransitionEnd = useCallback(
+    (e: React.TransitionEvent) => {
+      if (e.propertyName !== 'transform') return;
+      if (phase === 'enter') setPhase('open');
+      if (phase === 'exit') setPhase('closed');
+    },
+    [phase],
+  );
+
+  useEffect(() => {
+    if (phase !== 'exit') return;
+    const t = setTimeout(() => setPhase('closed'), DURATION + 100);
+    return () => clearTimeout(t);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase === 'closed') return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', onKey);
+    const sw = window.innerWidth - document.documentElement.clientWidth;
+    document.body.style.overflow = 'hidden';
+    if (sw > 0) document.body.style.paddingRight = `${sw}px`;
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = '';
+      document.body.style.paddingRight = '';
+    };
+  }, [phase, onClose]);
+
+  if (phase === 'closed' || typeof document === 'undefined') return null;
+  const backdropVisible = phase === 'enter' || phase === 'open';
+
+  return createPortal(
+    <>
+      <div
+        onClick={onClose}
+        className="fixed inset-0 z-[100]"
+        style={{
+          backgroundColor: 'rgba(0,0,0,0.25)',
+          opacity: backdropVisible ? 1 : 0,
+          transition: `opacity ${DURATION}ms ease`,
+        }}
+      />
+      <div
+        ref={panelRef}
+        onTransitionEnd={handleTransitionEnd}
+        className="fixed left-1/2 top-1/2 z-[101] max-h-[85vh] w-[720px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-3xl bg-white p-6 shadow-[0_25px_80px_rgba(0,0,0,0.18)]"
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-4 top-4 z-10 flex size-8 items-center justify-center rounded-full bg-slate-100 text-base text-slate-500 transition hover:bg-slate-200"
+        >
+          ✕
+        </button>
+        <div className="mb-3 pr-10">
+          <h3 className="text-base font-semibold text-slate-900">Добавить в кластер</h3>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {sourceRow.direction === 'income' ? '↓ Доход' : '↑ Расход'} · {sourceRow.amount.toFixed(2)} ₽ · {sourceRow.description}
+          </p>
+        </div>
+        <div className={phase === 'open' ? 'overflow-y-auto max-h-[calc(85vh-9rem)]' : ''}>
+          {children}
+        </div>
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+// Full-width cluster picker — rendered inside AttachClusterModal. Lists every
+// matching cluster (no cap), with type-ahead filter. Each row shows the
+// cluster's category badge, direction, count, total amount.
+function AttachClusterPicker({
+  clusters,
+  sourceDirection,
+  sourceFingerprint,
+  onPick,
+  isPending,
+  categoryById,
+}: {
+  clusters: BulkClustersResponse['fingerprint_clusters'];
+  sourceDirection: 'income' | 'expense';
+  sourceFingerprint: string | null;
+  onPick: (targetFingerprint: string) => void;
+  isPending: boolean;
+  categoryById: Map<number, Category>;
+}) {
+  const [query, setQuery] = useState('');
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return clusters
+      .filter((c) => c.direction === sourceDirection)
+      .filter((c) => c.fingerprint !== sourceFingerprint)
+      .filter((c) => {
+        if (!q) return true;
+        const title = headerFromClusterForToast(c).toLowerCase();
+        const skel = (c.skeleton ?? '').toLowerCase();
+        return title.includes(q) || skel.includes(q);
+      });
+  }, [clusters, query, sourceDirection, sourceFingerprint]);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <input
+        autoFocus
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Поиск по названию или шаблону…"
+        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-800 focus:border-slate-400 focus:outline-none"
+      />
+      <p className="text-xs text-slate-400">
+        Показаны {filtered.length} из {clusters.filter((c) => c.direction === sourceDirection).length}{' '}
+        {sourceDirection === 'income' ? 'приходных' : 'расходных'} кластеров. Клик по любому — операция уйдёт в этот кластер и запомнит привязку для будущих импортов.
+      </p>
+      {filtered.length === 0 ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+          {clusters.length === 0
+            ? 'В этой сессии пока нет сформированных кластеров.'
+            : 'Ничего не найдено. Попробуй другой запрос.'}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {filtered.map((c) => {
+            const title = headerFromClusterForToast(c);
+            const catName = c.candidate_category_id
+              ? categoryById.get(c.candidate_category_id)?.name ?? null
+              : null;
+            const skelLine = (c.skeleton ?? '').trim();
+            const skelShort = skelLine.length > 90 ? skelLine.slice(0, 90) + '…' : skelLine;
+            const total = Math.round(Math.abs(Number(c.total_amount) || 0));
+            return (
+              <button
+                key={c.fingerprint}
+                type="button"
+                disabled={isPending}
+                onClick={() => onPick(c.fingerprint)}
+                className="flex w-full flex-col gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/30 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900">
+                    {title}
+                  </span>
+                  {catName ? (
+                    <span className="shrink-0 rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">
+                      {catName}
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-500">
+                      Без категории
+                    </span>
+                  )}
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                      c.direction === 'income'
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : 'bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    {c.direction === 'income' ? 'Доход' : 'Расход'}
+                  </span>
+                </div>
+                {skelShort ? (
+                  <p className="truncate text-xs text-slate-500">{skelShort}</p>
+                ) : null}
+                <div className="flex items-center gap-3 text-xs text-slate-400">
+                  <span>{c.count} операц{c.count === 1 ? 'ия' : c.count < 5 ? 'ии' : 'ий'}</span>
+                  <span>·</span>
+                  <span className="tabular-nums">{total.toLocaleString('ru-RU')} ₽</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function headerFromClusterForToast(
+  c: BulkClustersResponse['fingerprint_clusters'][number],
+): string {
+  // Prefer a human-readable identifier value, then skeleton.
+  if (c.identifier_value) {
+    return `«${c.identifier_value}»`;
+  }
+  const s = (c.skeleton ?? '').trim();
+  if (!s) return 'кластер';
+  const trimmed = s.length > 60 ? s.slice(0, 60) + '…' : s;
+  return `«${trimmed}»`;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1466,20 +2093,23 @@ function SplitEditor({
         return (
           <div key={idx} className="rounded-xl border border-indigo-100 bg-white p-2 flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-slate-500 w-6">#{idx + 1}</span>
-            <select
+            <CompactSelect
               value={part.operation_type}
-              onChange={(e) => updatePart(idx, {
-                operation_type: e.target.value as typeof part.operation_type,
+              onChange={(v) => updatePart(idx, {
+                operation_type: v as typeof part.operation_type,
                 category_id: null,
                 target_account_id: null,
               })}
-              className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs"
-            >
-              <option value="regular">Обычная</option>
-              <option value="refund">Возврат</option>
-              <option value="transfer">Перевод</option>
-              <option value="debt">Долг</option>
-            </select>
+              options={[
+                { value: 'regular', label: 'Обычная' },
+                { value: 'refund', label: 'Возврат' },
+                { value: 'transfer', label: 'Перевод' },
+                { value: 'debt', label: 'Долг' },
+              ]}
+              placeholder="Тип"
+              widthClassName="w-32"
+              ariaLabel="Тип операции части"
+            />
             <input
               type="text"
               inputMode="decimal"
@@ -1489,40 +2119,39 @@ function SplitEditor({
               className="h-8 w-24 rounded-lg border border-slate-200 bg-white px-2 text-xs tabular-nums text-right"
             />
             {needsCategory ? (
-              <select
-                value={part.category_id ?? ''}
-                onChange={(e) => updatePart(idx, { category_id: e.target.value ? Number(e.target.value) : null })}
-                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs min-w-[10rem]"
-              >
-                <option value="">— категория —</option>
-                {partCategories.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
+              <CompactSelect
+                value={part.category_id != null ? String(part.category_id) : ''}
+                onChange={(v) => updatePart(idx, { category_id: v ? Number(v) : null })}
+                options={partCategories.map((c) => ({ value: String(c.id), label: c.name }))}
+                placeholder="— категория —"
+                widthClassName="w-44"
+                ariaLabel="Категория части"
+              />
             ) : null}
             {needsDebtDir ? (
-              <select
+              <CompactSelect
                 value={part.debt_direction}
-                onChange={(e) => updatePart(idx, { debt_direction: e.target.value as typeof part.debt_direction })}
-                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs"
-              >
-                <option value="borrowed">Мне заняли / взял</option>
-                <option value="lent">Я одолжил</option>
-                <option value="repaid">Я вернул долг</option>
-                <option value="collected">Мне вернули</option>
-              </select>
+                onChange={(v) => updatePart(idx, { debt_direction: v as typeof part.debt_direction })}
+                options={[
+                  { value: 'borrowed', label: 'Мне заняли / взял' },
+                  { value: 'lent', label: 'Я одолжил' },
+                  { value: 'repaid', label: 'Я вернул долг' },
+                  { value: 'collected', label: 'Мне вернули' },
+                ]}
+                placeholder="Направление"
+                widthClassName="w-44"
+                ariaLabel="Направление долга"
+              />
             ) : null}
             {needsTarget ? (
-              <select
-                value={part.target_account_id ?? ''}
-                onChange={(e) => updatePart(idx, { target_account_id: e.target.value ? Number(e.target.value) : null })}
-                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs min-w-[10rem]"
-              >
-                <option value="">— счёт назначения —</option>
-                {accountsForTransfer.map((a) => (
-                  <option key={a.id} value={a.id}>{a.name}</option>
-                ))}
-              </select>
+              <CompactSelect
+                value={part.target_account_id != null ? String(part.target_account_id) : ''}
+                onChange={(v) => updatePart(idx, { target_account_id: v ? Number(v) : null })}
+                options={accountsForTransfer.map((a) => ({ value: String(a.id), label: a.name }))}
+                placeholder="— счёт назначения —"
+                widthClassName="w-48"
+                ariaLabel="Счёт назначения"
+              />
             ) : null}
             <input
               type="text"
@@ -1560,6 +2189,13 @@ function SplitEditor({
   );
 }
 
+// Memoized so a re-render of the parent (triggered by unrelated state like
+// polling refetches or `scrollMargin` updates in the virtualizer) does not
+// rerender every card in the list. Props are shallow-compared; `categoryById`
+// and `accountById` are already stable `useMemo` Maps, and `onAfterAction` is
+// a stable `useCallback` in the root panel.
+const AttentionCard = memo(AttentionCardImpl);
+
 // ───────────────────────────────────────────────────────────────────────────
 // Bucket 3: Исключённые — коллапсируемый список с кнопкой «Вернуть»
 // ───────────────────────────────────────────────────────────────────────────
@@ -1581,14 +2217,15 @@ function ExcludedBucket({
         type="button"
         className="flex w-full items-center justify-between text-left"
         onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
       >
         <span className="text-sm font-semibold text-slate-600">
           Исключено из импорта ({rows.length})
         </span>
-        <span className="text-xs text-slate-400">{expanded ? '▲ Скрыть' : '▼ Показать'}</span>
+        <CollapsibleChevron open={expanded} className="size-4 text-slate-400" />
       </button>
 
-      {expanded && (
+      <Collapsible open={expanded}>
         <div className="mt-3 space-y-1">
           {rows.map((feedRow) => (
             <ExcludedRow
@@ -1598,7 +2235,7 @@ function ExcludedBucket({
             />
           ))}
         </div>
-      )}
+      </Collapsible>
     </div>
   );
 }
@@ -1633,6 +2270,62 @@ function ExcludedRow({ feedRow, onAfterAction }: { feedRow: FeedRow; onAfterActi
   );
 }
 
+/**
+ * Filterable search-select for row-level pickers. Wraps SearchSelect with a
+ * local query state so call sites don't need to plumb through query+setQuery.
+ *
+ * Dropdown opens as an animated portal-overlay below the input (anchored), so
+ * it doesn't push neighbouring items in flex-wrap rows.
+ */
+function CompactSelect({
+  value,
+  onChange,
+  options,
+  placeholder,
+  widthClassName,
+  tone = 'slate',
+  ariaLabel,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<{ value: string; label: string }>;
+  placeholder: string;
+  widthClassName: string;
+  tone?: 'slate' | 'indigo';
+  ariaLabel: string;
+}) {
+  const reactId = useId();
+  const selected = options.find((o) => o.value === value) ?? null;
+  const [query, setQuery] = useState<string>(selected?.label ?? '');
+  useEffect(() => {
+    setQuery(selected?.label ?? '');
+  }, [selected]);
+  const items: SearchSelectItem[] = options.map((o) => ({ value: o.value, label: o.label }));
+  const toneClass = tone === 'indigo'
+    ? 'bg-indigo-50 text-indigo-900 border-indigo-200 focus:border-indigo-400'
+    : 'bg-white text-slate-900 border-slate-200 focus:border-slate-400';
+  return (
+    <SearchSelect
+      id={reactId}
+      label={ariaLabel}
+      hideLabel
+      placeholder={placeholder}
+      widthClassName={widthClassName}
+      query={query}
+      setQuery={setQuery}
+      items={items}
+      selectedValue={value}
+      onSelect={(item) => {
+        onChange(item.value);
+        setQuery(item.label);
+      }}
+      showAllOnFocus
+      inputSize="sm"
+      inputClassName={`text-xs font-medium shadow-sm ${toneClass}`}
+    />
+  );
+}
+
 function MainOpPicker({
   value,
   onChange,
@@ -1649,15 +2342,14 @@ function MainOpPicker({
     { value: 'credit_operation', label: 'Кредитная операция' },
   ];
   return (
-    <select
+    <CompactSelect
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
-    >
-      {options.map((opt) => (
-        <option key={opt.value} value={opt.value}>{opt.label}</option>
-      ))}
-    </select>
+      onChange={onChange}
+      options={options}
+      placeholder="Тип"
+      widthClassName="w-36"
+      ariaLabel="Тип операции"
+    />
   );
 }
 
@@ -1671,21 +2363,23 @@ function SubPicker({
   options: Array<{ value: string; label: string }>;
 }) {
   return (
-    <select
+    <CompactSelect
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-8 rounded-lg border border-indigo-200 bg-indigo-50 px-2 text-xs font-medium text-indigo-900 shadow-sm outline-none focus:border-indigo-400"
-    >
-      {options.map((opt) => (
-        <option key={opt.value} value={opt.value}>{opt.label}</option>
-      ))}
-    </select>
+      onChange={onChange}
+      options={options}
+      placeholder="Уточнить"
+      widthClassName="w-44"
+      tone="indigo"
+      ariaLabel="Уточнение типа"
+    />
   );
 }
 
 /**
- * Inline autocomplete picker: type to filter by name. Shows "+ новая категория"
- * button at the end of the list that opens the standard CategoryDialog.
+ * Category picker with type-ahead filtering. Uses the shared SearchSelect so
+ * the animation and keyboard behavior match every other picker on the import
+ * page. "+ новая категория" opens the standard CategoryDialog when the typed
+ * text doesn't match an existing category.
  */
 function CategoryPicker({
   value,
@@ -1699,54 +2393,19 @@ function CategoryPicker({
   kindHint: 'income' | 'expense';
 }) {
   const queryClient = useQueryClient();
-  const [query, setQuery] = useState('');
-  const [open, setOpen] = useState(false);
+  const reactId = useId();
+  const selected = value != null ? categories.find((c) => c.id === value) ?? null : null;
+  const [query, setQuery] = useState<string>(selected?.name ?? '');
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const selected = value ? categories.find((c) => c.id === value) ?? null : null;
-  const displayValue = open ? query : selected?.name ?? '';
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return categories.slice(0, 10);
-    return categories.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 10);
-  }, [categories, query]);
-
-  // Position the floating dropdown anchored to the input. Runs in layout
-  // effect so we pick up the right coordinates before paint.
-  useLayoutEffect(() => {
-    if (!open || !inputRef.current) return;
-    const update = () => {
-      if (!inputRef.current) return;
-      const r = inputRef.current.getBoundingClientRect();
-      setPos({ top: r.bottom + 4, left: r.left, width: Math.max(240, r.width) });
-    };
-    update();
-    window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
-    return () => {
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
-    };
-  }, [open]);
-
-  // Close on outside click — looks at both input and dropdown nodes (they
-  // live in different DOM trees because of the portal).
   useEffect(() => {
-    if (!open) return;
-    function onDown(e: MouseEvent) {
-      const t = e.target as Node;
-      if (inputRef.current && inputRef.current.contains(t)) return;
-      if (dropdownRef.current && dropdownRef.current.contains(t)) return;
-      setOpen(false);
-      setQuery('');
-    }
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
+    setQuery(selected?.name ?? '');
+  }, [selected]);
+
+  const items: SearchSelectItem[] = categories.map((c) => ({ value: String(c.id), label: c.name }));
+  const trimmed = query.trim();
+  const exactMatch = categories.some((c) => c.name.toLowerCase() === trimmed.toLowerCase());
+  const canCreate = trimmed.length > 0 && !exactMatch;
 
   const createMutation = useMutation({
     mutationFn: (payload: CreateCategoryPayload) => createCategory(payload),
@@ -1755,86 +2414,42 @@ function CategoryPicker({
       queryClient.invalidateQueries({ queryKey: ['categories'] });
       setDialogOpen(false);
       onChange(created.id);
+      setQuery(created.name);
     },
     onError: (error: Error) => {
       toast.error(`Не удалось создать: ${error.message}`);
     },
   });
 
-  const dropdown =
-    open && pos && typeof document !== 'undefined'
-      ? createPortal(
-          <div
-            ref={dropdownRef}
-            className="z-[100] rounded-xl border border-slate-200 bg-white shadow-xl"
-            style={{ position: 'fixed', top: pos.top, left: pos.left, width: pos.width }}
-          >
-            <ul className="max-h-56 overflow-y-auto py-1">
-              {filtered.length === 0 ? (
-                <li className="px-3 py-2 text-xs text-slate-400">Ничего не найдено</li>
-              ) : (
-                filtered.map((c) => (
-                  <li key={c.id}>
-                    <button
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => {
-                        onChange(c.id);
-                        setOpen(false);
-                        setQuery('');
-                      }}
-                      className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50 ${
-                        c.id === value ? 'bg-slate-100 font-medium' : ''
-                      }`}
-                    >
-                      <span className="truncate">{c.name}</span>
-                      {c.id === value ? <span className="text-xs text-slate-400">✓</span> : null}
-                    </button>
-                  </li>
-                ))
-              )}
-            </ul>
-            <div className="border-t border-slate-100 p-1">
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => {
-                  setOpen(false);
-                  setDialogOpen(true);
-                }}
-                className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs font-medium text-indigo-600 hover:bg-indigo-50"
-              >
-                <Plus className="size-3.5" />
-                Новая категория
-              </button>
-            </div>
-          </div>,
-          document.body,
-        )
-      : null;
-
   return (
     <>
-      <input
-        ref={inputRef}
-        type="text"
-        value={displayValue}
+      <SearchSelect
+        id={reactId}
+        label="Категория"
+        hideLabel
         placeholder="— выбрать категорию —"
-        onFocus={() => {
-          setOpen(true);
-          setQuery('');
+        widthClassName="w-48"
+        query={query}
+        setQuery={setQuery}
+        items={items}
+        selectedValue={value != null ? String(value) : null}
+        onSelect={(item) => {
+          onChange(item.value ? Number(item.value) : null);
+          setQuery(item.label);
         }}
-        onChange={(e) => {
-          setOpen(true);
-          setQuery(e.target.value);
+        showAllOnFocus
+        inputSize="sm"
+        inputClassName="text-xs font-medium shadow-sm"
+        createAction={{
+          visible: canCreate,
+          label: trimmed ? `+ Новая категория «${trimmed}»` : '+ Новая категория',
+          onClick: () => setDialogOpen(true),
         }}
-        className="h-8 w-44 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
       />
-      {dropdown}
       <CategoryDialog
         open={dialogOpen}
         mode="create"
-        initialValues={{ kind: kindHint, name: query || undefined }}
+        initialValues={{ kind: kindHint, name: trimmed || undefined }}
         isSubmitting={createMutation.isPending}
         onClose={() => setDialogOpen(false)}
         onSubmit={(values) => createMutation.mutate(values)}

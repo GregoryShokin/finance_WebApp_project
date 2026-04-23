@@ -23,7 +23,7 @@ Transactions).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
@@ -38,7 +38,9 @@ from app.repositories.transaction_category_rule_repository import (
     TransactionCategoryRuleRepository,
 )
 from app.services.bank_mechanics_service import BankMechanicsResult, BankMechanicsService
+from app.services.brand_extractor_service import extract_brand
 from app.services.global_pattern_service import GlobalPatternService
+from app.services.import_normalizer_v2 import is_transfer_like as v2_is_transfer_like
 
 # Confidence bands — aligned with the moderator gate thresholds.
 # Two tiers for exact-identifier rules: "proven" = confirmed enough to earn
@@ -234,6 +236,49 @@ class Cluster:
         }
 
 
+@dataclass(frozen=True)
+class BrandCluster:
+    """Bulk-confirm group: several fingerprint clusters sharing a brand key.
+
+    Brand grouping exists at the UI layer only (see project_bulk_clusters.md):
+    rules are still written per fingerprint. A BrandCluster is emitted when
+    ≥2 fingerprint clusters share a non-None brand key AND the combined row
+    count reaches `MIN_BRAND_CLUSTER_SIZE`. Otherwise the contributing
+    fingerprint clusters are returned standalone.
+
+    `direction` is carried here because we never merge expense and income
+    clusters under one brand — "Оплата в OZON" and "Возврат OZON" stay
+    separate (different operation types, different user intent).
+    """
+
+    brand: str
+    direction: str
+    count: int
+    total_amount: Decimal
+    fingerprint_cluster_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "brand": self.brand,
+            "direction": self.direction,
+            "count": self.count,
+            "total_amount": str(self.total_amount),
+            "fingerprint_cluster_ids": list(self.fingerprint_cluster_ids),
+        }
+
+
+# Bulk-confirm thresholds — the contract between backend and wizard UI.
+# Aligned with project_bulk_clusters.md.
+MIN_BULK_CLUSTER_SIZE = 5
+MIN_BRAND_CLUSTER_SIZE = 5
+MIN_FINGERPRINT_COUNT_FOR_BRAND = 2
+# Transfers clustered by a concrete identifier (phone / contract / card / iban)
+# are a stronger signal than a skeleton brand: the identifier already uniquely
+# names the counterparty. Two rows to the same phone is a real pattern worth
+# one-click bulk confirm.
+MIN_TRANSFER_IDENTIFIER_CLUSTER_SIZE = 2
+
+
 @dataclass
 class _ClusterAccumulator:
     """Mutable bucket used while walking the row list — frozen into a Cluster at the end."""
@@ -398,6 +443,159 @@ class ImportClusterService:
         # UI will consume the list top-down.
         clusters.sort(key=lambda c: (-c.confidence, -c.count, c.fingerprint))
         return clusters
+
+    def build_bulk_clusters(
+        self, session: ImportSession,
+    ) -> tuple[list[Cluster], list[BrandCluster]]:
+        """Return clusters eligible for bulk-confirm, plus brand-level groups.
+
+        Filter pipeline — applied to rows BEFORE size threshold:
+          1. Drop committed rows (they already have a Transaction — bulk-apply
+             would skip them anyway, and keeping them inflates cluster sizes
+             so uncommitted-only counts don't cross MIN_BULK_CLUSTER_SIZE).
+          2. Drop secondary-transfer rows (the other side of a confirmed
+             transfer pair — auto-created on commit, irrelevant to bulk).
+          3. Drop entire clusters where the skeleton reads as transfer-like
+             (contains "перевод" / "transfer" etc.). Transfers get their own
+             per-recipient treatment via the transfer matcher + transfer-aware
+             fingerprint; they should never land in bulk-categorize UI.
+          4. Keep only surviving clusters with ≥ MIN_BULK_CLUSTER_SIZE rows.
+          5. Aggregate by (brand, direction) for brand-level groups.
+        """
+        rows = self.import_repo.get_rows(session_id=session.id)
+        # Compute per-row exclusion sets in one pass. Using sets because
+        # Cluster.row_ids is a tuple and we filter downstream.
+        excluded_row_ids: set[int] = set()
+        for row in rows:
+            normalized = getattr(row, "normalized_data", None) or (row.normalized_data_json or {})
+            status = str(getattr(row, "status", "") or "").strip().lower()
+            created_tx = getattr(row, "created_transaction_id", None)
+            if status == "committed" or created_tx is not None:
+                excluded_row_ids.add(row.id)
+                continue
+            # Any row with a transfer_match is already classified as transfer
+            # by the cross-session matcher — both the primary side (this
+            # statement's row) and the secondary side (auto-created partner).
+            # Neither should show up in bulk-categorize UI: the user already
+            # has a proper counterparty-level decision (two-sided transfer),
+            # so pulling the primary into a "one category for all" flow would
+            # override that and break the pair. See project_bulk_clusters.md.
+            if normalized.get("transfer_match"):
+                excluded_row_ids.add(row.id)
+
+        all_clusters = self.build_clusters(session)
+
+        # First pass: drop committed/transfer-matched rows from every cluster
+        # and skip transfer-like skeletons without an identifier. The result is
+        # every "live" fingerprint cluster regardless of its size — brand-level
+        # aggregation needs these, otherwise small per-TT groups (e.g.
+        # "Wave coffee", "Wave coffee 1", "Wave coffee 4" with 3/3/2 rows)
+        # never roll up into a single «wave» brand even though they obviously
+        # should.
+        live_clusters: list[Cluster] = []
+        for cluster in all_clusters:
+            is_transfer_skeleton = v2_is_transfer_like(cluster.skeleton, None)
+            # Transfer-like clusters MUST be backed by an identifier. Without a
+            # phone/contract/card/iban the skeleton placeholder alone would
+            # collapse every unrelated recipient into one giant group, which
+            # is exactly what we're trying to prevent. Drop them.
+            if is_transfer_skeleton and cluster.identifier_key is None:
+                continue
+            remaining_ids = tuple(
+                rid for rid in cluster.row_ids if rid not in excluded_row_ids
+            )
+            if not remaining_ids:
+                continue
+            if len(remaining_ids) == len(cluster.row_ids):
+                live_clusters.append(cluster)
+            else:
+                live_clusters.append(replace(
+                    cluster,
+                    row_ids=remaining_ids,
+                    count=len(remaining_ids),
+                    example_row_ids=remaining_ids[:3],
+                ))
+
+        # Second pass: apply the size threshold. Identifier-based transfer
+        # clusters pass at a much lower threshold: a single phone/contract
+        # repeated twice is already a real pattern ("перевод маме"), whereas a
+        # fresh skeleton needs at least MIN_BULK_CLUSTER_SIZE rows of evidence
+        # before bulk-categorize becomes worth the UI slot.
+        eligible: list[Cluster] = []
+        for cluster in live_clusters:
+            is_transfer_skeleton = v2_is_transfer_like(cluster.skeleton, None)
+            min_size = (
+                MIN_TRANSFER_IDENTIFIER_CLUSTER_SIZE
+                if is_transfer_skeleton and cluster.identifier_key is not None
+                else MIN_BULK_CLUSTER_SIZE
+            )
+            if cluster.count < min_size:
+                continue
+            eligible.append(cluster)
+
+        # Brand aggregation is computed over live_clusters (NOT eligible) so a
+        # brand whose rows are spread across many small per-TT fingerprints
+        # still surfaces as a single brand card. Members contributing to a
+        # brand that are below MIN_BULK_CLUSTER_SIZE individually are tracked
+        # so the UI can materialize them on demand (see `aux_clusters`).
+        brand_clusters = self._group_by_brand(live_clusters)
+
+        # fingerprint_clusters returned to the caller = union of:
+        #   * `eligible`  — clusters big enough to stand on their own.
+        #   * brand members that don't qualify individually (small per-TT
+        #     groups) — so the frontend can look them up by fingerprint when
+        #     expanding a brand card. Without this, the brand card would list
+        #     row_ids the frontend can't resolve to a cluster.
+        eligible_fps = {c.fingerprint for c in eligible}
+        aux_fps: set[str] = set()
+        for b in brand_clusters:
+            for fp in b.fingerprint_cluster_ids:
+                if fp not in eligible_fps:
+                    aux_fps.add(fp)
+        aux_clusters = [c for c in live_clusters if c.fingerprint in aux_fps]
+        return eligible + aux_clusters, brand_clusters
+
+    @staticmethod
+    def _group_by_brand(clusters: list[Cluster]) -> list[BrandCluster]:
+        """Aggregate fingerprint clusters into brand-level groups.
+
+        Pure function — kept as a staticmethod so it can be unit-tested
+        without mocking every repository the parent service depends on.
+        """
+        brand_groups: dict[tuple[str, str], list[Cluster]] = {}
+        for cluster in clusters:
+            # Transfer-like clusters never enter brand grouping. They already
+            # stand on their identifier (phone/contract/…), and rolling
+            # "переводов на +79…" plus "переводов на +79…" under one brand
+            # would destroy exactly the per-recipient distinction we worked
+            # to keep in the fingerprint. `extract_brand` also rejects
+            # transfer skeletons, but this is a defense-in-depth guard.
+            if v2_is_transfer_like(cluster.skeleton, None):
+                continue
+            brand = extract_brand(cluster.skeleton)
+            if brand is None:
+                continue
+            key = (brand, cluster.direction)
+            brand_groups.setdefault(key, []).append(cluster)
+
+        brand_clusters: list[BrandCluster] = []
+        for (brand, direction), members in brand_groups.items():
+            if len(members) < MIN_FINGERPRINT_COUNT_FOR_BRAND:
+                continue
+            total_rows = sum(m.count for m in members)
+            if total_rows < MIN_BRAND_CLUSTER_SIZE:
+                continue
+            total_amount = sum((m.total_amount for m in members), Decimal("0"))
+            brand_clusters.append(BrandCluster(
+                brand=brand,
+                direction=direction,
+                count=total_rows,
+                total_amount=total_amount,
+                fingerprint_cluster_ids=tuple(m.fingerprint for m in members),
+            ))
+
+        brand_clusters.sort(key=lambda b: (-b.count, b.brand))
+        return brand_clusters
 
     # ------------------------------------------------------------------
     # Internals

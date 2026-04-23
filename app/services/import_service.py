@@ -18,6 +18,7 @@ from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.imports import ImportMappingRequest, ImportPreviewSummary, ImportRowUpdateRequest
+from app.services.fingerprint_alias_service import FingerprintAliasService
 from app.services.import_confidence import ImportConfidenceService
 from app.services.import_extractors import ExtractionResult, ImportExtractorRegistry
 from app.schemas.import_normalized import NormalizedDataV2
@@ -25,7 +26,9 @@ from app.services.import_normalizer import ImportNormalizer
 from app.services.import_normalizer_v2 import (
     extract_tokens as v2_extract_tokens,
     fingerprint as v2_fingerprint,
+    is_transfer_like as v2_is_transfer_like,
     normalize_skeleton as v2_normalize_skeleton,
+    pick_transfer_identifier as v2_pick_transfer_identifier,
 )
 from app.services.import_recognition_service import ImportRecognitionService
 from app.services.import_validator import ImportRowValidationError
@@ -74,6 +77,7 @@ class ImportService:
         self.transaction_service = TransactionService(db)
         self.category_rule_repo = TransactionCategoryRuleRepository(db)
         self.transfer_matcher = TransferMatcherService(db)
+        self._alias_service = FingerprintAliasService(db)
 
     def upload_source(
         self,
@@ -224,6 +228,298 @@ class ImportService:
         if session is None:
             raise ImportNotFoundError("РЎРµСЃСЃРёСЏ РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
         return session
+
+    def get_bulk_clusters(self, *, user_id: int, session_id: int) -> dict[str, Any]:
+        """Return bulk-eligible fingerprint clusters + brand groups for the wizard.
+
+        See project_bulk_clusters.md for the hierarchy contract. The wizard
+        merges brand groups with their member fingerprints client-side — we
+        return both as flat lists to keep the payload diffable.
+        """
+        from app.services.import_cluster_service import ImportClusterService
+
+        session = self.get_session(user_id=user_id, session_id=session_id)
+        cluster_svc = ImportClusterService(self.db)
+        fp_clusters, brand_clusters = cluster_svc.build_bulk_clusters(session)
+
+        fp_dicts = []
+        for c in fp_clusters:
+            fp_dicts.append({
+                "fingerprint": c.fingerprint,
+                "count": c.count,
+                "total_amount": c.total_amount,
+                "direction": c.direction,
+                "skeleton": c.skeleton,
+                "row_ids": list(c.row_ids),
+                "candidate_category_id": c.candidate_category_id,
+                "candidate_rule_id": c.candidate_rule_id,
+                "rule_source": c.rule_source,
+                "confidence": c.confidence,
+                "trust_zone": c.trust_zone,
+                "auto_trust": c.auto_trust,
+                "identifier_key": c.identifier_key,
+                "identifier_value": c.identifier_value,
+            })
+        brand_dicts = [b.to_dict() for b in brand_clusters]
+        return {
+            "session_id": session.id,
+            "fingerprint_clusters": fp_dicts,
+            "brand_clusters": brand_dicts,
+        }
+
+    def bulk_apply_cluster(
+        self, *, user_id: int, session_id: int, payload: Any,
+    ) -> dict[str, Any]:
+        """Apply one moderator action across many rows in a cluster.
+
+        Per row: reuses the single-row update path (action="confirm") so the
+        validation/status contract stays identical. Rows already turned into
+        Transactions are skipped and returned in `skipped_row_ids` — the
+        race-condition guard from project_bulk_clusters.md.
+
+        After row updates, groups confirmed rows by `(fingerprint, category_id)`
+        and upserts a rule per group with `confirms_delta = group_size`. The
+        rule's strength counters advance in one step, which activates /
+        generalizes it immediately for future sessions.
+        """
+        from app.core.config import settings
+        session = self.get_session(user_id=user_id, session_id=session_id)
+
+        skipped: list[int] = []
+        # Rows keyed by (fingerprint, category_id) for rule upsert.
+        by_rule_key: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        confirmed_count = 0
+
+        for update in payload.updates:
+            row_id = update.row_id
+            session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+            if session_row is None:
+                # Silently skip rows that don't belong to this user — caller
+                # shouldn't know about them. They won't count as confirmed.
+                skipped.append(row_id)
+                continue
+            row_session, row = session_row
+            if row_session.id != session.id:
+                skipped.append(row_id)
+                continue
+
+            row_status = str(row.status or "").strip().lower()
+            if row.created_transaction_id is not None or row_status == "committed":
+                skipped.append(row_id)
+                continue
+
+            row_payload = ImportRowUpdateRequest(
+                operation_type=update.operation_type,
+                category_id=update.category_id,
+                counterparty_id=update.counterparty_id,
+                target_account_id=update.target_account_id,
+                credit_account_id=update.credit_account_id,
+                credit_principal_amount=update.credit_principal_amount,
+                credit_interest_amount=update.credit_interest_amount,
+                debt_direction=update.debt_direction,
+                action="confirm",
+            )
+            self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
+            confirmed_count += 1
+
+            # Collect rule-upsert buckets. Only rows with a non-None category
+            # qualify — transfer/debt/credit rows without category_id don't
+            # participate in category-rule learning.
+            normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
+            fp = normalized.get("fingerprint")
+            normalized_desc = normalized.get("skeleton") or ""
+            original_desc = (
+                normalized.get("import_original_description")
+                or normalized.get("description")
+            )
+            if fp and update.category_id is not None and normalized_desc:
+                by_rule_key.setdefault((fp, int(update.category_id)), []).append({
+                    "normalized_description": normalized_desc,
+                    "original_description": original_desc,
+                })
+
+        # Apply rule strength transitions in a second pass — one upsert per
+        # (fingerprint, category) group, with confirms_delta equal to the
+        # group size. A 92-row Pyaterochka cluster therefore creates one
+        # rule with confirms=92 in a single on_confirmed call.
+        rules_affected = 0
+        strength_svc = RuleStrengthService(self.db, settings)
+        for (_fp, category_id), rows_for_rule in by_rule_key.items():
+            if not rows_for_rule:
+                continue
+            sample = rows_for_rule[0]
+            rule, _is_new = self.category_rule_repo.bulk_upsert(
+                user_id=user_id,
+                normalized_description=sample["normalized_description"],
+                category_id=category_id,
+                confirms_delta=len(rows_for_rule),
+                original_description=sample["original_description"],
+            )
+            strength_svc.on_confirmed(rule.id, confirms_delta=len(rows_for_rule))
+            rules_affected += 1
+
+        self.db.commit()
+
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+
+        return {
+            "session_id": session.id,
+            "confirmed_count": confirmed_count,
+            "skipped_row_ids": skipped,
+            "rules_affected": rules_affected,
+            "summary": summary,
+        }
+
+    def attach_row_to_cluster(
+        self,
+        *,
+        user_id: int,
+        session_id: int,
+        row_id: int,
+        target_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Attach a single «Требуют внимания» row to an existing cluster.
+
+        Atomic operation (Level 3 alias-based merging):
+          1. Resolve target cluster's suggested category / counterparty / op_type
+             from already-classified rows in this session (or from a confirmed
+             rule for the target skeleton).
+          2. Create FingerprintAlias(source=row.fingerprint, target=target_fp)
+             so future imports with the same source pattern land in the target
+             cluster automatically.
+          3. Rewrite row's normalized_data fingerprint to target, so the row
+             joins the target cluster in the current session view too.
+          4. Commit the row as a Transaction via the regular update_row path.
+
+        Raises ImportValidationError when the target cluster can't be resolved
+        (empty in current session AND no rule exists).
+        """
+        session = self.get_session(user_id=user_id, session_id=session_id)
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError(f"import row {row_id} not found")
+        row_session, row = session_row
+        if row_session.id != session.id:
+            raise ImportNotFoundError(f"import row {row_id} not in session {session_id}")
+
+        row_status = str(row.status or "").strip().lower()
+        if row.created_transaction_id is not None or row_status == "committed":
+            raise ImportValidationError("Строка уже импортирована")
+
+        normalized = dict(row.normalized_data_json or {})
+        source_fp = normalized.get("fingerprint") or (normalized.get("v2") or {}).get("fingerprint")
+        if not source_fp:
+            raise ImportValidationError(
+                "У строки нет fingerprint — пересобери preview и попробуй ещё раз"
+            )
+        if source_fp == target_fingerprint:
+            raise ImportValidationError("Строка уже относится к этому кластеру")
+
+        # ── Resolve target cluster's suggestion ────────────────────────────
+        # Priority:
+        #   1. Other rows in THIS session with target_fingerprint that already
+        #      have a category applied — take the most recent one.
+        #   2. TransactionCategoryRule for target skeleton — take its category.
+        target_category_id: int | None = None
+        target_counterparty_id: int | None = None
+        target_operation_type: str | None = None
+        target_skeleton: str | None = None
+
+        all_rows = self.import_repo.list_rows(session_id=session.id)
+        target_rows = []
+        for candidate in all_rows:
+            c_norm = candidate.normalized_data_json or {}
+            c_fp = c_norm.get("fingerprint") or (c_norm.get("v2") or {}).get("fingerprint")
+            if c_fp == target_fingerprint:
+                target_rows.append((candidate, c_norm))
+
+        if not target_rows:
+            raise ImportValidationError(
+                "Целевой кластер не найден в этой сессии"
+            )
+
+        # Prefer rows that already have a category (confirmed or rule-suggested).
+        for candidate, c_norm in target_rows:
+            cat = c_norm.get("category_id")
+            if cat is not None:
+                try:
+                    target_category_id = int(cat)
+                except (TypeError, ValueError):
+                    continue
+                target_counterparty_id = c_norm.get("counterparty_id")
+                target_operation_type = c_norm.get("operation_type") or "regular"
+                target_skeleton = c_norm.get("skeleton") or (c_norm.get("v2") or {}).get("skeleton")
+                break
+
+        # Fallback: lookup rule for target skeleton.
+        if target_category_id is None:
+            first_norm = target_rows[0][1]
+            target_skeleton = first_norm.get("skeleton") or (first_norm.get("v2") or {}).get("skeleton")
+            if target_skeleton:
+                rule = self.category_rule_repo.get_best_rule(
+                    user_id=user_id, normalized_description=target_skeleton,
+                )
+                if rule is not None and rule.category_id is not None:
+                    target_category_id = int(rule.category_id)
+                    target_operation_type = "regular"
+
+        if target_category_id is None:
+            raise ImportValidationError(
+                "В целевом кластере ещё нет категории — сначала подтверди его"
+            )
+
+        # ── Create the alias and rewrite fingerprint ───────────────────────
+        alias_created = False
+        try:
+            self._alias_service.create_alias(
+                user_id=user_id,
+                source_fingerprint=source_fp,
+                target_fingerprint=target_fingerprint,
+            )
+            alias_created = True
+        except ValueError as exc:
+            # source == target or cycle — shouldn't happen given checks above.
+            raise ImportValidationError(str(exc)) from exc
+
+        # Do NOT rewrite the row's fingerprint. The alias handles future
+        # imports; this row is committed immediately and leaves the session.
+        # Rewriting the fingerprint would move the row into the target
+        # cluster in the current session view, mixing skeleton data and
+        # creating phantom duplicates in the picker.
+        if target_skeleton:
+            normalized.setdefault("attached_to_skeleton", target_skeleton)
+        normalized["attached_source_fingerprint"] = source_fp
+        row.normalized_data_json = normalized
+        self.db.add(row)
+        self.db.flush()
+
+        # ── Commit the row as a transaction via update_row ────────────────
+        row_payload = ImportRowUpdateRequest(
+            operation_type=target_operation_type or "regular",
+            category_id=target_category_id,
+            counterparty_id=target_counterparty_id,
+            action="confirm",
+        )
+        self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
+
+        self.db.commit()
+        self.db.refresh(row)
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+
+        return {
+            "row_id": row_id,
+            "transaction_id": row.created_transaction_id,
+            "target_fingerprint": target_fingerprint,
+            "alias_created": alias_created,
+            "source_fingerprint": source_fp,
+            "summary": summary,
+        }
 
     def list_active_sessions(self, *, user_id: int) -> dict[str, Any]:
         sessions = self.import_repo.list_active_sessions(user_id=user_id)
@@ -1292,6 +1588,8 @@ class ImportService:
                 fallback_account_id=payload.account_id,
                 row_index=index,
                 bank_code_override=bank_code,
+                user_id=user_id,
+                alias_service=self._alias_service,
             )
 
             issues = list(dict.fromkeys(issue for issue in issues if issue))
@@ -2047,6 +2345,8 @@ class ImportService:
         fallback_account_id: int | None,
         row_index: int,
         bank_code_override: str | None = None,
+        user_id: int | None = None,
+        alias_service: "FingerprintAliasService | None" = None,
     ) -> dict[str, Any]:
         """Run normalizer_v2 on top of the v1 normalized dict.
 
@@ -2084,7 +2384,33 @@ class ImportService:
 
             tokens = v2_extract_tokens(description)
             skeleton = v2_normalize_skeleton(description, tokens)
-            fp = v2_fingerprint(bank, account_id, direction, skeleton, tokens.contract)
+            # For transfer-like rows, fold the recipient identifier (phone /
+            # contract / card) into the fingerprint in raw form. Otherwise
+            # every "Внешний перевод по номеру телефона" collapses into one
+            # giant cluster, even though each recipient is a separate pattern
+            # (аренда брату vs мама vs разовые). See project_bulk_clusters.md.
+            transfer_identifier = None
+            if v2_is_transfer_like(description, normalized.get("operation_type")):
+                transfer_identifier = v2_pick_transfer_identifier(tokens)
+            fp = v2_fingerprint(
+                bank, account_id, direction, skeleton,
+                tokens.contract, transfer_identifier=transfer_identifier,
+            )
+
+            # Alias resolution (Level 3 cluster-merge): if the user previously
+            # attached this fingerprint to another cluster, redirect here so
+            # the row joins its target cluster automatically on next import.
+            if alias_service is not None and user_id is not None:
+                try:
+                    resolved_fp = alias_service.resolve(
+                        user_id=user_id, fingerprint=fp,
+                    )
+                    if resolved_fp and resolved_fp != fp:
+                        fp = resolved_fp
+                except Exception as exc:  # noqa: BLE001 — never block import
+                    logger.warning(
+                        "fingerprint alias resolve failed row=%s: %s", row_index, exc,
+                    )
 
             model = NormalizedDataV2.from_tokens(
                 tokens=tokens, skeleton=skeleton, fingerprint=fp,

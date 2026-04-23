@@ -19,14 +19,15 @@
  * hitting the API.
  */
 
-import { memo, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
+import { CollapsibleChevron } from '@/components/ui/collapsible';
 import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
+import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 import { bulkApplyCluster } from '@/lib/api/imports';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
 import type {
@@ -278,124 +279,141 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: P
   );
   const canCreateCounterparty = trimmedCpQuery.length > 0 && !exactCpMatch && !createCounterpartyMutation.isPending;
 
-  return (
-    <Card className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-soft">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-3 p-4 text-left transition-colors hover:bg-slate-50"
+  const headerNode = (
+    <div className="flex w-full items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-base font-semibold text-slate-900">{title}</p>
+        <p className="text-sm text-slate-600">{subtitle}</p>
+      </div>
+      {suggestedCategory ? (
+        <span className="shrink-0 rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+          {suggestedCategory}
+        </span>
+      ) : (
+        <span className="shrink-0 text-xs text-slate-400">Выбери категорию</span>
+      )}
+      <span
+        className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+          direction === 'income'
+            ? 'bg-emerald-50 text-emerald-700'
+            : 'bg-slate-100 text-slate-700'
+        }`}
       >
-        <span className="shrink-0 text-slate-400">
-          {expanded ? <ChevronDown className="size-5" /> : <ChevronRight className="size-5" />}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-base font-semibold text-slate-900">{title}</p>
-          <p className="text-sm text-slate-600">{subtitle}</p>
-        </div>
-        {suggestedCategory ? (
-          <span className="shrink-0 rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
-            {suggestedCategory}
-          </span>
-        ) : (
-          <span className="shrink-0 text-xs text-slate-400">Выбери категорию</span>
-        )}
-        <span
-          className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
-            direction === 'income'
-              ? 'bg-emerald-50 text-emerald-700'
-              : 'bg-slate-100 text-slate-700'
-          }`}
-        >
-          {direction === 'income' ? 'Доход' : 'Расход'}
-        </span>
-      </button>
+        {direction === 'income' ? 'Доход' : 'Расход'}
+      </span>
+    </div>
+  );
 
-      {expanded ? (
+  const bulkPanel = (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+      <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
         <div>
-          <div className="border-t border-slate-100 bg-slate-50 px-4 py-3">
-            <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-              <div>
-                <SearchSelect
-                  id={`bulk-cat-${title}`}
-                  label="Категория для всех включённых"
-                  placeholder="Найти или создать…"
-                  widthClassName="w-full"
-                  query={bulkQuery}
-                  setQuery={setBulkQuery}
-                  items={categoryItems}
-                  selectedValue={bulkCategoryId != null ? String(bulkCategoryId) : null}
-                  onSelect={(item) => {
-                    setBulkCategoryId(Number(item.value));
-                    setBulkQuery(item.label);
-                  }}
-                  showAllOnFocus
-                />
-              </div>
-              <div>
-                <SearchSelect
-                  id={`bulk-cp-${title}`}
-                  label="Контрагент (необязательно)"
-                  placeholder="Найти или создать…"
-                  widthClassName="w-full"
-                  query={bulkCounterpartyQuery}
-                  setQuery={setBulkCounterpartyQuery}
-                  items={counterpartyItems}
-                  selectedValue={bulkCounterpartyId != null ? String(bulkCounterpartyId) : null}
-                  onSelect={(item) => {
-                    setBulkCounterpartyId(Number(item.value));
-                    setBulkCounterpartyQuery(item.label);
-                  }}
-                  showAllOnFocus
-                  createAction={{
-                    visible: canCreateCounterparty,
-                    label: trimmedCpQuery ? `+ Создать «${trimmedCpQuery}»` : '',
-                    onClick: () => {
-                      if (trimmedCpQuery) createCounterpartyMutation.mutate(trimmedCpQuery);
-                    },
-                  }}
-                />
-              </div>
-              <div className="flex items-end gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={applyBulkToAllIncluded}
-                  disabled={bulkCategoryId == null && bulkCounterpartyId == null}
-                >
-                  Применить ко всем
-                </Button>
-                <Button
-                  type="button"
-                  onClick={() => applyMutation.mutate()}
-                  disabled={applyMutation.isPending || withCategoryCount === 0}
-                >
-                  {applyMutation.isPending ? (
-                    <>
-                      <Loader2 className="mr-2 size-4 animate-spin" />
-                      Сохраняю…
-                    </>
-                  ) : (
-                    <>Подтвердить {withCategoryCount} / {includedCount}</>
-                  )}
-                </Button>
-              </div>
-            </div>
-            <p className="mt-2 text-xs text-slate-500">
-              Исключённые строки вернутся в очередь «Требуют внимания».
-              Контрагента можно не привязывать. Точечные правки не перезаписываются кнопкой «Применить ко всем».
-            </p>
-          </div>
-
-          <ClusterRowList
-            rows={rows}
-            getRowState={getRowState}
-            toggleRowIncluded={toggleRowIncluded}
-            setRowCategory={setRowCategory}
-            categories={filteredCategories}
+          <SearchSelect
+            id={`bulk-cat-${title}`}
+            label="Категория для всех включённых"
+            placeholder="Найти или создать…"
+            widthClassName="w-full"
+            query={bulkQuery}
+            setQuery={setBulkQuery}
+            items={categoryItems}
+            selectedValue={bulkCategoryId != null ? String(bulkCategoryId) : null}
+            onSelect={(item) => {
+              setBulkCategoryId(Number(item.value));
+              setBulkQuery(item.label);
+            }}
+            showAllOnFocus
           />
         </div>
-      ) : null}
-    </Card>
+        <div>
+          <SearchSelect
+            id={`bulk-cp-${title}`}
+            label="Контрагент (необязательно)"
+            placeholder="Найти или создать…"
+            widthClassName="w-full"
+            query={bulkCounterpartyQuery}
+            setQuery={setBulkCounterpartyQuery}
+            items={counterpartyItems}
+            selectedValue={bulkCounterpartyId != null ? String(bulkCounterpartyId) : null}
+            onSelect={(item) => {
+              setBulkCounterpartyId(Number(item.value));
+              setBulkCounterpartyQuery(item.label);
+            }}
+            showAllOnFocus
+            createAction={{
+              visible: canCreateCounterparty,
+              label: trimmedCpQuery ? `+ Создать «${trimmedCpQuery}»` : '',
+              onClick: () => {
+                if (trimmedCpQuery) createCounterpartyMutation.mutate(trimmedCpQuery);
+              },
+            }}
+          />
+        </div>
+        <div className="flex items-end gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={applyBulkToAllIncluded}
+            disabled={bulkCategoryId == null && bulkCounterpartyId == null}
+          >
+            Применить ко всем
+          </Button>
+          <Button
+            type="button"
+            onClick={() => applyMutation.mutate()}
+            disabled={applyMutation.isPending || withCategoryCount === 0}
+          >
+            {applyMutation.isPending ? (
+              <>
+                <Loader2 className="mr-2 size-4 animate-spin" />
+                Сохраняю…
+              </>
+            ) : (
+              <>Подтвердить {withCategoryCount} / {includedCount}</>
+            )}
+          </Button>
+        </div>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">
+        Исключённые строки вернутся в очередь «Требуют внимания».
+        Контрагента можно не привязывать. Точечные правки не перезаписываются кнопкой «Применить ко всем».
+      </p>
+    </div>
+  );
+
+  const collapsedNode = (
+    <div className="flex w-full items-center gap-3">
+      <CollapsibleChevron open={expanded} className="size-4 shrink-0 text-slate-400" />
+      {headerNode}
+    </div>
+  );
+
+  const expandedNode = (
+    <div className="flex flex-col gap-4">
+      <div className="pr-10">
+        {headerNode}
+      </div>
+      {bulkPanel}
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <ClusterRowList
+          rows={rows}
+          getRowState={getRowState}
+          toggleRowIncluded={toggleRowIncluded}
+          setRowCategory={setRowCategory}
+          categories={filteredCategories}
+          expanded
+        />
+      </div>
+    </div>
+  );
+
+  return (
+    <ExpandableCard
+      isOpen={expanded}
+      onToggle={() => setExpanded((v) => !v)}
+      expandedWidth="860px"
+      collapsed={collapsedNode}
+      expanded={expandedNode}
+    />
   );
 }
 
@@ -410,12 +428,14 @@ function ClusterRowList({
   toggleRowIncluded,
   setRowCategory,
   categories,
+  expanded = false,
 }: {
   rows: ImportPreviewRow[];
   getRowState: (rowId: number) => RowState;
   toggleRowIncluded: (rowId: number) => void;
   setRowCategory: (rowId: number, categoryId: number | null) => void;
   categories: Category[];
+  expanded?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -428,13 +448,16 @@ function ClusterRowList({
 
   const items = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
-  const maxHeight = Math.min(rows.length * 44 + 4, 12 * 44);
+  // Row list owns its own scroll. In the modal we cap it so the bulk panel
+  // above remains visible; inline fallback shows up to 12 rows before scrolling.
+  const inlineMaxHeight = Math.min(rows.length * 44 + 4, 12 * 44);
+  const expandedMaxHeight = 'min(58vh, 600px)';
 
   return (
     <div
       ref={scrollRef}
       className="overflow-y-auto"
-      style={{ maxHeight }}
+      style={{ maxHeight: expanded ? expandedMaxHeight : inlineMaxHeight }}
     >
       <div style={{ height: totalSize, position: 'relative' }}>
         {items.map((virtualRow) => {
@@ -464,25 +487,61 @@ function ClusterRowList({
                 <p className="truncate text-slate-800">{descriptionOf(row)}</p>
                 <p className="text-xs text-slate-400">#{row.row_index} · {dateOf(row)} · {amountOf(row)}</p>
               </div>
-              <select
-                className="w-40 shrink-0 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-400"
-                value={s.categoryId != null ? String(s.categoryId) : ''}
+              <RowCategoryPicker
+                rowId={row.id}
+                value={s.categoryId}
                 disabled={!s.included}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setRowCategory(row.id, val ? Number(val) : null);
-                }}
-              >
-                <option value="">— категория —</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
+                categories={categories}
+                onChange={(id) => setRowCategory(row.id, id)}
+              />
             </div>
           );
         })}
       </div>
     </div>
+  );
+}
+
+// Per-row category picker with type-ahead search + animated dropdown. Same
+// behavior as other selects on the import page, scoped to this row only.
+function RowCategoryPicker({
+  rowId,
+  value,
+  disabled,
+  categories,
+  onChange,
+}: {
+  rowId: number;
+  value: number | null;
+  disabled: boolean;
+  categories: Category[];
+  onChange: (id: number | null) => void;
+}) {
+  const selected = value != null ? categories.find((c) => c.id === value) ?? null : null;
+  const [query, setQuery] = useState<string>(selected?.name ?? '');
+  useEffect(() => {
+    setQuery(selected?.name ?? '');
+  }, [selected]);
+  const items: SearchSelectItem[] = categories.map((c) => ({ value: String(c.id), label: c.name }));
+  return (
+    <SearchSelect
+      id={`cluster-row-cat-${rowId}`}
+      label="Категория"
+      hideLabel
+      placeholder="— категория —"
+      widthClassName="w-40 shrink-0"
+      query={query}
+      setQuery={setQuery}
+      items={items}
+      selectedValue={value != null ? String(value) : null}
+      onSelect={(item) => {
+        onChange(item.value ? Number(item.value) : null);
+        setQuery(item.label);
+      }}
+      showAllOnFocus
+      inputSize="sm"
+      disabled={disabled}
+    />
   );
 }
 

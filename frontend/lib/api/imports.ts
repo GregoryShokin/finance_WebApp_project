@@ -1,5 +1,8 @@
 import { apiClient } from '@/lib/api/client';
 import type {
+  BulkApplyPayload,
+  BulkApplyResponse,
+  BulkClustersResponse,
   ImportCommitResponse,
   ImportMappingPayload,
   ImportPreviewResponse,
@@ -86,6 +89,40 @@ export function startModeration(sessionId: number) {
     method: 'POST',
     body: JSON.stringify({}),
   });
+}
+
+export function getBulkClusters(sessionId: number) {
+  return apiClient<BulkClustersResponse>(`/imports/${sessionId}/clusters`);
+}
+
+export function bulkApplyCluster(sessionId: number, payload: BulkApplyPayload) {
+  return apiClient<BulkApplyResponse>(`/imports/${sessionId}/clusters/bulk-apply`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export type AttachRowToClusterResponse = {
+  row_id: number;
+  transaction_id: number | null;
+  target_fingerprint: string;
+  alias_created: boolean;
+  source_fingerprint: string | null;
+  summary: Record<string, number>;
+};
+
+export function attachRowToCluster(
+  sessionId: number,
+  rowId: number,
+  targetFingerprint: string,
+) {
+  return apiClient<AttachRowToClusterResponse>(
+    `/imports/${sessionId}/rows/${rowId}/attach-to-cluster`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ target_fingerprint: targetFingerprint }),
+    },
+  );
 }
 
 export function parkImportRow(rowId: number) {

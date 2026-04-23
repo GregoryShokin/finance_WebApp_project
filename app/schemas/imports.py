@@ -253,3 +253,110 @@ class ImportSessionResponse(BaseModel):
     currency: str | None
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Bulk clusters (И-08 Этап 2)
+# ---------------------------------------------------------------------------
+
+
+class BulkFingerprintClusterResponse(BaseModel):
+    """Eligible-for-bulk fingerprint cluster exposed to the wizard UI.
+
+    Only the fields the wizard actually reads — the full `Cluster.to_dict()`
+    payload is intentionally not echoed here to keep the wire format stable
+    as internal fields evolve.
+    """
+
+    fingerprint: str
+    count: int
+    total_amount: Decimal
+    direction: str
+    skeleton: str
+    row_ids: list[int]
+    candidate_category_id: int | None
+    candidate_rule_id: int | None
+    rule_source: str
+    confidence: float
+    trust_zone: str
+    auto_trust: bool
+    # Identifier that defines the cluster — phone/contract/card/iban/person_hash
+    # for transfer-like rows, else None. Used by the UI to render a concrete
+    # header ("Перевод на +79…6612" instead of "… <PHONE>").
+    identifier_key: str | None = None
+    identifier_value: str | None = None
+
+
+class BulkBrandClusterResponse(BaseModel):
+    brand: str
+    direction: str
+    count: int
+    total_amount: Decimal
+    # Members are referenced by fingerprint — the UI joins them back against
+    # the flat cluster list to build the expandable card.
+    fingerprint_cluster_ids: list[str]
+
+
+class BulkClustersResponse(BaseModel):
+    session_id: int
+    fingerprint_clusters: list[BulkFingerprintClusterResponse]
+    brand_clusters: list[BulkBrandClusterResponse]
+
+
+class BulkClusterRowUpdate(BaseModel):
+    """Per-row update inside a bulk-apply batch — mirrors the subset of
+    ImportRowUpdateRequest the bulk flow needs. Each row keeps full
+    operation-type flexibility (the marketplace case)."""
+
+    row_id: int
+    operation_type: str | None = None
+    category_id: int | None = None
+    counterparty_id: int | None = None
+    target_account_id: int | None = None
+    credit_account_id: int | None = None
+    credit_principal_amount: Decimal | None = None
+    credit_interest_amount: Decimal | None = None
+    debt_direction: str | None = None
+
+
+class BulkApplyRequest(BaseModel):
+    """One moderator action over a cluster.
+
+    `cluster_key` + `cluster_type` identify the cluster the user is confirming
+    (either a single fingerprint or a brand group). `updates` lists the rows
+    to modify — excluded rows are simply absent from the list.
+    """
+
+    cluster_key: str
+    cluster_type: str  # "fingerprint" | "brand"
+    updates: list[BulkClusterRowUpdate]
+
+
+class BulkApplyResponse(BaseModel):
+    session_id: int
+    confirmed_count: int
+    skipped_row_ids: list[int]  # already committed — race-condition guard
+    rules_affected: int         # rules that had confirms_delta applied
+    summary: ImportPreviewSummary
+
+
+class AttachRowToClusterRequest(BaseModel):
+    """Attach an "Требуют внимания" row to an existing cluster.
+
+    Atomic operation (see project_import_moderator.md, И-08 phase: manual
+    cluster merging):
+      1. Copy target cluster's category/counterparty/operation_type onto the row.
+      2. Create a FingerprintAlias (source row.fingerprint → target).
+      3. Commit the row as a regular Transaction (status → 'ready' → committed).
+    """
+
+    target_fingerprint: str
+
+
+class AttachRowToClusterResponse(BaseModel):
+    row_id: int
+    transaction_id: int | None  # None if validation errored and we rolled back
+    target_fingerprint: str
+    alias_created: bool
+    source_fingerprint: str | None
+    summary: ImportPreviewSummary

@@ -24,6 +24,7 @@ import app.models.counterparty  # noqa: F401
 import app.models.import_session  # noqa: F401
 import app.models.import_row  # noqa: F401
 import app.models.transaction_category_rule  # noqa: F401
+import app.models.fingerprint_alias  # noqa: F401
 try:
     import app.models.real_asset  # noqa: F401
     import app.models.installment_purchase  # noqa: F401

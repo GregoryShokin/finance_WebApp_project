@@ -6,6 +6,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db
 from app.models.user import User
 from app.schemas.imports import (
+    AttachRowToClusterRequest,
+    AttachRowToClusterResponse,
+    BulkApplyRequest,
+    BulkApplyResponse,
+    BulkClustersResponse,
     ImportCommitRequest,
     ImportCommitResponse,
     ImportMappingRequest,
@@ -234,6 +239,84 @@ def update_import_row(
     except ImportValidationError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/{session_id}/clusters", response_model=BulkClustersResponse)
+def get_bulk_clusters(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return bulk-eligible clusters (И-08 Этап 2).
+
+    Fingerprint clusters of size ≥5, plus brand-level groups that aggregate
+    ≥2 fingerprints into a single row-count ≥5 block. Transfer-secondary
+    rows are pre-filtered so they never appear in the bulk UI — they're
+    auto-created via their transfer pair on commit.
+    """
+    service = ImportService(db)
+    try:
+        return service.get_bulk_clusters(user_id=current_user.id, session_id=session_id)
+    except ImportNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{session_id}/rows/{row_id}/attach-to-cluster",
+    response_model=AttachRowToClusterResponse,
+)
+def attach_row_to_cluster(
+    session_id: int,
+    row_id: int,
+    payload: AttachRowToClusterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Move a "needs attention" row into an existing cluster.
+
+    Creates a user-scoped FingerprintAlias so future imports with the same
+    source pattern land in the target cluster automatically (Level 3). The
+    row is committed atomically using the target cluster's suggested category.
+    """
+    service = ImportService(db)
+    try:
+        return service.attach_row_to_cluster(
+            user_id=current_user.id,
+            session_id=session_id,
+            row_id=row_id,
+            target_fingerprint=payload.target_fingerprint,
+        )
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/{session_id}/clusters/bulk-apply", response_model=BulkApplyResponse)
+def bulk_apply_cluster(
+    session_id: int,
+    payload: BulkApplyRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Apply a moderator action to all included rows of a cluster.
+
+    One click, N confirmations (see project_bulk_clusters.md). Each row is
+    confirmed via the same path as a manual single-row update. Rules are
+    upserted per unique (fingerprint, category) combination with
+    `confirms_delta = N` — a single bulk action activates AND generalizes
+    the rule in one transition.
+    """
+    service = ImportService(db)
+    try:
+        return service.bulk_apply_cluster(
+            user_id=current_user.id, session_id=session_id, payload=payload,
+        )
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/{session_id}", response_model=ImportSessionResponse)
