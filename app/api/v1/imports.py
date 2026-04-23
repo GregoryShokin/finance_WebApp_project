@@ -266,10 +266,26 @@ def assign_session_account(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="account_id обязателен.")
     service.import_repo.update_session(session, account_id=int(account_id))
     db.commit()
+    db.refresh(session)
+
+    # If the session was uploaded without a detected account (very common when
+    # the user had no existing statements for this bank yet), auto-preview was
+    # skipped on upload. Now that we have an account, fire it — so the bulk
+    # flow "upload N statements → assign each to an account" matches the
+    # queue-era UX where rows get extracted and matched without manual clicks.
+    if session.status == "analyzed":
+        mapping = session.mapping_json or {}
+        field_mapping = mapping.get("field_mapping") or {}
+        if field_mapping.get("date") and field_mapping.get("amount"):
+            try:
+                from app.jobs.auto_preview_import_session import auto_preview_import_session
+                auto_preview_import_session.delay(session.id)
+            except Exception:
+                pass
+
     # Re-run transfer matcher so existing previewed sessions can now match against this one.
     service.transfer_matcher.match_transfers_for_user(user_id=current_user.id)
     db.commit()
-    db.refresh(session)
     return {
         "id": session.id,
         "filename": session.filename,

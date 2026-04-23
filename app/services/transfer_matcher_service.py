@@ -364,8 +364,16 @@ class TransferMatcherService:
             score = min(1.0, score + 0.05)
 
         # Penalize pairs where either side looks like a scheduled payment,
-        # not an inter-account transfer.
-        if self._has_anti_transfer_keyword(a) or self._has_anti_transfer_keyword(b):
+        # not an inter-account transfer. BUT: if both sides match exactly on
+        # amount AND date-to-the-second (a unique fingerprint of an internal
+        # transfer between two of the user's own accounts — the bank posts
+        # both legs with a shared timestamp), skip the penalty. Otherwise
+        # legit cross-account credit repayments ("Погашение кредита" posted
+        # on both the source debit card and the target credit card with
+        # matching timestamps) would score 0.40 and fall below MIN_SCORE.
+        has_anti = self._has_anti_transfer_keyword(a) or self._has_anti_transfer_keyword(b)
+        exact_twin = diff_seconds == 0 and a.amount == b.amount
+        if has_anti and not exact_twin:
             score *= 0.4
 
         return round(score, 4)
