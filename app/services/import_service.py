@@ -183,6 +183,19 @@ class ImportService:
         self.db.commit()
         self.db.refresh(session)
 
+        # If the uploader detected both an account and a usable field mapping,
+        # auto-build the preview in the background. This is what makes the
+        # queue-level transfer matcher work end-to-end: every session gets rows
+        # shortly after upload, so when the Nth statement lands the matcher
+        # can find cross-bank pairs without the user previewing each session.
+        field_mapping = (detection or {}).get("field_mapping") or {}
+        if suggested_account_id is not None and field_mapping.get("date") and field_mapping.get("amount"):
+            try:
+                from app.jobs.auto_preview_import_session import auto_preview_import_session
+                auto_preview_import_session.delay(session.id)
+            except Exception:
+                logger.exception("auto_preview_import_session enqueue failed for session %s", session.id)
+
         return {
             "session_id": session.id,
             "filename": session.filename,
@@ -217,6 +230,8 @@ class ImportService:
         items = []
         for session in sessions:
             rows = self.import_repo.list_rows(session_id=session.id)
+            summary = session.summary_json or {}
+            auto_preview = (summary.get("auto_preview") or {}).get("status")
             items.append({
                 "id": session.id,
                 "filename": session.filename,
@@ -228,6 +243,7 @@ class ImportService:
                 "row_count": len(rows),
                 "ready_count": sum(1 for r in rows if r.status == "ready"),
                 "error_count": sum(1 for r in rows if r.status == "error"),
+                "auto_preview_status": auto_preview,
             })
         return {"sessions": items, "total": len(items)}
 

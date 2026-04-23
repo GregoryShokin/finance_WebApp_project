@@ -106,6 +106,23 @@ def get_moderation_metrics(
     return metrics.to_dict()
 
 
+@router.post("/rematch-transfers")
+def rematch_transfers(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run the global transfer matcher across all user sessions.
+
+    Use when sessions were uploaded/removed and cross-session pairs may have
+    shifted. Cheap — pure DB work, no LLM.
+    """
+    from app.services.transfer_matcher_service import TransferMatcherService
+
+    TransferMatcherService(db).match_transfers_for_user(user_id=current_user.id)
+    db.commit()
+    return {"status": "ok"}
+
+
 @router.get("/parked-queue")
 def get_parked_queue(
     db: Session = Depends(get_db),

@@ -215,6 +215,9 @@ class ImportSessionListItem(BaseModel):
     row_count: int
     ready_count: int
     error_count: int
+    # Mirrors session.summary_json["auto_preview"]["status"]:
+    # pending | running | ready | failed | skipped | null (never attempted).
+    auto_preview_status: str | None = None
 
 
 class ImportSessionListResponse(BaseModel):

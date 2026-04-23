@@ -129,6 +129,15 @@ export function ImportQueue({ onResume }: { onResume: (id: number) => void }) {
   const sessionsQuery = useQuery({
     queryKey: ['import-sessions'],
     queryFn: getImportSessions,
+    // Poll while any session is still auto-processing so the UI transitions
+    // from "обрабатывается" → "готова" without a manual reload.
+    refetchInterval: (query) => {
+      const data = query.state.data as { sessions?: Array<{ auto_preview_status?: string | null; status?: string }> } | undefined;
+      const inflight = (data?.sessions ?? []).some((s) =>
+        s.auto_preview_status === 'pending' || s.auto_preview_status === 'running'
+      );
+      return inflight ? 2000 : false;
+    },
   });
   const accountsQuery = useQuery({
     queryKey: ['accounts'],
@@ -181,6 +190,10 @@ export function ImportQueue({ onResume }: { onResume: (id: number) => void }) {
   return (
     <div className="space-y-3">
       {sessions.map((session) => {
+        const autoStatus = session.auto_preview_status ?? null;
+        const autoRunning = autoStatus === 'pending' || autoStatus === 'running';
+        const autoReady = autoStatus === 'ready' || session.status === 'preview_ready';
+        const autoFailed = autoStatus === 'failed';
         return (
           <Card
             key={session.id}
@@ -196,25 +209,45 @@ export function ImportQueue({ onResume }: { onResume: (id: number) => void }) {
                   {session.filename}
                 </p>
 
-                <AccountSelector
-                  sessionId={session.id}
-                  currentAccountId={session.account_id ?? null}
-                  accounts={accountsQuery.data ?? []}
-                  onAssigned={() => {}}
-                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <AccountSelector
+                    sessionId={session.id}
+                    currentAccountId={session.account_id ?? null}
+                    accounts={accountsQuery.data ?? []}
+                    onAssigned={() => {}}
+                  />
+                  {autoRunning && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-2.5 py-1 text-[11px] font-medium text-sky-700">
+                      <span className="size-1.5 animate-pulse rounded-full bg-sky-500" />
+                      Обрабатывается…
+                    </span>
+                  )}
+                  {autoReady && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700">
+                      <span className="size-1.5 rounded-full bg-emerald-500" />
+                      Готово к модерации
+                    </span>
+                  )}
+                  {autoFailed && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700">
+                      <span className="size-1.5 rounded-full bg-amber-500" />
+                      Авто-обработка не удалась — продолжи вручную
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
                 <button
                   type="button"
-                  disabled={resumingId === session.id}
+                  disabled={resumingId === session.id || autoRunning}
                   onClick={() => {
                     setResumingId(session.id);
                     onResume(session.id);
                   }}
                   className="inline-flex size-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                  aria-label="Продолжить выписку"
-                  title="Продолжить выписку"
+                  aria-label={autoRunning ? 'Подождите, идёт авто-обработка' : 'Продолжить выписку'}
+                  title={autoRunning ? 'Подождите, идёт авто-обработка' : 'Продолжить выписку'}
                 >
                   <SquareArrowUp className="size-4" />
                 </button>

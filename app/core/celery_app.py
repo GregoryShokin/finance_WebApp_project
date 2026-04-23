@@ -11,6 +11,7 @@ celery_app = Celery(
     include=[
         "app.jobs.monthly_capital_snapshot",
         "app.jobs.moderate_import_session",
+        "app.jobs.auto_preview_import_session",
     ],
 )
 celery_app.conf.update(

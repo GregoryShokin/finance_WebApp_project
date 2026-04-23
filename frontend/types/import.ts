@@ -207,6 +207,7 @@ export type ImportSessionListItem = {
   row_count: number;
   ready_count: number;
   error_count: number;
+  auto_preview_status: 'pending' | 'running' | 'ready' | 'failed' | 'skipped' | null;
 };
 
 
