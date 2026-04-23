@@ -374,6 +374,17 @@ class PdfExtractor(BaseExtractor):
             and "\u0412\u044b\u043f\u0438\u0441\u043a\u0430 \u043f\u043e \u0414\u043e\u0433\u043e\u0432\u043e\u0440\u0443" not in full_text
         ):
             return False
+        # Яндекс Дебет (bank/debit account) statements share the same header
+        # markers as credit-card statements but have a distinct layout: each
+        # transaction block contains a standalone "в НН:НН" time-separator line.
+        # Credit-card PDFs do NOT have such lines — the time is embedded
+        # elsewhere. Presence of 5+ such lines is a reliable debit-account signal.
+        _time_sep_count = full_text.count("\nв ")
+        if _time_sep_count >= 5:
+            return False
+        # "Счёт ЭДС" / "Карта Сумма в валюте" appear only in debit/wallet statements.
+        if "\u0421\u0447\u0451\u0442 \u042d\u0414\u0421" in full_text or "\u0421\u0447\u0435\u0442 \u042d\u0414\u0421" in full_text:
+            return False
         return (
             "\u041f\u043e\u0433\u0430\u0448\u0435\u043d\u0438\u0435 \u043e\u0441\u043d\u043e\u0432\u043d\u043e\u0433\u043e \u0434\u043e\u043b\u0433\u0430" in full_text
             or "\u041e\u043f\u043b\u0430\u0442\u0430 \u0442\u043e\u0432\u0430\u0440\u043e\u0432 \u0438 \u0443\u0441\u043b\u0443\u0433" in full_text
@@ -633,6 +644,15 @@ class PdfExtractor(BaseExtractor):
             return True
         fallback_hits = sum(1 for marker in YANDEX_BANK_FALLBACK_MARKERS if marker in full_text)
         if fallback_hits >= 2:
+            return True
+        # Structural fallback for Яндекс Дебет and other Yandex variants whose
+        # header text differs from the credit-card format. These PDFs have a
+        # distinctive layout with explicit time-separator lines ("в НН:НН") and
+        # date-amount summary lines matching YANDEX_SUMMARY_FALLBACK_RX.
+        _time_line_rx = re.compile(r"^в\s+\d{2}:\d{2}$")
+        _time_hits = sum(1 for ln in raw_lines if _time_line_rx.match(ln.strip()))
+        _amount_hits = sum(1 for ln in raw_lines if YANDEX_SUMMARY_FALLBACK_RX.match(ln.strip()))
+        if _time_hits >= 3 and _amount_hits >= 3:
             return True
         return any("Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР Р‹Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР’В¦Р В Р’В Р вЂ™Р’В Р В РЎС›Р Р†Р вЂљР’ВР В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’ВµР В Р’В Р вЂ™Р’В Р В Р Р‹Р Р†Р вЂљРЎСљР В Р’В Р В Р вЂ№Р В Р’В Р РЋРІР‚Сљ Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р вЂ™Р’ВР В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В°Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР’В¦Р В Р’В Р вЂ™Р’В Р В Р Р‹Р Р†Р вЂљРЎСљ" in line for line in raw_lines) and any("Р В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–Р В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р В Р вЂ№Р В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р вЂ™Р’ВР В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р РЋРІвЂћСћ Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В­Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р РЋРЎС™Р В Р’В Р вЂ™Р’В Р В Р’В Р В РІР‚в„–" in line for line in raw_lines)
 
