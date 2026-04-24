@@ -22,6 +22,11 @@ class ImportRowStatus(str, Enum):
     duplicate = "duplicate"
     skipped = "skipped"
     committed = "committed"
+    # Parked rows — user chose "Отложить" on a row; it stays out of the
+    # current import flow until unparked. Stored in DB as "parked" but was
+    # missing from this enum, which made every preview response containing
+    # a parked row 500 with ResponseValidationError.
+    parked = "parked"
 
 
 class ImportSourceType(str, Enum):
