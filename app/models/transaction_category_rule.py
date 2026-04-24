@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from decimal import Decimal
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -33,9 +35,14 @@ class TransactionCategoryRule(Base):
     user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id", ondelete="CASCADE"), nullable=False, index=True)
 
-    # Strength counters (И-08 Phase 2).
-    confirms: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    rejections: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Strength counters (И-08 Phase 2, §10.2). Numeric so `warning` bulk-ack
+    # confirmations can weigh 0.5 while `ready` confirmations weigh 1.0.
+    confirms: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), nullable=False, default=Decimal("1.00"), server_default="1.00"
+    )
+    rejections: Mapped[Decimal] = mapped_column(
+        Numeric(8, 2), nullable=False, default=Decimal("0.00"), server_default="0.00"
+    )
 
     # Activation + scope. See RULE_SCOPES for allowed `scope` values.
     scope: Mapped[str] = mapped_column(

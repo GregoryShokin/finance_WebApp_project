@@ -127,6 +127,60 @@ class TestCategoryValidation:
         assert result.predicted_category_id == 10
 
 
+class TestCreditPaymentGuard:
+    """§12.3: operation_type='credit_payment' is forbidden end-to-end.
+
+    Even if the model ignores the prompt and returns it, the moderator
+    must coerce the hypothesis into a safe shape before returning.
+    """
+
+    def test_credit_payment_coerced_to_transfer(self):
+        provider = MagicMock()
+        provider.is_enabled = True
+        hypothesis = ClusterHypothesis(
+            operation_type="credit_payment",
+            direction="expense",
+            predicted_category_id=10,
+            confidence=0.9,
+            reasoning="LLM попробовал credit_payment",
+        )
+        provider.generate_structured.return_value = LLMResult(parsed=hypothesis)
+        svc = ImportModeratorService(db=MagicMock(), provider=provider)
+
+        result = svc.moderate_cluster(_cluster(), _context(categories=[_category(10, "Еда")]))
+        assert result is not None
+        assert result.operation_type == "transfer"
+        assert result.predicted_category_id is None
+        # confidence and reasoning from the model survive the coercion
+        assert result.confidence == 0.9
+
+    def test_system_prompt_bans_credit_payment(self):
+        """The prompt shown to the model must NOT list credit_payment as a choice."""
+        provider = MagicMock()
+        provider.is_enabled = True
+        hypothesis = ClusterHypothesis(
+            operation_type="transfer", direction="expense",
+            predicted_category_id=None, confidence=0.5, reasoning="x",
+        )
+        provider.generate_structured.return_value = LLMResult(parsed=hypothesis)
+        svc = ImportModeratorService(db=MagicMock(), provider=provider)
+
+        svc.moderate_cluster(_cluster(), _context())
+        call_kwargs = provider.generate_structured.call_args.kwargs
+        system_text = call_kwargs["system"]
+        # Find the line that enumerates allowed operation_type values.
+        allowed_line = next(
+            line for line in system_text.splitlines()
+            if line.lstrip().startswith("1. operation_type")
+        )
+        # It must NOT include credit_payment in the allowed list.
+        assert "credit_payment" not in allowed_line
+        # But the prompt MUST explicitly forbid credit_payment somewhere —
+        # the model should be told, not just left to guess.
+        assert "credit_payment" in system_text
+        assert "запрещён" in system_text
+
+
 class TestAnonymization:
     """Phase 4.7: raw identifiers must never appear in the LLM payload."""
 

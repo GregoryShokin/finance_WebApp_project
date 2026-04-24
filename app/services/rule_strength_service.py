@@ -29,6 +29,7 @@ What does NOT happen here:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -36,16 +37,20 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.models.transaction_category_rule import TransactionCategoryRule
 
+# §10.2 — confirm weights by the committing row's status.
+CONFIRM_WEIGHT_READY = Decimal("1.00")     # ready row, final == predicted
+CONFIRM_WEIGHT_WARNING = Decimal("0.50")   # warning row committed via bulk-ack
+
 
 @dataclass(frozen=True)
 class RuleTransition:
     """Snapshot of what changed during a single on_confirmed / on_rejected call."""
 
     rule_id: int
-    confirms_before: int
-    confirms_after: int
-    rejections_before: int
-    rejections_after: int
+    confirms_before: Decimal
+    confirms_after: Decimal
+    rejections_before: Decimal
+    rejections_after: Decimal
     is_active_before: bool
     is_active_after: bool
     scope_before: str
@@ -78,26 +83,29 @@ class RuleStrengthService:
     # Public API
     # ------------------------------------------------------------------
 
-    def on_confirmed(self, rule_id: int, confirms_delta: int = 1) -> RuleTransition:
+    def on_confirmed(
+        self, rule_id: int, confirms_delta: Decimal | float | int = CONFIRM_WEIGHT_READY,
+    ) -> RuleTransition:
         """Rule was applied and the user left the result unchanged.
 
-        `confirms` increments by `confirms_delta` (default 1). The bulk-confirm
-        endpoint passes `confirms_delta = N` when a single moderator action
-        validates an entire cluster — that's the one click, N confirmations
-        contract from project_bulk_clusters.md, and it lets the rule clear
-        the activate/generalize thresholds in one step.
+        §10.2: `confirms_delta` carries the committing row's weight.
+          - `ready` commit (final == predicted): weight 1.0 (default).
+          - `warning` commit via bulk-ack: weight 0.5 — less evidence than
+            an explicit review, but still a signal worth learning from.
+          - Bulk-confirm endpoint may pass N × weight in a single call.
 
         The ``is_active: False → True`` transition fires the first time
         ``confirms`` crosses ``RULE_ACTIVATE_CONFIRMS`` AND only if
         ``rejections == 0``. A rule previously deactivated via rejections
         cannot be silently reactivated — manual re-enable only (Phase 5).
         """
-        if confirms_delta < 1:
-            raise ValueError(f"confirms_delta must be >= 1, got {confirms_delta}")
+        delta = Decimal(str(confirms_delta))
+        if delta <= 0:
+            raise ValueError(f"confirms_delta must be > 0, got {confirms_delta}")
         rule = self._load(rule_id)
         before = _snapshot(rule)
 
-        rule.confirms += confirms_delta
+        rule.confirms = (rule.confirms or Decimal("0")) + delta
 
         if (
             not rule.is_active
@@ -143,7 +151,7 @@ class RuleStrengthService:
         rule = self._load(rule_id)
         before = _snapshot(rule)
 
-        rule.rejections += 1
+        rule.rejections = (rule.rejections or Decimal("0")) + Decimal("1")
 
         if rule.is_active:
             hit_absolute = rule.rejections >= self.settings.RULE_DEACTIVATE_REJECTIONS
@@ -180,16 +188,16 @@ class RuleStrengthService:
 
 @dataclass(frozen=True)
 class _Before:
-    confirms_before: int
-    rejections_before: int
+    confirms_before: Decimal
+    rejections_before: Decimal
     is_active_before: bool
     scope_before: str
 
 
 def _snapshot(rule: TransactionCategoryRule) -> _Before:
     return _Before(
-        confirms_before=rule.confirms,
-        rejections_before=rule.rejections,
+        confirms_before=rule.confirms or Decimal("0"),
+        rejections_before=rule.rejections or Decimal("0"),
         is_active_before=rule.is_active,
         scope_before=rule.scope,
     )
@@ -215,8 +223,10 @@ def _transition(
     )
 
 
-def _error_ratio(confirms: int, rejections: int) -> float:
-    total = confirms + rejections
+def _error_ratio(confirms: Decimal | int, rejections: Decimal | int) -> float:
+    c = float(confirms or 0)
+    r = float(rejections or 0)
+    total = c + r
     if total == 0:
         return 0.0
-    return rejections / total
+    return r / total

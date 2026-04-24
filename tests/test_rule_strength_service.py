@@ -293,6 +293,64 @@ def test_bulk_confirm_rejects_zero_and_negative_delta(db, user, category, servic
         service.on_confirmed(rule.id, confirms_delta=-3)
 
 
+# ---------------------------------------------------------------------------
+# §10.2 — weighted confirms: ready=1.0, warning=0.5
+# ---------------------------------------------------------------------------
+
+
+def test_warning_weight_accumulates_fractional_confirms(db, user, category, service):
+    """Two warning-row bulk-acks (0.5 each) should sum to 1.0 and NOT cross
+    the activation threshold (≥2)."""
+    from decimal import Decimal
+    rule = _make_rule(db, user, category, confirms=0, is_active=False)
+
+    service.on_confirmed(rule.id, confirms_delta=Decimal("0.5"))
+    db.refresh(rule)
+    assert rule.confirms == Decimal("0.50")
+    assert rule.is_active is False  # still under threshold
+
+    service.on_confirmed(rule.id, confirms_delta=Decimal("0.5"))
+    db.refresh(rule)
+    assert rule.confirms == Decimal("1.00")
+    assert rule.is_active is False  # 1.0 < RULE_ACTIVATE_CONFIRMS (2)
+
+
+def test_ready_weight_crosses_threshold_faster_than_warning(db, user, category, service):
+    """A `ready` confirm (1.0) + another `ready` confirm (1.0) activates;
+    two `warning` confirms (0.5 each) also sum to 1.0 but stay below."""
+    from decimal import Decimal
+    rule_ready = _make_rule(
+        db, user, category,
+        normalized_description="ready branch", confirms=0, is_active=False,
+    )
+    rule_warn = _make_rule(
+        db, user, category,
+        normalized_description="warning branch", confirms=0, is_active=False,
+    )
+
+    service.on_confirmed(rule_ready.id, confirms_delta=Decimal("1.0"))
+    service.on_confirmed(rule_ready.id, confirms_delta=Decimal("1.0"))
+    db.refresh(rule_ready)
+    assert rule_ready.confirms == Decimal("2.00")
+    assert rule_ready.is_active is True
+
+    service.on_confirmed(rule_warn.id, confirms_delta=Decimal("0.5"))
+    service.on_confirmed(rule_warn.id, confirms_delta=Decimal("0.5"))
+    db.refresh(rule_warn)
+    assert rule_warn.confirms == Decimal("1.00")
+    assert rule_warn.is_active is False
+
+
+def test_default_confirm_weight_is_one_point_zero(db, user, category, service):
+    """Calling on_confirmed without confirms_delta applies the §10.2 ready
+    weight of 1.0 — preserves existing call-site behaviour."""
+    from decimal import Decimal
+    rule = _make_rule(db, user, category, confirms=0)
+    service.on_confirmed(rule.id)
+    db.refresh(rule)
+    assert rule.confirms == Decimal("1.00")
+
+
 def test_bulk_confirm_on_deactivated_rule_does_not_reactivate(
     db, user, category, service,
 ):

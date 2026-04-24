@@ -37,6 +37,7 @@ class Transaction(Base):
     credit_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
     counterparty_id: Mapped[int | None] = mapped_column(ForeignKey("counterparties.id", ondelete="SET NULL"), nullable=True, index=True)
+    debt_partner_id: Mapped[int | None] = mapped_column(ForeignKey("debt_partners.id", ondelete="SET NULL"), nullable=True, index=True)
 
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default="RUB", server_default="RUB")
@@ -53,6 +54,11 @@ class Transaction(Base):
     debt_direction: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     normalized_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # §8.1 dedup key component. The v2 normalizer's skeleton — placeholder-rich
+    # form ("<PHONE>", "<CONTRACT>", …) — that uniquely identifies the "what"
+    # of the operation, independent of the specific identifier value. Enables
+    # skeleton-based deduplication on re-import; see `_find_duplicate`.
+    skeleton: Mapped[str | None] = mapped_column(String(500), nullable=True)
     transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     affects_analytics: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true", index=True)
@@ -71,6 +77,7 @@ class Transaction(Base):
     credit_account = relationship("Account", foreign_keys=[credit_account_id])
     category = relationship("Category", back_populates="transactions")
     counterparty = relationship("Counterparty", back_populates="transactions")
+    debt_partner = relationship("DebtPartner", back_populates="transactions")
     goal = relationship("Goal", back_populates="transactions", foreign_keys=[goal_id])
 
     @property
@@ -81,6 +88,10 @@ class Transaction(Base):
     @property
     def counterparty_name(self) -> str | None:
         return self.counterparty.name if self.counterparty else None
+
+    @property
+    def debt_partner_name(self) -> str | None:
+        return self.debt_partner.name if self.debt_partner else None
 
     @property
     def installment_term_months(self) -> int | None:

@@ -162,6 +162,7 @@ class TransactionRepository:
         amount,
         transaction_date,
         description: str | None = None,
+        skeleton: str | None = None,
         days_window: int = 3,
         transaction_type: str | None = None,
     ):
@@ -182,6 +183,12 @@ class TransactionRepository:
 
         if transaction_type:
             query = query.filter(Transaction.type == transaction_type)
+
+        # §8.1: skeleton is the canonical dedup discriminant. When provided,
+        # narrow the candidate set to rows with the same skeleton — callers
+        # can still post-filter if they need legacy description equality too.
+        if skeleton:
+            query = query.filter(Transaction.skeleton == skeleton)
 
         if description:
             query = query.filter(Transaction.description == description)

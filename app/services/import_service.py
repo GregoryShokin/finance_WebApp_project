@@ -19,6 +19,10 @@ from app.repositories.transaction_category_rule_repository import TransactionCat
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.imports import ImportMappingRequest, ImportPreviewSummary, ImportRowUpdateRequest
 from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
+from app.services.counterparty_identifier_service import (
+    SUPPORTED_IDENTIFIER_KINDS,
+    CounterpartyIdentifierService,
+)
 from app.services.fingerprint_alias_service import FingerprintAliasService
 from app.services.import_confidence import ImportConfidenceService
 from app.services.import_extractors import ExtractionResult, ImportExtractorRegistry
@@ -53,9 +57,18 @@ RAW_TYPE_TO_OPERATION_TYPE = {
     "investment_buy": "investment_buy",
     "investment_sell": "investment_sell",
     "credit_disbursement": "credit_disbursement",
-    "credit_payment": "credit_payment",
+    # §9.1 / §12.3: "credit_payment" is not a valid operation_type. A loan
+    # payment is stored in normalized_data as a transfer whose commit step
+    # splits it into (interest expense + principal transfer). The
+    # `requires_credit_split` flag on normalized_data is the meta-signal
+    # that drives the split-form in the moderator UI and the commit branch.
+    "credit_payment": "transfer",
     "credit_interest": "regular",
 }
+
+# Raw-type values that, on top of their normal operation_type mapping, also
+# flag the row for the credit split-form UI / commit-time split handling.
+_RAW_TYPES_REQUIRING_CREDIT_SPLIT = {"credit_payment"}
 
 
 class ImportValidationError(Exception):
@@ -82,6 +95,7 @@ class ImportService:
         self.transfer_matcher = TransferMatcherService(db)
         self._alias_service = FingerprintAliasService(db)
         self._counterparty_fp_service = CounterpartyFingerprintService(db)
+        self._counterparty_id_service = CounterpartyIdentifierService(db)
 
     def upload_source(
         self,
@@ -299,6 +313,11 @@ class ImportService:
         # A single cluster may span many fingerprints (brand cluster), and one
         # counterparty choice binds all of them at once.
         counterparty_bindings_by_cp: dict[int, set[str]] = {}
+        # Cross-account identifier bindings (phone/contract/iban/card →
+        # counterparty). Fingerprint bindings are account-scoped because the
+        # fingerprint itself bakes in account_id + bank; identifier bindings
+        # resolve the same recipient across every statement.
+        identifier_bindings_by_cp: dict[int, set[tuple[str, str]]] = {}
 
         for update in payload.updates:
             row_id = update.row_id
@@ -357,6 +376,21 @@ class ImportService:
                     int(update.counterparty_id), set()
                 ).add(fp)
 
+            # Cross-account identifier binding. Pull the strongest token off
+            # the row's normalized payload — matching the priority used by
+            # cluster assembly (contract > phone > iban > card). Skip unknown
+            # kinds; they're not cross-account-safe.
+            if update.counterparty_id is not None:
+                tokens = normalized.get("tokens") or {}
+                if isinstance(tokens, dict):
+                    for kind in ("contract", "phone", "iban", "card"):
+                        value = tokens.get(kind)
+                        if value and kind in SUPPORTED_IDENTIFIER_KINDS:
+                            identifier_bindings_by_cp.setdefault(
+                                int(update.counterparty_id), set()
+                            ).add((kind, str(value)))
+                            break
+
         # Apply rule strength transitions in a second pass — one upsert per
         # (fingerprint, category) group, with confirms_delta equal to the
         # group size. A 92-row Pyaterochka cluster therefore creates one
@@ -385,6 +419,15 @@ class ImportService:
             counterparty_bindings_count += self._counterparty_fp_service.bind_many(
                 user_id=user_id,
                 fingerprints=list(fps),
+                counterparty_id=cp_id,
+            )
+        # Identifier bindings — cross-account layer. Same counterparty may have
+        # several identifiers (e.g. different phones for different services of
+        # the same vendor); each pair is stored independently.
+        for cp_id, pairs in identifier_bindings_by_cp.items():
+            self._counterparty_id_service.bind_many(
+                user_id=user_id,
+                pairs=list(pairs),
                 counterparty_id=cp_id,
             )
 
@@ -1194,20 +1237,12 @@ class ImportService:
             if value is not None:
                 normalized[field] = value
 
-        # If the user explicitly changes the category away from what the rule suggested,
-        # count it as a rejection so the strength model can deactivate poor rules.
-        if (
-            _prior_rule_id is not None
-            and payload.category_id is not None
-            and payload.category_id != _prior_rule_cat
-        ):
-            from app.core.config import settings as _settings
-            try:
-                RuleStrengthService(self.db, _settings).on_rejected(_prior_rule_id)
-            except RuleNotFound:
-                pass
-            normalized.pop("applied_rule_id", None)
-            normalized.pop("applied_rule_category_id", None)
+        # §10.3: rejections are counted ONLY on commit, not on intermediate
+        # user edits ("поменял → вернул как было" must not leave a rejection
+        # trace). Keep applied_rule_id + applied_rule_category_id intact here;
+        # the commit path compares them against the final category_id and
+        # routes to Case A/B (match → confirm) or Case C (diff → reject old +
+        # create new). This reflects §10.2 Cases A/B/C.
 
         if payload.split_items is not None:
             normalized["split_items"] = [
@@ -1216,6 +1251,8 @@ class ImportService:
                     "category_id": item.category_id,
                     "target_account_id": item.target_account_id,
                     "debt_direction": item.debt_direction,
+                    "counterparty_id": item.counterparty_id,
+                    "debt_partner_id": item.debt_partner_id,
                     "amount": str(item.amount),
                     "description": item.description,
                 }
@@ -1311,6 +1348,17 @@ class ImportService:
         operation_type = normalized.get("operation_type") or "regular"
         amount = normalized.get("amount")
 
+        # §12.3: operation_type="credit_payment" is forbidden as a real value,
+        # but the moderator UI may submit it as a meta-signal ("user tapped
+        # the split-form button"). Fold it into (operation_type=transfer +
+        # requires_credit_split=True) so the stored normalized_data never
+        # carries the forbidden value. The validation and commit branches
+        # below key off requires_credit_split, not operation_type.
+        if operation_type == "credit_payment":
+            normalized["requires_credit_split"] = True
+            normalized["operation_type"] = "transfer"
+            operation_type = "transfer"
+
         if account_id in (None, "", 0):
             local_issues.append("РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚.")
             status = "warning"
@@ -1323,7 +1371,7 @@ class ImportService:
             local_issues.append("РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЃСѓРјРјР°.")
             status = "error"
 
-        if operation_type == "transfer":
+        if operation_type == "transfer" and not normalized.get("requires_credit_split"):
             target_account_id = normalized.get("target_account_id")
             tx_type = str(normalized.get("type") or "expense")
             normalized["credit_account_id"] = None
@@ -1346,7 +1394,11 @@ class ImportService:
             normalized["credit_interest_amount"] = None
             normalized["category_id"] = None
             normalized["split_items"] = []
-        elif operation_type == "credit_payment":
+        elif operation_type == "transfer" and normalized.get("requires_credit_split"):
+            # §9.3 split: transfer to a loan account that must be committed as
+            # (interest expense + principal transfer). Validates the split
+            # amounts here; the actual two-transaction creation happens at
+            # commit time in commit_import.
             credit_account_id = normalized.get("credit_account_id") or normalized.get("target_account_id")
             normalized["category_id"] = None
             normalized["split_items"] = []
@@ -1405,10 +1457,14 @@ class ImportService:
                 # debit may economically be a regular expense + a debt slice +
                 # a transfer slice, etc. Validate each part by its own type
                 # instead of forcing them all to be regular.
+                # §12.3: credit_payment is NOT a valid operation_type. A loan
+                # payment split inside split_items would create a Transaction
+                # with a forbidden type — catch it here at validation time
+                # instead of letting it blow up at the ORM enum check.
                 ALLOWED_PART_TYPES = {
                     "regular", "transfer", "refund", "debt",
                     "investment_buy", "investment_sell",
-                    "credit_disbursement", "credit_payment", "credit_early_repayment",
+                    "credit_disbursement", "credit_early_repayment",
                 }
                 ALLOWED_DEBT_DIRS = {"borrowed", "lent", "repaid", "collected"}
                 valid_split = True
@@ -1442,6 +1498,8 @@ class ImportService:
                     category_id = item.get("category_id")
                     target_account_id = item.get("target_account_id")
                     debt_direction = item.get("debt_direction")
+                    counterparty_id = item.get("counterparty_id")
+                    debt_partner_id = item.get("debt_partner_id")
 
                     # Per-type required fields. Refuse silently-incomplete
                     # parts up front instead of letting commit_import blow up.
@@ -1455,6 +1513,10 @@ class ImportService:
                             valid_split = False
                             local_issues.append("В части-долге укажи направление: занял/одолжил/возврат/получил.")
                             break
+                        if debt_partner_id in (None, "", 0):
+                            valid_split = False
+                            local_issues.append("В части-долге укажи дебитора / кредитора.")
+                            break
                     if part_op == "transfer":
                         if target_account_id in (None, "", 0):
                             valid_split = False
@@ -1466,6 +1528,8 @@ class ImportService:
                         "category_id": int(category_id) if category_id not in (None, "", 0) else None,
                         "target_account_id": int(target_account_id) if target_account_id not in (None, "", 0) else None,
                         "debt_direction": str(debt_direction).lower() if debt_direction else None,
+                        "counterparty_id": int(counterparty_id) if counterparty_id not in (None, "", 0) else None,
+                        "debt_partner_id": int(debt_partner_id) if debt_partner_id not in (None, "", 0) else None,
                         "amount": str(split_amount),
                         "description": description,
                     })
@@ -1827,6 +1891,20 @@ class ImportService:
 
                 normalized["operation_type"] = enrichment.get("suggested_operation_type") or self._resolve_operation_type(normalized)
 
+                # §9.3 / §10.5: a loan payment raw-type flags the row for the
+                # split-form UI (meta-rule), but the row's operation_type itself
+                # must be a real, allowed value (here: transfer). The flag is
+                # the trigger — the enrichment's suggested_operation_type does
+                # NOT own this decision; we always look at the raw_type.
+                _raw_type = str(normalized.get("raw_type") or "").strip().lower()
+                if _raw_type in _RAW_TYPES_REQUIRING_CREDIT_SPLIT:
+                    normalized["requires_credit_split"] = True
+                    # If the enrichment overrode operation_type to something
+                    # other than transfer (e.g. inherited a regular-expense
+                    # suggestion from history), force it back to transfer so
+                    # the split commit branch can find it.
+                    normalized["operation_type"] = "transfer"
+
                 # Transfers and non-analytics types don't have categories — clear any
                 # rule-matched category that was assigned before operation_type was resolved.
                 if str(normalized.get("operation_type") or "") in ("transfer", *NON_ANALYTICS_OPERATION_TYPES):
@@ -1834,7 +1912,7 @@ class ImportService:
                 normalized["type"] = enrichment.get("suggested_type") or normalized.get("direction") or "expense"
 
                 if str(normalized["operation_type"]) == "transfer":
-                    # account_id always = session account ("РЎС‡С‘С‚ РёР· РІС‹РїРёСЃРєРё"), regardless of direction.
+                    # account_id always = session account ("счёт из выписки"), regardless of direction.
                     # target_account_id = the OTHER side of the transfer (source for income, dest for expense).
                     # _create_transfer_pair uses normalized["type"] to determine which side is expense/income.
                     normalized["account_id"] = payload.account_id
@@ -1849,6 +1927,16 @@ class ImportService:
                         # Expense transfer: session account sent money.
                         # target_account_id = destination side.
                         normalized["target_account_id"] = enrichment.get("suggested_target_account_id")
+
+                    # Final guard: if we still have no resolved counter-account after
+                    # all adjustments, the "transfer" label is unwarranted — downgrade
+                    # to regular so the row lands in the attention feed instead of the
+                    # silent TransfersBucket. This covers e.g. income rows where the
+                    # enricher resolved suggested_account_id as the session account
+                    # itself (self-transfer, impossible), which got nulled above.
+                    if normalized.get("target_account_id") in (None, "", 0):
+                        normalized["operation_type"] = "regular"
+                        normalized.pop("target_account_id", None)
                 else:
                     normalized["account_id"] = enrichment.get("suggested_account_id") or payload.account_id
                     normalized["target_account_id"] = enrichment.get("suggested_target_account_id")
@@ -1899,6 +1987,7 @@ class ImportService:
                     account_id=current_account_id,
                     amount=amount_decimal,
                     transaction_date=transaction_dt,
+                    skeleton=normalized.get("skeleton"),
                     normalized_description=normalized.get("normalized_description"),
                     transaction_type=str(normalized.get("type") or "expense"),
                 )
@@ -2071,7 +2160,7 @@ class ImportService:
             "category_id": rule.category_id,
         }
 
-    def commit_import(self, *, user_id: int, session_id: int, import_ready_only: bool = True) -> dict[str, Any]:
+    def commit_import(self, *, user_id: int, session_id: int, import_ready_only: bool = False) -> dict[str, Any]:
         session = self.get_session(user_id=user_id, session_id=session_id)
         # Serialize concurrent commits for the same session — prevents accidental
         # double-import when the user double-clicks or two requests arrive together.
@@ -2114,16 +2203,18 @@ class ImportService:
                 skipped_count += 1
                 continue
 
+            # §5.1: `warning` is NOT a blocking status. The default now lets
+            # warning rows through; callers that explicitly want ready-only
+            # can pass `import_ready_only=True`. Warning commits count as
+            # confirm weight 0.5 in §10.2 Case B (bulk-ack semantics).
             if row_status == "warning":
                 review_count += 1
-                skipped_count += 1
-                continue
+                if import_ready_only:
+                    skipped_count += 1
+                    continue
+                # Fall through to commit; §10.2 Case B applies the 0.5 weight.
 
-            if import_ready_only and row_status != "ready":
-                skipped_count += 1
-                continue
-
-            if row_status not in {"ready"}:
+            if row_status not in {"ready", "warning"}:
                 skipped_count += 1
                 continue
 
@@ -2156,14 +2247,14 @@ class ImportService:
                 operation_type = str(normalized.get("operation_type") or "regular")
                 target_account_id = normalized.get("target_account_id")
 
-                if operation_type == "transfer" and target_account_id not in (None, "", 0):
+                if operation_type == "transfer" and not normalized.get("requires_credit_split") and target_account_id not in (None, "", 0):
                     expense_tx, _income_tx = self._create_transfer_pair(
                         user_id=user_id,
                         payload=payloads[0],
                     )
                     last_transaction = expense_tx
                     imported_count += 1
-                elif operation_type == "credit_payment":
+                elif normalized.get("requires_credit_split"):
                     # Ref: financeapp-vault/01-Metrics/Поток.md — decision 2026-04-19
                     # Split into interest expense + principal transfer
                     principal = payloads[0].get("credit_principal_amount")
@@ -2257,27 +2348,77 @@ class ImportService:
                 applied_rule_id = normalized.get("applied_rule_id")
                 applied_rule_cat = normalized.get("applied_rule_category_id")
                 if category_id and norm_desc and operation_type not in NON_ANALYTICS_OPERATION_TYPES:
-                    if applied_rule_id is not None:
-                        # Rule was applied at preview; user left category unchanged → confirm.
-                        from app.core.config import settings as _settings
+                    # §10.2 — four cases by (was a rule applied?) × (final == predicted?)
+                    # The committing row's status chooses the confirm weight:
+                    #   ready   → +1.0  (Case A / Case D when user explicitly picked)
+                    #   warning → +0.5  (Case B, bulk-ack path)
+                    from app.core.config import settings as _settings
+                    from app.services.rule_strength_service import (
+                        CONFIRM_WEIGHT_READY, CONFIRM_WEIGHT_WARNING,
+                    )
+                    confirm_weight = (
+                        CONFIRM_WEIGHT_WARNING if row_status == "warning"
+                        else CONFIRM_WEIGHT_READY
+                    )
+                    rule_svc = RuleStrengthService(self.db, _settings)
+                    final_cat = int(category_id)
+
+                    if applied_rule_id is not None and applied_rule_cat is not None and int(applied_rule_cat) == final_cat:
+                        # Case A/B: final category matches predicted — confirm R.
                         try:
-                            RuleStrengthService(self.db, _settings).on_confirmed(applied_rule_id)
+                            rule_svc.on_confirmed(applied_rule_id, confirms_delta=confirm_weight)
                         except RuleNotFound:
-                            # Rule deleted between preview and commit; fall through to upsert.
+                            # Rule deleted between preview and commit — fall through
+                            # as if there was no prior rule (Case D).
                             self.category_rule_repo.upsert(
                                 user_id=user_id,
                                 normalized_description=norm_desc,
-                                category_id=int(category_id),
+                                category_id=final_cat,
                                 original_description=orig_desc or None,
                             )
-                    else:
-                        # No prior rule match — create or increment via upsert (legacy path).
-                        self.category_rule_repo.upsert(
+                    elif applied_rule_id is not None:
+                        # Case C: rule applied, user changed the category.
+                        # Old rule takes a rejection; new rule R' starts with
+                        # this commit as its first confirm (weighted by status).
+                        try:
+                            rule_svc.on_rejected(applied_rule_id)
+                        except RuleNotFound:
+                            pass  # old rule gone, ignore the rejection
+                        new_rule = self.category_rule_repo.upsert(
                             user_id=user_id,
                             normalized_description=norm_desc,
-                            category_id=int(category_id),
+                            category_id=final_cat,
                             original_description=orig_desc or None,
                         )
+                        # `upsert` creates with confirms=1 by default; if the
+                        # commit is from a warning row, correct the weight to 0.5.
+                        if new_rule is not None and confirm_weight != CONFIRM_WEIGHT_READY:
+                            try:
+                                new_rule.confirms = confirm_weight
+                                self.db.add(new_rule)
+                                self.db.flush()
+                            except Exception as exc:  # noqa: BLE001 — never block commit
+                                logger.warning(
+                                    "could not adjust new rule confirm weight: %s", exc,
+                                )
+                    else:
+                        # Case D: no prior rule — user explicitly assigned this
+                        # category. New rule, weighted by row status.
+                        new_rule = self.category_rule_repo.upsert(
+                            user_id=user_id,
+                            normalized_description=norm_desc,
+                            category_id=final_cat,
+                            original_description=orig_desc or None,
+                        )
+                        if new_rule is not None and confirm_weight != CONFIRM_WEIGHT_READY:
+                            try:
+                                new_rule.confirms = confirm_weight
+                                self.db.add(new_rule)
+                                self.db.flush()
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "could not adjust new rule confirm weight: %s", exc,
+                                )
             except (TransactionValidationError, ImportValidationError) as exc:
                 row.status = "error"
                 row.errors = list(dict.fromkeys([*(row.errors or []), str(exc)]))
@@ -2343,6 +2484,8 @@ class ImportService:
         transaction_date = ImportService._to_datetime(payload["transaction_date"])
         needs_review = bool(payload.get("needs_review"))
         normalized_description = self.enrichment.normalize_description(description)
+        # §8.1 dedup key component — carried from the import row's normalized data.
+        skeleton = payload.get("skeleton") or None
 
         # account_id is the SESSION account ("РЎС‡С‘С‚ РёР· РІС‹РїРёСЃРєРё").
         # target_account_id is the OTHER side of the transfer.
@@ -2375,6 +2518,7 @@ class ImportService:
             operation_type="transfer",
             description=description,
             normalized_description=normalized_description,
+            skeleton=skeleton,
             transaction_date=transaction_date,
             needs_review=needs_review,
             affects_analytics=False,
@@ -2391,6 +2535,7 @@ class ImportService:
             operation_type="transfer",
             description=description,
             normalized_description=normalized_description,
+            skeleton=skeleton,
             transaction_date=transaction_date,
             needs_review=needs_review,
             affects_analytics=False,
@@ -2449,6 +2594,8 @@ class ImportService:
             "type": str(tx_type),
             "operation_type": str(operation_type),
             "description": (normalized.get("description") or "")[:1000],
+            # §8.1: persist skeleton on the transaction for future-import dedup.
+            "skeleton": (normalized.get("skeleton") or None),
             "transaction_date": ImportService._to_datetime(transaction_date),
             "credit_principal_amount": normalized.get("credit_principal_amount"),
             "credit_interest_amount": normalized.get("credit_interest_amount"),
@@ -2506,13 +2653,18 @@ class ImportService:
                 part_category_id = item.get("category_id")
                 part_target_account_id = item.get("target_account_id")
                 part_debt_direction = item.get("debt_direction")
+                part_counterparty_id = item.get("counterparty_id")
+                part_debt_partner_id = item.get("debt_partner_id")
 
                 if part_op in ("regular", "refund") and part_category_id in (None, "", 0):
                     raise ValueError("В разбивке для каждой части нужна категория.")
                 if part_op == "transfer" and part_target_account_id in (None, "", 0):
                     raise ValueError("В части-переводе нужно указать счёт назначения.")
-                if part_op == "debt" and not part_debt_direction:
-                    raise ValueError("В части-долге нужно указать направление долга.")
+                if part_op == "debt":
+                    if not part_debt_direction:
+                        raise ValueError("В части-долге нужно указать направление долга.")
+                    if part_debt_partner_id in (None, "", 0):
+                        raise ValueError("В части-долге нужно указать дебитора / кредитора.")
 
                 # type/direction for the part: regular/debt/transfer keep the
                 # original direction (expense — money leaves the source account).
@@ -2521,6 +2673,15 @@ class ImportService:
                     part_type = "income"
                 else:
                     part_type = base_payload["type"]
+
+                # Counterparty and debt_partner are mutually exclusive per part:
+                # debt parts route to a DebtPartner (the debtor / creditor),
+                # non-debt parts keep Counterparty (the merchant / service).
+                # Drop the wrong field to avoid validator rejection downstream.
+                if part_op == "debt":
+                    part_counterparty_id = None
+                else:
+                    part_debt_partner_id = None
 
                 payloads.append({
                     **base_payload,
@@ -2531,6 +2692,8 @@ class ImportService:
                     "category_id": int(part_category_id) if part_category_id not in (None, "", 0) else None,
                     "target_account_id": int(part_target_account_id) if part_target_account_id not in (None, "", 0) else None,
                     "debt_direction": str(part_debt_direction).lower() if part_debt_direction else None,
+                    "counterparty_id": int(part_counterparty_id) if part_counterparty_id not in (None, "", 0) else None,
+                    "debt_partner_id": int(part_debt_partner_id) if part_debt_partner_id not in (None, "", 0) else None,
                     # Credit/investment slice fields — not relevant for individual
                     # parts; they always come from the original row, not split.
                     "credit_account_id": None,
@@ -2663,31 +2826,64 @@ class ImportService:
         account_id: int,
         amount: Decimal,
         transaction_date: datetime,
+        skeleton: str | None,
         normalized_description: str | None,
         transaction_type: str = "expense",
     ) -> bool:
-        # РЈСЂРѕРІРµРЅСЊ 1: СЃС‚СЂРѕРіРѕРµ СЃРѕРІРїР°РґРµРЅРёРµ вЂ” (СЃС‡С‘С‚ + СЃСѓРјРјР° + РґР°С‚Р° В±1 РґРµРЅСЊ).
-        # Р‘Р°РЅРєРѕРІСЃРєРёРµ РґР°С‚С‹ РјРѕРіСѓС‚ СЃРґРІРёРіР°С‚СЊСЃСЏ РЅР° СЃСѓС‚РєРё РёР·-Р·Р° TZ. Р•СЃР»Рё С‚СЂРѕР№РєР° СЃРѕРІРїР°Р»Р°,
-        # СЃС‡РёС‚Р°РµРј РґСѓР±Р»РµРј Р‘Р•Р— РїСЂРѕРІРµСЂРєРё РѕРїРёСЃР°РЅРёСЏ: РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕРі РїРµСЂРµРёРјРµРЅРѕРІР°С‚СЊ
-        # С‚СЂР°РЅР·Р°РєС†РёСЋ РїРѕСЃР»Рµ РїРµСЂРІРѕРіРѕ РёРјРїРѕСЂС‚Р°, РёР·-Р·Р° С‡РµРіРѕ description РёР·РјРµРЅРёР»СЃСЏ.
-        exact_candidates = self.transaction_repo.find_nearby_duplicates(
-            user_id=user_id,
-            account_id=account_id,
-            amount=amount,
-            transaction_date=transaction_date,
-            days_window=1,
-            transaction_type=transaction_type,
-        )
-        if exact_candidates:
-            return True
+        """§8.1 deduplication against committed transactions.
 
-        # РЈСЂРѕРІРµРЅСЊ 2: СЂР°СЃС€РёСЂРµРЅРЅС‹Р№ РґРёР°РїР°Р·РѕРЅ В±3 РґРЅСЏ вЂ” С‚РѕР»СЊРєРѕ РµСЃР»Рё СЃРѕРІРїР°РґР°РµС‚
-        # normalized_description. РќСѓР¶РµРЅ РґР»СЏ СЂРµРґРєРёС… СЃР»СѓС‡Р°РµРІ Р·Р°РґРµСЂР¶РєРё РїСЂРѕРІРµРґРµРЅРёСЏ РїР»Р°С‚РµР¶Р°.
+        Primary discriminant is **skeleton** — the v2 normalizer's
+        placeholder-rich form, which collapses identifier variation (same
+        merchant, different phone/contract) into one key. This is what the
+        spec calls for.
+
+        The function is layered:
+          1. (account + amount + date ±1 + skeleton) — strict match. Bank
+             timezone drift can shift `transaction_date` by a day, so we
+             accept ±1 day here. No description filter — user may have
+             renamed the original transaction.
+          2. Fallback for pre-0052 transactions whose skeleton is NULL:
+             widen to ±3 days and match on `normalized_description`. Legacy
+             rows keep working until the backfill script populates skeleton.
+        """
+        incoming_skeleton = (skeleton or "").strip()
         incoming_norm = (normalized_description or "").strip().lower()
+
+        # Level 1: skeleton match in ±1 day window.
+        if incoming_skeleton:
+            exact_candidates = self.transaction_repo.find_nearby_duplicates(
+                user_id=user_id,
+                account_id=account_id,
+                amount=amount,
+                transaction_date=transaction_date,
+                skeleton=incoming_skeleton,
+                days_window=1,
+                transaction_type=transaction_type,
+            )
+            if exact_candidates:
+                return True
+
+            # Level 2a: skeleton match widened to ±3 days — covers cases where
+            # a bank posted the same operation with an unusual delay.
+            wide_candidates = self.transaction_repo.find_nearby_duplicates(
+                user_id=user_id,
+                account_id=account_id,
+                amount=amount,
+                transaction_date=transaction_date,
+                skeleton=incoming_skeleton,
+                days_window=3,
+                transaction_type=transaction_type,
+            )
+            if wide_candidates:
+                return True
+
+        # Level 2b: legacy fallback for transactions imported before the
+        # skeleton column existed (skeleton IS NULL). Falls back to
+        # normalized_description match in ±3 days window. When the backfill
+        # script finishes, this branch rarely fires.
         if not incoming_norm:
             return False
-
-        wide_candidates = self.transaction_repo.find_nearby_duplicates(
+        legacy_candidates = self.transaction_repo.find_nearby_duplicates(
             user_id=user_id,
             account_id=account_id,
             amount=amount,
@@ -2696,8 +2892,9 @@ class ImportService:
             transaction_type=transaction_type,
         )
         return any(
-            (item.normalized_description or "").strip().lower() == incoming_norm
-            for item in wide_candidates
+            item.skeleton is None
+            and (item.normalized_description or "").strip().lower() == incoming_norm
+            for item in legacy_candidates
         )
 
     def _find_transfer_pair_duplicate(
