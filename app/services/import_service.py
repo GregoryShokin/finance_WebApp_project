@@ -351,6 +351,23 @@ class ImportService:
             self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
             confirmed_count += 1
 
+            # §5.4 / §10.2 (v1.1): stamp the row as cluster-bulk-acked so the
+            # commit path can (a) let warning rows through and (b) apply the
+            # 0.5 weight for Case B. Individual-confirm path uses a different
+            # flag (`user_confirmed_at`, set in update_row) → weight 1.0.
+            from datetime import datetime, timezone
+            _fresh_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+            if _fresh_row is not None:
+                _, _fresh = _fresh_row
+                _fresh_norm = dict(
+                    getattr(_fresh, "normalized_data", None) or (_fresh.normalized_data_json or {})
+                )
+                _fresh_norm["cluster_bulk_acked_at"] = datetime.now(timezone.utc).isoformat()
+                # Explicitly clear user_confirmed_at — cluster-ack supersedes
+                # any stale individual-confirm mark from a previous edit pass.
+                _fresh_norm.pop("user_confirmed_at", None)
+                self.import_repo.update_row(_fresh, normalized_data=_fresh_norm)
+
             # Collect rule-upsert buckets. Only rows with a non-None category
             # qualify — transfer/debt/credit rows without category_id don't
             # participate in category-rule learning.
@@ -391,16 +408,20 @@ class ImportService:
                             ).add((kind, str(value)))
                             break
 
-        # Apply rule strength transitions in a second pass — one upsert per
-        # (fingerprint, category) group, with confirms_delta equal to the
-        # group size. A 92-row Pyaterochka cluster therefore creates one
-        # rule with confirms=92 in a single on_confirmed call.
+        # §10.2 Case B: cluster-level bulk-ack adds confirms with weight 0.5
+        # per row (not 1.0). A 92-row Pyaterochka cluster → +46.0 confirms
+        # in one transition. The commit path won't re-count these rows — the
+        # `cluster_bulk_acked_at` flag stamped above tells commit "already
+        # accounted for, pass through without touching strength counters".
+        from decimal import Decimal as _D
+        from app.services.rule_strength_service import CONFIRM_WEIGHT_WARNING
         rules_affected = 0
         strength_svc = RuleStrengthService(self.db, settings)
         for (_fp, category_id), rows_for_rule in by_rule_key.items():
             if not rows_for_rule:
                 continue
             sample = rows_for_rule[0]
+            bulk_weight = CONFIRM_WEIGHT_WARNING * _D(len(rows_for_rule))
             rule, _is_new = self.category_rule_repo.bulk_upsert(
                 user_id=user_id,
                 normalized_description=sample["normalized_description"],
@@ -408,7 +429,7 @@ class ImportService:
                 confirms_delta=len(rows_for_rule),
                 original_description=sample["original_description"],
             )
-            strength_svc.on_confirmed(rule.id, confirms_delta=len(rows_for_rule))
+            strength_svc.on_confirmed(rule.id, confirms_delta=bulk_weight)
             rules_affected += 1
 
         # Phase 3 — persist counterparty bindings. Bindings accumulate across
@@ -1275,6 +1296,18 @@ class ImportService:
             if action == "restore" and row_status == "skipped":
                 status = "warning"
             elif action == "confirm":
+                # §5.4 / §10.2 (v1.1): individual confirm on a warning row is
+                # a full-touch signal — the user read THIS row and vouched
+                # for it. Stamp user_confirmed_at so commit can: (a) let
+                # the row through, (b) apply Case A weight 1.0 (not 0.5).
+                # Preserved even when the status resolves to `ready` because
+                # bulk-ack paths distinguish by which flag is present.
+                from datetime import datetime as _dt, timezone as _tz
+                if row_status == "warning":
+                    normalized["user_confirmed_at"] = _dt.now(_tz.utc).isoformat()
+                    # Individual confirm supersedes any lingering cluster-ack
+                    # from a prior bulk pass on the same row.
+                    normalized.pop("cluster_bulk_acked_at", None)
                 status = "ready"
                 # If auto-detected as transfer but has no target, revert to regular
                 # so the user can confirm without a validation blocker.
@@ -1320,6 +1353,17 @@ class ImportService:
         status = current_status
         local_issues = [item for item in issues if item]
 
+        # §5.2 (v1.1): status priority is ready < warning < error. Once a
+        # data-integrity error fires, a subsequent quality warning must NOT
+        # downgrade it. This helper enforces monotonic escalation — call it
+        # instead of bare `status = "warning"` / `status = "error"`.
+        _priority = {"ready": 0, "skipped": 0, "warning": 1, "error": 2}
+        def _escalate(new: str) -> str:
+            nonlocal status
+            if _priority.get(new, 0) > _priority.get(status, 0):
+                status = new
+            return status
+
         if status == "skipped":
             return status, list(dict.fromkeys(local_issues))
 
@@ -1360,8 +1404,12 @@ class ImportService:
             operation_type = "transfer"
 
         if account_id in (None, "", 0):
+            # §5.2 / §12.1 (v1.1): a row without a known account is a data-
+            # integrity error, not a quality warning. No Transaction can be
+            # created without account_id, so bulk-ack must never push it
+            # through. User has to pick the account, exclude, or park.
             local_issues.append("РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚.")
-            status = "warning"
+            status = "error"
 
         amount_decimal = None
         try:
@@ -1378,10 +1426,14 @@ class ImportService:
             normalized["credit_principal_amount"] = None
             normalized["credit_interest_amount"] = None
             if target_account_id in (None, "", 0):
+                # §12.1 / §5.2 (v1.1): transfer with only one known account is
+                # forbidden — promoted from warning to error so bulk-ack can't
+                # sneak it through. User must set the counter-account manually,
+                # park the row, or exclude it.
                 # For income transfers, target = source account; for expense, target = destination.
                 missing_msg = "РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РѕС‚РїСЂР°РІРёС‚РµР»СЏ." if tx_type == "income" else "РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ."
                 local_issues.append(missing_msg)
-                status = "warning"
+                status = "error"
             elif str(target_account_id) == str(account_id):
                 local_issues.append("РЎС‡С‘С‚ СЃРїРёСЃР°РЅРёСЏ Рё СЃС‡С‘С‚ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ РЅРµ РґРѕР»Р¶РЅС‹ СЃРѕРІРїР°РґР°С‚СЊ.")
                 status = "error"
@@ -1406,7 +1458,7 @@ class ImportService:
             normalized["credit_account_id"] = credit_account_id
             if credit_account_id in (None, "", 0):
                 local_issues.append("РќРµ РІС‹Р±СЂР°РЅ РєСЂРµРґРёС‚РЅС‹Р№ СЃС‡С‘С‚.")
-                status = "warning"
+                _escalate("warning")
 
             principal_raw = normalized.get("credit_principal_amount")
             interest_raw = normalized.get("credit_interest_amount")
@@ -1415,17 +1467,17 @@ class ImportService:
 
             if principal_raw in (None, ""):
                 local_issues.append("Р”Р»СЏ РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РѕСЃРЅРѕРІРЅРѕР№ РґРѕР»Рі.")
-                status = "warning"
+                _escalate("warning")
             else:
                 try:
                     principal_amount = self._to_decimal(principal_raw)
                 except (ValueError, TypeError, InvalidOperation):
                     local_issues.append("РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЃСѓРјРјР°.")
-                    status = "error"
+                    _escalate("error")
 
             if interest_raw in (None, ""):
                 local_issues.append("Р”Р»СЏ РїР»Р°С‚РµР¶Р° РїРѕ РєСЂРµРґРёС‚Сѓ РЅСѓР¶РЅРѕ СѓРєР°Р·Р°С‚СЊ РїСЂРѕС†РµРЅС‚С‹.")
-                status = "warning"
+                _escalate("warning")
             else:
                 try:
                     interest_amount = self._to_decimal(interest_raw)
@@ -1543,19 +1595,18 @@ class ImportService:
                     normalized["split_items"] = cleaned_split_items
                     normalized["category_id"] = None
                 else:
-                    status = "warning" if status != "error" else status
+                    _escalate("warning")
             else:
                 normalized["split_items"] = []
                 if normalized.get("category_id") in (None, "", 0):
                     local_issues.append("Не выбрана категория.")
-                    status = "warning"
-                    status = "warning"
+                    _escalate("warning")
         elif operation_type == "refund":
             normalized["target_account_id"] = None
             normalized["split_items"] = []
             if normalized.get("category_id") in (None, "", 0):
                 local_issues.append("РќРµ РІС‹Р±СЂР°РЅР° РєР°С‚РµРіРѕСЂРёСЏ.")
-                status = "warning"
+                _escalate("warning")
         else:
             normalized["target_account_id"] = None
             normalized["category_id"] = None
@@ -1563,7 +1614,7 @@ class ImportService:
 
         if not normalized.get("description"):
             local_issues.append("РџСѓСЃС‚РѕРµ РѕРїРёСЃР°РЅРёРµ РѕРїРµСЂР°С†РёРё.")
-            status = "warning"
+            _escalate("warning")
 
         if not normalized.get("transaction_date") and not normalized.get("date"):
             local_issues.append("РќРµ СѓРєР°Р·Р°РЅР° РґР°С‚Р° РѕРїРµСЂР°С†РёРё.")
@@ -1571,7 +1622,10 @@ class ImportService:
 
         unique_issues = list(dict.fromkeys(local_issues))
 
-        if status != "duplicate":
+        # §5.2 (v1.1): error is sticky. Once any integrity check escalated to
+        # error above, do NOT downgrade it to ready/warning at the resolution
+        # step. The spec's status priority is ready < warning < error.
+        if status != "duplicate" and status != "error":
             unresolved = [item for item in unique_issues if item in blocking_messages]
             if unresolved:
                 status = status if status in {"warning", "error", "skipped"} else "warning"
@@ -1948,8 +2002,10 @@ class ImportService:
                 _raw_account_id = normalized.get("account_id")
                 if _raw_account_id in (None, "", 0):
                     if current_operation_type == "transfer":
+                        # §12.1 / §5.2 (v1.1): transfer needs BOTH accounts; a
+                        # missing side is a data-integrity error, not a warning.
                         issues.append("РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ СЃС‡С‘С‚ РёР· РІС‹РїРёСЃРєРё вЂ” СѓРєР°Р¶Рё РІСЂСѓС‡РЅСѓСЋ.")
-                        status = "warning"
+                        status = "error"
                     current_account_id = 0
                 else:
                     current_account_id = int(_raw_account_id)
@@ -2160,7 +2216,18 @@ class ImportService:
             "category_id": rule.category_id,
         }
 
-    def commit_import(self, *, user_id: int, session_id: int, import_ready_only: bool = False) -> dict[str, Any]:
+    def commit_import(self, *, user_id: int, session_id: int, import_ready_only: bool = True) -> dict[str, Any]:
+        """Commit all eligible rows to Transactions. §5.4 (v1.1):
+        - `ready` rows always commit.
+        - `warning` rows commit ONLY if the user touched them (individual
+          confirm sets `user_confirmed_at`; cluster-level bulk-ack sets
+          `cluster_bulk_acked_at`). Untouched warnings stay in the session.
+        - `import_ready_only=True` is the conservative default (API contract):
+          even if a warning row has a touch flag, it's skipped. Tools that
+          want touch-gated warning commits pass `import_ready_only=False`.
+        The "commit all warnings without touch" bypass does not exist —
+        untouched warnings never commit, regardless of this flag.
+        """
         session = self.get_session(user_id=user_id, session_id=session_id)
         # Serialize concurrent commits for the same session — prevents accidental
         # double-import when the user double-clicks or two requests arrive together.
@@ -2203,16 +2270,24 @@ class ImportService:
                 skipped_count += 1
                 continue
 
-            # §5.1: `warning` is NOT a blocking status. The default now lets
-            # warning rows through; callers that explicitly want ready-only
-            # can pass `import_ready_only=True`. Warning commits count as
-            # confirm weight 0.5 in §10.2 Case B (bulk-ack semantics).
+            # §5.4 (v1.1): warning rows only commit if the user explicitly
+            # touched them — either via cluster-level bulk-ack (sets
+            # `cluster_bulk_acked_at`) or via individual confirm (sets
+            # `user_confirmed_at`). Untouched warnings stay in the session.
+            # "Commit everything" is forbidden — no cross-cluster auto-pass.
+            _norm_for_gate = row.normalized_data or {}
+            _bulk_acked = _norm_for_gate.get("cluster_bulk_acked_at")
+            _indiv_confirmed = _norm_for_gate.get("user_confirmed_at")
             if row_status == "warning":
                 review_count += 1
                 if import_ready_only:
                     skipped_count += 1
                     continue
-                # Fall through to commit; §10.2 Case B applies the 0.5 weight.
+                if not (_bulk_acked or _indiv_confirmed):
+                    # Not acknowledged — skip. Row stays in the session for
+                    # the next moderator pass per §5.4 last paragraph.
+                    skipped_count += 1
+                    continue
 
             if row_status not in {"ready", "warning"}:
                 skipped_count += 1
@@ -2348,16 +2423,21 @@ class ImportService:
                 applied_rule_id = normalized.get("applied_rule_id")
                 applied_rule_cat = normalized.get("applied_rule_category_id")
                 if category_id and norm_desc and operation_type not in NON_ANALYTICS_OPERATION_TYPES:
-                    # §10.2 — four cases by (was a rule applied?) × (final == predicted?)
-                    # The committing row's status chooses the confirm weight:
-                    #   ready   → +1.0  (Case A / Case D when user explicitly picked)
-                    #   warning → +0.5  (Case B, bulk-ack path)
+                    # §10.2 (v1.1) — four cases by (was a rule applied?) × (final == predicted?)
+                    # Weight selection per §6.4/§5.4:
+                    #   ready                                  → +1.0  (Case A)
+                    #   warning + user_confirmed_at  (individual) → +1.0  (Case A — "full touch")
+                    #   warning + cluster_bulk_acked_at (bulk)     → +0.5  (Case B)
+                    # Rows with cluster_bulk_acked_at already got the 0.5 weight
+                    # applied at bulk_apply_cluster — commit MUST NOT re-count
+                    # them (would double the strength signal).
                     from app.core.config import settings as _settings
                     from app.services.rule_strength_service import (
                         CONFIRM_WEIGHT_READY, CONFIRM_WEIGHT_WARNING,
                     )
+                    _already_counted_at_bulk_ack = bool(_bulk_acked) and not _indiv_confirmed
                     confirm_weight = (
-                        CONFIRM_WEIGHT_WARNING if row_status == "warning"
+                        CONFIRM_WEIGHT_WARNING if (row_status == "warning" and _bulk_acked and not _indiv_confirmed)
                         else CONFIRM_WEIGHT_READY
                     )
                     rule_svc = RuleStrengthService(self.db, _settings)
@@ -2365,17 +2445,22 @@ class ImportService:
 
                     if applied_rule_id is not None and applied_rule_cat is not None and int(applied_rule_cat) == final_cat:
                         # Case A/B: final category matches predicted — confirm R.
-                        try:
-                            rule_svc.on_confirmed(applied_rule_id, confirms_delta=confirm_weight)
-                        except RuleNotFound:
-                            # Rule deleted between preview and commit — fall through
-                            # as if there was no prior rule (Case D).
-                            self.category_rule_repo.upsert(
-                                user_id=user_id,
-                                normalized_description=norm_desc,
-                                category_id=final_cat,
-                                original_description=orig_desc or None,
-                            )
+                        # Skip if bulk_apply_cluster already applied the 0.5
+                        # weight pre-commit (avoids double-count).
+                        if _already_counted_at_bulk_ack:
+                            pass
+                        else:
+                            try:
+                                rule_svc.on_confirmed(applied_rule_id, confirms_delta=confirm_weight)
+                            except RuleNotFound:
+                                # Rule deleted between preview and commit — fall through
+                                # as if there was no prior rule (Case D).
+                                self.category_rule_repo.upsert(
+                                    user_id=user_id,
+                                    normalized_description=norm_desc,
+                                    category_id=final_cat,
+                                    original_description=orig_desc or None,
+                                )
                     elif applied_rule_id is not None:
                         # Case C: rule applied, user changed the category.
                         # Old rule takes a rejection; new rule R' starts with
