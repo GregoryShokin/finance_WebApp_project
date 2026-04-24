@@ -29,7 +29,7 @@ import { CollapsibleChevron } from '@/components/ui/collapsible';
 import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
 import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 import { AttachToCounterpartyButton } from '@/components/import/attach-counterparty';
-import { attachRowToCounterparty, bulkApplyCluster } from '@/lib/api/imports';
+import { attachRowToCounterparty, bulkApplyCluster, detachImportRowFromCluster } from '@/lib/api/imports';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
 import type {
   BulkApplyPayload,
@@ -161,11 +161,19 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
   );
 
   // Only show categories compatible with the cluster direction.
+  // Refund clusters are income by direction but must pick from expense-kind
+  // categories (the refund compensates an expense in that category), so we
+  // override the filter when `is_refund` is true.
   const metaDirection = meta.kind === 'fingerprint' ? meta.cluster.direction : meta.direction;
+  const metaIsRefund = meta.kind === 'fingerprint' && Boolean(meta.cluster.is_refund);
   const filteredCategories = useMemo<Category[]>(() => {
-    const wanted = metaDirection === 'income' ? 'income' : 'expense';
+    const wanted = metaIsRefund
+      ? 'expense'
+      : metaDirection === 'income'
+        ? 'income'
+        : 'expense';
     return categories.filter((c) => c.kind === wanted);
-  }, [categories, metaDirection]);
+  }, [categories, metaDirection, metaIsRefund]);
 
   const categoryItems = useMemo<SearchSelectItem[]>(
     () => filteredCategories.map((c) => ({ value: String(c.id), label: c.name })),
@@ -212,11 +220,26 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
     return rowState[rowId] ?? defaultRowState();
   }
 
+  const detachMutation = useMutation({
+    mutationFn: (rowId: number) => detachImportRowFromCluster(rowId),
+    onSuccess: async () => {
+      // Refetch clusters + preview: the detached row leaves this cluster and
+      // lands standalone in the inline "Требуют твоего внимания" list.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'bulk-clusters'] }),
+        queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'preview'] }),
+        queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'moderation-status'] }),
+      ]);
+    },
+    onError: (err: Error) => toast.error(err.message || 'Не удалось открепить строку'),
+  });
+
   function toggleRowIncluded(rowId: number) {
-    setRowState((prev) => {
-      const current = prev[rowId] ?? defaultRowState();
-      return { ...prev, [rowId]: { ...current, included: !current.included } };
-    });
+    // Unchecking a row actually *detaches* it from this cluster server-side —
+    // it moves to the inline attention bucket for individual review. We don't
+    // support re-attaching from here: once detached, the row is no longer in
+    // the cluster's row list on the next render, so the checkbox disappears.
+    detachMutation.mutate(rowId);
   }
 
   function setRowCategory(rowId: number, categoryId: number | null) {
@@ -254,11 +277,19 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
         const s = getRowState(row.id);
         if (!s.included) continue;
         if (s.categoryId == null) continue; // can't confirm a row without category
+        // Per-row operation_type. In merged counterparty cards, expense rows
+        // live alongside refund rows — the card is mostly 'regular' but any
+        // row that itself carries is_refund (or operation_type='refund' in
+        // normalized_data) must keep its refund op_type so commit nets it
+        // against the expense category instead of inflating income.
+        const nd = (row.normalized_data ?? {}) as Record<string, unknown>;
+        const rowIsRefund = Boolean(nd.is_refund) || nd.operation_type === 'refund';
+        const rowOpType = isRefundCluster || rowIsRefund ? 'refund' : 'regular';
         updates.push({
           row_id: row.id,
           category_id: s.categoryId,
           counterparty_id: s.counterpartyId,
-          operation_type: 'regular',
+          operation_type: rowOpType,
         });
       }
       if (updates.length === 0) {
@@ -315,12 +346,48 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
   );
   const canCreateCounterparty = trimmedCpQuery.length > 0 && !exactCpMatch && !createCounterpartyMutation.isPending;
 
+  // Refund marker — true when *every* fingerprint member of the card is a
+  // refund cluster. Applies to fingerprint, brand, and counterparty cards:
+  // a brand / counterparty group whose members are all reversals of prior
+  // purchases is itself a refund card and should surface the same badge +
+  // compensator hint. Without this, a refund that ends up under a
+  // counterparty-group view (single-row, counterparty-bound) looks just
+  // like a regular income card and the user can't find it.
+  const refundMembers: BulkFingerprintCluster[] =
+    meta.kind === 'fingerprint'
+      ? [meta.cluster]
+      : meta.members;
+  const isRefundCluster =
+    refundMembers.length > 0 && refundMembers.every((m) => Boolean(m.is_refund));
+  const refundBrand =
+    refundMembers.find((m) => m.refund_brand)?.refund_brand ?? null;
+  const refundCounterpartyName =
+    meta.kind === 'counterparty'
+      ? meta.counterpartyName
+      : refundMembers.find((m) => m.refund_resolved_counterparty_name)
+          ?.refund_resolved_counterparty_name ?? null;
+
   const headerNode = (
     <div className="flex w-full items-center gap-3">
       <div className="min-w-0 flex-1">
         <p className="truncate text-base font-semibold text-slate-900">{title}</p>
         <p className="text-sm text-slate-600">{subtitle}</p>
+        {isRefundCluster && (
+          <p className="mt-0.5 truncate text-xs text-amber-700">
+            Возврат
+            {refundCounterpartyName
+              ? ` · компенсирует расходы «${refundCounterpartyName}»`
+              : refundBrand
+                ? ` от «${refundBrand}»`
+                : ''}
+          </p>
+        )}
       </div>
+      {isRefundCluster && (
+        <span className="shrink-0 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-medium text-amber-700">
+          Возврат
+        </span>
+      )}
       {suggestedCategory ? (
         <span className="shrink-0 rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
           {suggestedCategory}
@@ -410,7 +477,7 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
         </div>
       </div>
       <p className="mt-2 text-xs text-slate-500">
-        Исключённые строки вернутся в очередь «Требуют внимания».
+        Снятая галочка откреплёт строку от кластера — она уедет в «Требуют твоего внимания» для индивидуальной обработки.
         Контрагента можно не привязывать. Точечные правки не перезаписываются кнопкой «Применить ко всем».
       </p>
     </div>
@@ -434,6 +501,11 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
           rows={rows}
           getRowState={getRowState}
           toggleRowIncluded={toggleRowIncluded}
+          detachingRowId={
+            detachMutation.isPending
+              ? (detachMutation.variables ?? null)
+              : null
+          }
           setRowCategory={setRowCategory}
           categories={filteredCategories}
           sessionId={sessionId}
@@ -465,6 +537,7 @@ function ClusterRowList({
   rows,
   getRowState,
   toggleRowIncluded,
+  detachingRowId,
   setRowCategory,
   categories,
   sessionId,
@@ -475,6 +548,7 @@ function ClusterRowList({
   rows: ImportPreviewRow[];
   getRowState: (rowId: number) => RowState;
   toggleRowIncluded: (rowId: number) => void;
+  detachingRowId: number | null;
   setRowCategory: (rowId: number, categoryId: number | null) => void;
   categories: Category[];
   sessionId: number;
@@ -526,10 +600,19 @@ function ClusterRowList({
                 type="checkbox"
                 checked={s.included}
                 onChange={() => toggleRowIncluded(row.id)}
-                className="size-4 shrink-0"
+                disabled={detachingRowId === row.id}
+                title="Снять галочку — открепить строку от кластера и отправить в «Требуют твоего внимания»"
+                className="size-4 shrink-0 disabled:opacity-50"
               />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-slate-800">{descriptionOf(row)}</p>
+                <div className="flex items-center gap-2">
+                  <p className="truncate text-slate-800">{descriptionOf(row)}</p>
+                  {isRefundRow(row) && (
+                    <span className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                      Возврат
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-slate-400">#{row.row_index} · {dateOf(row)} · {amountOf(row)}</p>
               </div>
               <RowCategoryPicker
@@ -688,6 +771,14 @@ function descriptionOf(row: ImportPreviewRow): string {
     (row.raw_data as Record<string, string> | undefined)?.description ||
     '—'
   );
+}
+
+// Row-level refund detector. Used inside merged counterparty cards where
+// refund rows live next to regular expense rows — the badge makes them
+// easy to spot at a glance.
+function isRefundRow(row: ImportPreviewRow): boolean {
+  const nd = (row.normalized_data || {}) as Record<string, any>;
+  return Boolean(nd.is_refund) || nd.operation_type === 'refund';
 }
 
 function amountOf(row: ImportPreviewRow): string {

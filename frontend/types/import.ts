@@ -50,6 +50,14 @@ export type ModerationClusterEntry = {
   global_pattern_category_name?: string | null;
   global_pattern_user_count?: number | null;
   global_pattern_total_confirms?: number | null;
+  // Refund metadata — set by the clusterer when the skeleton carries a
+  // reversal keyword ("возврат", "отмена операции", ...). The UI uses
+  // `is_refund` to show a badge and `refund_resolved_counterparty_name` to
+  // tell the user which merchant's history supplied the inherited category.
+  is_refund?: boolean | null;
+  refund_brand?: string | null;
+  refund_resolved_counterparty_id?: number | null;
+  refund_resolved_counterparty_name?: string | null;
 };
 
 export type ModerationStatusResponse = {
@@ -284,6 +292,12 @@ export type BulkFingerprintCluster = {
   // "Перевод на +79…6612" shows instead of "Перевод на <PHONE>".
   identifier_key?: string | null;
   identifier_value?: string | null;
+  // Refund marker. When true, the cluster is a reversal of a prior purchase
+  // at `refund_brand`; the UI shows a "Возврат" badge + compensator hint.
+  is_refund?: boolean | null;
+  refund_brand?: string | null;
+  refund_resolved_counterparty_id?: number | null;
+  refund_resolved_counterparty_name?: string | null;
 };
 
 export type BulkBrandCluster = {

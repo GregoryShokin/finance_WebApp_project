@@ -570,8 +570,27 @@ class TransactionEnrichmentService:
         counterparty: str,
         skip_llm: bool = False,
     ) -> tuple[int | None, float, str]:
-        # Transfers and refunds never need a category — they are not spending.
-        if operation_type in ("transfer", "refund"):
+        # Transfers never need a category — they are not spending.
+        if operation_type == "transfer":
+            return None, 0.0, ""
+        # Refunds are income rows that compensate past expenses at the same
+        # counterparty — they must land in the *expense-side* category of
+        # that counterparty (e.g. a KOFEMOLOKO refund → «Кафе и рестораны»)
+        # so analytics can subtract them from the category total. Here we
+        # short-circuit the normal expense flow: if history at this
+        # counterparty has a dominant expense category, use it. Otherwise
+        # fall through with None — the cluster will sit in attention until
+        # the user assigns a category manually.
+        if operation_type == "refund":
+            refund_category_counter = Counter(
+                item.category_id for item in history
+                if item.category_id is not None and item.type == "expense"
+            )
+            if refund_category_counter:
+                category_id, count = refund_category_counter.most_common(1)[0]
+                category = next((item for item in categories if item.id == category_id), None)
+                if category and category.kind == "expense":
+                    return category.id, 0.92, f"возврат → категория из истории расходов ({count} совпад.)"
             return None, 0.0, ""
         if transaction_type != "expense":
             return None, 0.0, ""

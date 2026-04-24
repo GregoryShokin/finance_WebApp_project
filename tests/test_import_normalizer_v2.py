@@ -13,8 +13,10 @@ from app.services.import_normalizer_v2 import (
     ExtractedTokens,
     extract_tokens,
     fingerprint,
+    is_refund_like,
     is_transfer_like,
     normalize_skeleton,
+    pick_refund_brand,
     pick_transfer_identifier,
 )
 
@@ -381,3 +383,63 @@ def test_transfer_fingerprint_vs_payment_fingerprint_diverge() -> None:
         if is_transfer_like(payment_desc, None) else None,
     )
     assert fp_transfer != fp_payment
+
+
+# ---------------------------------------------------------------------------
+# Refund detection — И-09
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("desc", [
+    "Отмена операции оплаты KOFEMOLOKO Volgodonsk RUS",
+    "Отмена оплаты SBERMARKET 240 RUB",
+    "Возврат покупки в магазине «Пятёрочка»",
+    "Возврат средств от OZON",
+    "REFUND ALIEXPRESS",
+    "Chargeback T-Bank",
+    "Reversal operation 15.03.2026",
+])
+def test_is_refund_like_positive(desc: str) -> None:
+    assert is_refund_like(desc) is True
+
+
+@pytest.mark.parametrize("desc", [
+    "Покупка в магазине «Пятёрочка»",
+    "Перевод +79161234567",
+    "Оплата услуг МТС",
+    "Зарплата от ООО «Ромашка»",
+])
+def test_is_refund_like_negative(desc: str) -> None:
+    assert is_refund_like(desc) is False
+
+
+def test_is_refund_like_honors_operation_type() -> None:
+    # If upstream already classified the row as refund, the flag wins even
+    # when the description lacks a keyword.
+    assert is_refund_like("Поступление от продавца", "refund") is True
+
+
+def test_refund_excluded_from_transfer_detection() -> None:
+    # A row starting with "Отмена операции" shouldn't be pulled into the
+    # identifier-aware transfer branch even if it mentions a phone.
+    desc = "Отмена операции оплаты KOFEMOLOKO"
+    assert is_transfer_like(desc, None) is False
+    assert is_refund_like(desc, None) is True
+
+
+def test_pick_refund_brand_known_merchant() -> None:
+    # Classic refund line: keyword + merchant + locale. Brand should be the
+    # merchant token, not the keyword or locale.
+    brand = pick_refund_brand("Отмена операции оплаты KOFEMOLOKO Volgodonsk RUS")
+    assert brand == "kofemoloko"
+
+
+def test_pick_refund_brand_strips_refund_keyword() -> None:
+    # The refund keyword itself must never become the brand.
+    brand = pick_refund_brand("Возврат OZON 1250 RUB")
+    assert brand == "ozon"
+
+
+def test_pick_refund_brand_returns_none_when_no_merchant() -> None:
+    # Only noise tokens after the refund keyword → nothing extractable.
+    assert pick_refund_brand("Отмена операции") is None

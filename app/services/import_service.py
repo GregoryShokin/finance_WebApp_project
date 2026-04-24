@@ -27,8 +27,10 @@ from app.services.import_normalizer import ImportNormalizer
 from app.services.import_normalizer_v2 import (
     extract_tokens as v2_extract_tokens,
     fingerprint as v2_fingerprint,
+    is_refund_like as v2_is_refund_like,
     is_transfer_like as v2_is_transfer_like,
     normalize_skeleton as v2_normalize_skeleton,
+    pick_refund_brand as v2_pick_refund_brand,
     pick_transfer_identifier as v2_pick_transfer_identifier,
 )
 from app.services.import_recognition_service import ImportRecognitionService
@@ -500,10 +502,20 @@ class ImportService:
         if cp is None:
             raise ImportNotFoundError(f"counterparty {counterparty_id} not found")
 
-        # Resolve the counterparty's prevailing category. Simplest source:
-        # look at all transactions already tagged with this counterparty and
-        # pick the most common category. If the counterparty is new (no
-        # transactions yet), fall back to the row's own cluster hint.
+        # Resolve the counterparty's prevailing category. We look in three
+        # progressively weaker sources:
+        #   1. Committed transactions already tagged with this counterparty —
+        #      ground truth, the user has confirmed these.
+        #   2. Live preview rows across the user's active import sessions that
+        #      are already pinned to this counterparty via their fingerprint
+        #      binding and carry a candidate category_id. This covers the
+        #      common case where the user tagged a cluster "Кофейни" in the
+        #      current session but hasn't committed yet — the counterparty
+        #      effectively has a category, it just isn't in `transactions`.
+        #   3. The row's own cluster hint (candidate_category_id).
+        # If none of these yield a category, the binding is still created —
+        # the row just stays in the attention bucket for the user to classify
+        # manually later. No "category required" block.
         target_category_id: int | None = None
         target_operation_type: str = "regular"
 
@@ -524,7 +536,39 @@ class ImportService:
         if cat_votes:
             target_category_id = cat_votes.most_common(1)[0][0]
 
-        # Fallback to row's own hint (candidate_category_id from its cluster).
+        # Source 2 — live preview rows across all active sessions. Find every
+        # fingerprint already bound to this counterparty, then pull the
+        # candidate category_id stamped on those rows' normalized_data.
+        if target_category_id is None:
+            bound_fps = self._counterparty_fp_service.repo.list_by_counterparty(
+                user_id=user_id, counterparty_id=counterparty_id,
+            )
+            bound_fp_set = {b.fingerprint for b in bound_fps if b.fingerprint}
+
+            if bound_fp_set:
+                all_session_rows = (
+                    self.db.query(ImportRow)
+                    .join(ImportSession, ImportRow.session_id == ImportSession.id)
+                    .filter(ImportSession.user_id == user_id)
+                    .all()
+                )
+                preview_cat_votes: _Counter[int] = _Counter()
+                for sess_row in all_session_rows:
+                    nd = sess_row.normalized_data_json or {}
+                    fp = nd.get("fingerprint") or (nd.get("v2") or {}).get("fingerprint")
+                    if fp not in bound_fp_set:
+                        continue
+                    cat = nd.get("category_id")
+                    if cat is None:
+                        continue
+                    try:
+                        preview_cat_votes[int(cat)] += 1
+                    except (TypeError, ValueError):
+                        continue
+                if preview_cat_votes:
+                    target_category_id = preview_cat_votes.most_common(1)[0][0]
+
+        # Source 3 — row's own cluster hint (candidate_category_id).
         if target_category_id is None:
             hint = normalized.get("category_id")
             if hint is not None:
@@ -533,13 +577,9 @@ class ImportService:
                 except (TypeError, ValueError):
                     target_category_id = None
 
-        if target_category_id is None:
-            raise ImportValidationError(
-                "У контрагента пока нет категории — подтверди хотя бы один его "
-                "кластер с категорией, и попробуй ещё раз"
-            )
-
-        # Create the binding.
+        # Create the binding — the counterparty attachment happens regardless
+        # of whether we resolved a category. The row just won't be marked
+        # ready if category is still unknown.
         binding_created = False
         try:
             before = self._counterparty_fp_service.repo.get_by_fingerprint(
@@ -557,16 +597,42 @@ class ImportService:
         normalized["attached_to_counterparty_id"] = counterparty_id
         normalized["attached_to_counterparty_name"] = cp.name
         normalized["attached_source_fingerprint"] = source_fp
+        # Clear the detached flag: the user is explicitly re-attaching this
+        # row to a cluster (via its counterparty), so it must leave the
+        # attention bucket and re-enter counterparty-group rendering.
+        # Without clearing, build_bulk_clusters would still exclude the row
+        # from every group — the counterparty card would gain a binding but
+        # no visible member, and the user wouldn't find the row anywhere.
+        normalized.pop("detached_from_cluster", None)
         row.normalized_data_json = normalized
         self.db.add(row)
         self.db.flush()
 
-        row_payload = ImportRowUpdateRequest(
-            operation_type=target_operation_type,
-            category_id=target_category_id,
-            counterparty_id=counterparty_id,
-            action="confirm",
-        )
+        # Preserve a refund classification if the row carries one — attach
+        # must not silently demote a refund to a regular income row. The
+        # refund's own category was set earlier (from purchase history) and
+        # continues to win over `target_operation_type` we just computed
+        # from the counterparty's tx history.
+        existing_op = str(normalized.get("operation_type") or "").lower()
+        effective_op = "refund" if existing_op == "refund" else target_operation_type
+
+        # Only auto-confirm the row when a category was resolved. Without
+        # a category the row must stay in the attention bucket so the user
+        # can classify it before commit — we still persist the counterparty
+        # binding and cluster attachment so next time a matching row comes
+        # in, it lands with the counterparty pre-filled.
+        if target_category_id is not None:
+            row_payload = ImportRowUpdateRequest(
+                operation_type=effective_op,
+                category_id=target_category_id,
+                counterparty_id=counterparty_id,
+                action="confirm",
+            )
+        else:
+            row_payload = ImportRowUpdateRequest(
+                operation_type=effective_op,
+                counterparty_id=counterparty_id,
+            )
         self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
 
         self.db.commit()
@@ -659,12 +725,26 @@ class ImportService:
         if target_skeleton:
             normalized.setdefault("attached_to_skeleton", target_skeleton)
         normalized["attached_source_fingerprint"] = source_fp
+        # Clear the detached flag — symmetric to _attach_via_counterparty.
+        # Re-attaching to a target fingerprint/cluster must pull the row
+        # back into cluster rendering; otherwise the alias is created but
+        # build_bulk_clusters still excludes the row and the user can't
+        # find it anywhere on screen.
+        normalized.pop("detached_from_cluster", None)
         row.normalized_data_json = normalized
         self.db.add(row)
         self.db.flush()
 
+        # Preserve refund classification across attach — same reason as in
+        # _attach_via_counterparty.
+        existing_op_fp = str(normalized.get("operation_type") or "").lower()
+        effective_op_fp = (
+            "refund" if existing_op_fp == "refund"
+            else (target_operation_type or "regular")
+        )
+
         row_payload = ImportRowUpdateRequest(
-            operation_type=target_operation_type or "regular",
+            operation_type=effective_op_fp,
             category_id=target_category_id,
             counterparty_id=target_counterparty_id,
             action="confirm",
@@ -1029,6 +1109,42 @@ class ImportService:
         if row.created_transaction_id is not None or row_status == "committed":
             raise ImportValidationError("Импортированную строку нельзя исключить.")
         row = self.import_repo.update_row(row, status="skipped", review_required=False)
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        self.db.refresh(row)
+        self.import_repo._hydrate_row_runtime_fields(row)
+        return {"session_id": session.id, "row_id": row.id, "status": row.status, "summary": summary}
+
+    def detach_row_from_cluster(self, *, user_id: int, row_id: int) -> dict[str, Any]:
+        """Detach a row from any bulk cluster so it lands in the attention bucket.
+
+        Sets `normalized_data.detached_from_cluster = True`. `build_bulk_clusters`
+        skips such rows during cluster assembly, so the row falls into the
+        inline attention list where the user can categorize it individually.
+        Status goes to `warning` (+ clears auto-inherited category/counterparty)
+        so the row is treated as "needs decision" rather than "ready to import".
+        """
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+        session, row = session_row
+        row_status = str(row.status or "").strip().lower()
+        if row.created_transaction_id is not None or row_status == "committed":
+            raise ImportValidationError("Импортированную строку нельзя открепить.")
+        nd = dict(row.normalized_data_json or {})
+        nd["detached_from_cluster"] = True
+        # Cluster-inherited fields (category + counterparty) belong to the
+        # cluster's context — once the row is standalone the user must
+        # re-decide. Drop them so the attention UI shows a blank slate
+        # instead of silently committing the auto-inherited values.
+        nd["category_id"] = None
+        nd["counterparty_id"] = None
+        row = self.import_repo.update_row(
+            row, normalized_data=nd, status="warning", review_required=True,
+        )
         summary = self._recalculate_summary(session.id)
         session.summary_json = summary
         self.db.add(session)
@@ -1496,6 +1612,70 @@ class ImportService:
             self.import_repo.update_row(exp_row, normalized_data=exp_nd)
             self.import_repo.update_row(inc_row, normalized_data=inc_nd)
 
+    def _apply_refund_cluster_overrides(self, *, session: ImportSession) -> None:
+        """Stamp refund metadata onto every row of a refund cluster.
+
+        For each cluster where `is_refund=True` and a counterparty/category
+        could be inherited from the user's purchase history at the same
+        brand (see `ImportClusterService._resolve_refund_counterparty`),
+        update every row in the cluster:
+
+          - `operation_type = 'refund'` (overrides regular/transfer guesses)
+          - `type = 'income'` (refund direction is always income on the user's
+            account — money returned)
+          - `category_id` = dominant category used for past purchases at this
+            counterparty (so analytics can subtract this income from that
+            category's expense total — the compensator model)
+          - `counterparty_id` = the purchase-side counterparty, so the UI
+            renders the refund under the same name as the purchases
+
+        Rows where the user already set a manual `user_label` or a
+        `counterparty_id` that differs from the inherited one are left
+        untouched — manual overrides win over auto-inheritance.
+
+        If the cluster has `is_refund=True` but no category inherited
+        (new merchant, or no categorized purchase history yet), we still
+        stamp `operation_type='refund'` and `type='income'` but leave
+        category empty — the row stays in the attention bucket for the
+        user to pick a category manually, but at least it won't end up
+        classified as plain income in the ledger.
+        """
+        from app.services.import_cluster_service import ImportClusterService
+
+        cluster_svc = ImportClusterService(self.db)
+        clusters = cluster_svc.build_clusters(session)
+        refund_clusters = [c for c in clusters if c.is_refund]
+        if not refund_clusters:
+            return
+
+        rows_by_id: dict[int, ImportRow] = {
+            r.id: r for r in self.import_repo.get_rows(session_id=session.id)
+        }
+
+        for cluster in refund_clusters:
+            for row_id in cluster.row_ids:
+                row = rows_by_id.get(row_id)
+                if row is None:
+                    continue
+                nd = dict(row.normalized_data_json or {})
+                # Don't stomp on explicit user edits. user_label is set when
+                # the user manually assigns a category in the moderator UI;
+                # preserving it means a post-edit rebuild of preview does
+                # not wipe their choice.
+                has_user_label = bool(nd.get("user_label"))
+                nd["operation_type"] = "refund"
+                nd["type"] = "income"
+                nd["direction"] = "income"
+                if cluster.candidate_category_id is not None and not has_user_label:
+                    nd["category_id"] = int(cluster.candidate_category_id)
+                if cluster.refund_resolved_counterparty_id is not None:
+                    existing_cp = nd.get("counterparty_id")
+                    # Only overwrite counterparty when none is set; a manually
+                    # assigned counterparty from the user takes priority.
+                    if existing_cp in (None, "", 0):
+                        nd["counterparty_id"] = int(cluster.refund_resolved_counterparty_id)
+                self.import_repo.update_row(row, normalized_data=nd)
+
     def _recalculate_summary(self, session_id: int) -> dict[str, Any]:
         # Merge fresh row counts into the existing summary so non-counter blocks
         # (most importantly "moderation" — its absence flips the UI back to
@@ -1829,6 +2009,16 @@ class ImportService:
         self._apply_refund_matches(session_id=session.id)
         self.db.commit()
 
+        # Refund cluster override (И-09). For refund clusters (detected by
+        # keyword in normalizer v2, confirmed by cluster assembly), inherit
+        # the counterparty + category from the user's purchase history at
+        # this merchant and stamp it onto each row. Done AFTER preview/rule
+        # application so rule-chain output is overridden for refunds, which
+        # are almost never covered by existing rules (rules train on the
+        # expense side). Safe to re-run — idempotent.
+        self._apply_refund_cluster_overrides(session=session)
+        self.db.commit()
+
         # Response rows are serialized now — transfer_match metadata is filled in
         # by the debounced matcher a few seconds later and picked up via polling.
         updated_rows = self.import_repo.list_rows(session_id=session.id)
@@ -2039,6 +2229,27 @@ class ImportService:
                     created_transaction_id=last_transaction.id if last_transaction is not None else None,
                     review_required=False,
                 )
+                # Refund bind: the refund row arrived with its own fingerprint
+                # (direction=income) that has no counterparty binding — we
+                # resolved one via brand history at preview time, so create
+                # the binding now so a future refund of the same merchant
+                # resolves via fingerprint directly (no brand re-search).
+                if (
+                    str(normalized.get("operation_type") or "") == "refund"
+                    and normalized.get("counterparty_id") not in (None, "", 0)
+                    and normalized.get("fingerprint")
+                ):
+                    try:
+                        self._counterparty_fp_service.bind(
+                            user_id=user_id,
+                            fingerprint=str(normalized["fingerprint"]),
+                            counterparty_id=int(normalized["counterparty_id"]),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — never block commit
+                        logger.warning(
+                            "refund counterparty binding failed row=%s: %s",
+                            row.id, exc,
+                        )
                 category_id = normalized.get("category_id")
                 norm_desc = normalized.get("normalized_description")
                 orig_desc = normalized.get("import_original_description") or normalized.get("description")
@@ -2565,6 +2776,14 @@ class ImportService:
                 tokens.contract, transfer_identifier=transfer_identifier,
             )
 
+            # Refund detection. The flag rides inside normalized_data_json so
+            # build_clusters can mark the whole cluster as a refund without
+            # re-parsing the description. Brand lookup is best-effort — a
+            # None value just means the clusterer falls back to manual
+            # counterparty selection (attention bucket).
+            refund_flag = v2_is_refund_like(description, normalized.get("operation_type"))
+            refund_brand = v2_pick_refund_brand(description, tokens) if refund_flag else None
+
             # Alias resolution (Level 3 cluster-merge): if the user previously
             # attached this fingerprint to another cluster, redirect here so
             # the row joins its target cluster automatically on next import.
@@ -2582,6 +2801,7 @@ class ImportService:
 
             model = NormalizedDataV2.from_tokens(
                 tokens=tokens, skeleton=skeleton, fingerprint=fp,
+                is_refund=refund_flag, refund_brand=refund_brand,
             )
             result = model.merge_into(normalized)
             # Persist resolved bank_code so build_clusters can read it from

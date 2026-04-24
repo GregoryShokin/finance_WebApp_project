@@ -130,6 +130,9 @@ class MetricsService:
                 Transaction.user_id == user_id,
                 Transaction.type == "income",
                 Transaction.affects_analytics.is_(True),
+                # Refund is an expense compensator, not income — it must not
+                # inflate the passive-income numerator.
+                Transaction.operation_type != "refund",
                 Transaction.transaction_date >= date_from,
                 Transaction.transaction_date <= date_to,
             )
@@ -141,25 +144,46 @@ class MetricsService:
             Decimal("0"),
         )
 
-        # Last 12 completed months — expenses per month
+        # Last 12 completed months — expenses per month (refund compensators
+        # are netted out: a refund row with the same category decreases the
+        # month's effective spend in the same bucket).
         monthly_expenses: list[Decimal] = []
         for n in range(1, AVG_WINDOW_MONTHS + 1):
             prev = _prev_month(current_month, n)
+            prev_from = _month_start_dt(prev)
+            prev_to = _month_end_dt(prev)
             expense_txns = (
                 self.db.query(Transaction)
                 .filter(
                     Transaction.user_id == user_id,
                     Transaction.type == "expense",
                     Transaction.affects_analytics.is_(True),
-                    Transaction.transaction_date >= _month_start_dt(prev),
-                    Transaction.transaction_date <= _month_end_dt(prev),
+                    Transaction.transaction_date >= prev_from,
+                    Transaction.transaction_date <= prev_to,
+                )
+                .all()
+            )
+            refund_txns = (
+                self.db.query(Transaction)
+                .filter(
+                    Transaction.user_id == user_id,
+                    Transaction.type == "income",
+                    Transaction.operation_type == "refund",
+                    Transaction.affects_analytics.is_(True),
+                    Transaction.transaction_date >= prev_from,
+                    Transaction.transaction_date <= prev_to,
                 )
                 .all()
             )
             month_total = sum(
                 (Decimal(str(tx.amount)) for tx in expense_txns if tx.category_id in regular_expense_cat_ids),
                 Decimal("0"),
+            ) - sum(
+                (Decimal(str(tx.amount)) for tx in refund_txns if tx.category_id in regular_expense_cat_ids),
+                Decimal("0"),
             )
+            if month_total < 0:
+                month_total = Decimal("0")
             monthly_expenses.append(month_total)
 
         months_of_data = sum(1 for m in monthly_expenses if m > 0)
@@ -208,6 +232,10 @@ class MetricsService:
                 Transaction.user_id == user_id,
                 Transaction.type == "income",
                 Transaction.affects_analytics.is_(True),
+                # Refund is not real income — it compensates a past expense
+                # in the same category. Excluding it here prevents a purchase
+                # that was refunded from inflating the savings-rate denominator.
+                Transaction.operation_type != "refund",
                 Transaction.transaction_date >= date_from,
                 Transaction.transaction_date <= date_to,
             )
@@ -305,22 +333,32 @@ class MetricsService:
         regular_income = sum(
             (Decimal(str(tx.amount)) for tx in txns
              if tx.type == "income" and tx.is_regular
-             and tx.operation_type not in ("transfer", "credit_disbursement", "credit_early_repayment")),
+             and tx.operation_type not in ("transfer", "credit_disbursement", "credit_early_repayment", "refund")),
             Decimal("0"),
         )
+        # Expense net of refunds. A refund (income, operation_type='refund')
+        # counter-acts an expense in the same category — in Basic Flow we
+        # subtract it from the expense side so the user's effective spend
+        # reflects what actually left their accounts.
         regular_expense = sum(
             (Decimal(str(tx.amount)) for tx in txns
              if tx.type == "expense" and tx.is_regular
              and tx.operation_type not in ("transfer", "credit_early_repayment")),
             Decimal("0"),
+        ) - sum(
+            (Decimal(str(tx.amount)) for tx in txns
+             if tx.type == "income" and tx.operation_type == "refund"),
+            Decimal("0"),
         )
+        if regular_expense < 0:
+            regular_expense = Decimal("0")
         return _round2(regular_income - regular_expense)
 
     def _calc_regular_income_for_month(self, txns: list[Transaction]) -> Decimal:
         return sum(
             (Decimal(str(tx.amount)) for tx in txns
              if tx.type == "income" and tx.is_regular
-             and tx.operation_type not in ("transfer", "credit_disbursement", "credit_early_repayment")),
+             and tx.operation_type not in ("transfer", "credit_disbursement", "credit_early_repayment", "refund")),
             Decimal("0"),
         )
 
@@ -760,7 +798,7 @@ class MetricsService:
             ai = sum(
                 (Decimal(str(tx.amount)) for tx in prev_txns
                  if tx.type == "income"
-                 and tx.operation_type not in ("transfer", "credit_disbursement", "credit_early_repayment")),
+                 and tx.operation_type not in ("transfer", "credit_disbursement", "credit_early_repayment", "refund")),
                 Decimal("0"),
             )
             all_incomes.append(ai)
@@ -829,7 +867,13 @@ class MetricsService:
                  if tx.type == "expense"
                  and tx.operation_type not in ("transfer", "credit_early_repayment")),
                 Decimal("0"),
+            ) - sum(
+                (Decimal(str(tx.amount)) for tx in prev_txns
+                 if tx.type == "income" and tx.operation_type == "refund"),
+                Decimal("0"),
             )
+            if outflow < 0:
+                outflow = Decimal("0")
             monthly_outflows.append(outflow)
 
         if len(monthly_outflows) >= 6:

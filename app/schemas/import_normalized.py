@@ -49,6 +49,12 @@ class NormalizedDataV2(BaseModel):
     fingerprint: str
     tokens: TokensV2 = Field(default_factory=TokensV2)
     normalizer_version: int = NORMALIZER_VERSION
+    # Refund flag — True when the row reads as a reversal of a prior purchase
+    # ("возврат", "отмена операции ...", "refund"). Brand is the merchant
+    # inferred from the skeleton (KOFEMOLOKO → "kofemoloko"); used by the
+    # clusterer to look up the purchase-side counterparty + its category.
+    is_refund: bool = False
+    refund_brand: str | None = None
 
     # ------------------------------------------------------------------
     # Constructors
@@ -61,6 +67,8 @@ class NormalizedDataV2(BaseModel):
         tokens: ExtractedTokens,
         skeleton: str,
         fingerprint: str,
+        is_refund: bool = False,
+        refund_brand: str | None = None,
     ) -> "NormalizedDataV2":
         """Build the v2 payload from a normalizer run."""
         return cls(
@@ -76,6 +84,8 @@ class NormalizedDataV2(BaseModel):
                 amounts_extra=[_decimal_str(a) for a in tokens.amounts],
                 dates_extra=[d.isoformat() for d in tokens.dates],
             ),
+            is_refund=is_refund,
+            refund_brand=refund_brand,
         )
 
     @classmethod
@@ -106,6 +116,8 @@ class NormalizedDataV2(BaseModel):
         out["fingerprint"] = self.fingerprint
         out["tokens"] = self.tokens.model_dump()
         out["normalizer_version"] = self.normalizer_version
+        out["is_refund"] = self.is_refund
+        out["refund_brand"] = self.refund_brand
         return out
 
 

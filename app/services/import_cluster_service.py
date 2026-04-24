@@ -24,14 +24,17 @@ Transactions).
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models.counterparty import Counterparty
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
+from app.models.transaction import Transaction
 from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
 from app.repositories.import_repository import ImportRepository
@@ -42,7 +45,11 @@ from app.services.bank_mechanics_service import BankMechanicsResult, BankMechani
 from app.services.brand_extractor_service import extract_brand
 from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
 from app.services.global_pattern_service import GlobalPatternService
-from app.services.import_normalizer_v2 import is_transfer_like as v2_is_transfer_like
+from app.services.import_normalizer_v2 import (
+    is_refund_like as v2_is_refund_like,
+    is_transfer_like as v2_is_transfer_like,
+    pick_refund_brand as v2_pick_refund_brand,
+)
 
 # Confidence bands — aligned with the moderator gate thresholds.
 # Two tiers for exact-identifier rules: "proven" = confirmed enough to earn
@@ -186,6 +193,18 @@ class Cluster:
     global_pattern_user_count: int = 0
     global_pattern_total_confirms: int = 0
 
+    # Refund marker — True when every row in the cluster reads as a reversal
+    # of a prior purchase ("Отмена операции оплаты KOFEMOLOKO"). Set from
+    # `normalized_data.is_refund` during cluster assembly. A refund cluster's
+    # category and counterparty are resolved from the history of the brand
+    # (`refund_brand`), not from the cluster's own income direction — so at
+    # commit time the transaction lands in the same category as the user's
+    # purchases at that merchant, acting as an expense compensator.
+    is_refund: bool = False
+    refund_brand: str | None = None
+    refund_resolved_counterparty_id: int | None = None
+    refund_resolved_counterparty_name: str | None = None
+
     @property
     def trust_zone(self) -> str:
         """User-facing zone classification — consumed by the frontend."""
@@ -235,6 +254,10 @@ class Cluster:
             "global_pattern_category_name": self.global_pattern_category_name,
             "global_pattern_user_count": self.global_pattern_user_count,
             "global_pattern_total_confirms": self.global_pattern_total_confirms,
+            "is_refund": self.is_refund,
+            "refund_brand": self.refund_brand,
+            "refund_resolved_counterparty_id": self.refund_resolved_counterparty_id,
+            "refund_resolved_counterparty_name": self.refund_resolved_counterparty_name,
         }
 
 
@@ -326,6 +349,8 @@ class _ClusterAccumulator:
     bank_code: str | None = None
     row_ids: list[int] = field(default_factory=list)
     total_amount: Decimal = field(default_factory=lambda: Decimal("0"))
+    is_refund: bool = False
+    refund_brand: str | None = None
 
 
 class ImportClusterService:
@@ -384,6 +409,8 @@ class ImportClusterService:
                     bank_code=normalized.get("bank_code"),
                     identifier_key=_pick_identifier_key(tokens),
                     identifier_value=_pick_identifier_value(tokens),
+                    is_refund=bool(normalized.get("is_refund")),
+                    refund_brand=(normalized.get("refund_brand") or None),
                 )
                 buckets[fp] = bucket
 
@@ -393,6 +420,46 @@ class ImportClusterService:
             except (ValueError, TypeError, ArithmeticError):
                 amount = Decimal("0")
             bucket.total_amount += amount
+            # Every row sharing a fingerprint went through the same v2 pass;
+            # still, guard against stale rows (v1-only) by keeping the bucket
+            # flag set as soon as any member row carries it.
+            if normalized.get("is_refund"):
+                bucket.is_refund = True
+                if not bucket.refund_brand and normalized.get("refund_brand"):
+                    bucket.refund_brand = str(normalized.get("refund_brand"))
+            # Also honor legacy signals — rows where an earlier attach stamped
+            # operation_type='refund' but no is_refund flag, OR rows whose
+            # original description carries a refund keyword but the flag was
+            # never written to normalized_data (pre-refund-feature imports).
+            if not bucket.is_refund:
+                row_op = str(normalized.get("operation_type") or "").lower()
+                if row_op == "refund":
+                    bucket.is_refund = True
+
+        # Fallback refund detection at the cluster level — runs once per
+        # bucket, after all rows are accumulated. Purpose: catch legacy
+        # sessions where rows were normalized before the refund feature
+        # existed, so `is_refund` is NULL in persisted normalized_data.
+        # For income-direction buckets, we re-check the skeleton with the
+        # current refund-keyword list; if it matches, flag the bucket as
+        # refund and try to extract the brand on the fly. This is idempotent
+        # and cheap (string scan over ~dozen keywords).
+        for bucket in buckets.values():
+            if bucket.is_refund:
+                continue
+            if bucket.direction != "income":
+                continue
+            if not bucket.skeleton:
+                continue
+            if v2_is_refund_like(bucket.skeleton, None):
+                bucket.is_refund = True
+                if not bucket.refund_brand:
+                    # Use the skeleton directly — placeholders are already
+                    # substituted, so we can't call pick_refund_brand (which
+                    # expects raw description). extract_brand on a skeleton
+                    # with refund keywords in the filler list returns the
+                    # merchant token — that's the refund_brand we want.
+                    bucket.refund_brand = extract_brand(bucket.skeleton)
 
         clusters: list[Cluster] = []
         for bucket in buckets.values():
@@ -443,6 +510,35 @@ class ImportClusterService:
             global_boost = 0.04 * min(global_match.user_count, 5) if global_match else 0.0
             boosted_confidence = min(1.0, confidence + mech.confidence_boost + global_boost) if (mech.label or global_match) else confidence
 
+            # Refund override (И-09). When the cluster reads as a reversal, we
+            # look up the counterparty + dominant category from the user's
+            # purchase history for the same brand and use that instead of the
+            # rule/bank/global chain. Rationale: a refund's income-direction
+            # fingerprint will almost never match any existing rule (rules are
+            # trained on expense rows), so without this override refund
+            # clusters land in red zone with no category — forcing the user to
+            # classify every single one manually. We want a refund of a known
+            # merchant to flow through automatically into the same category
+            # bucket as its purchases, acting as an expense compensator.
+            refund_cp_id: int | None = None
+            refund_cp_name: str | None = None
+            if bucket.is_refund and bucket.refund_brand:
+                refund_cp_id, refund_cp_name, refund_cat_id = (
+                    self._resolve_refund_counterparty(
+                        user_id=session.user_id, brand=bucket.refund_brand,
+                    )
+                )
+                # Category inherited from purchase history overrides whatever
+                # the rule chain picked — rules on income side are almost
+                # certainly noise here.
+                if refund_cat_id is not None:
+                    cat_id = refund_cat_id
+                    # 0.95 puts the cluster in green/auto-trust territory
+                    # without hitting the 0.99 gate (which requires an exact
+                    # identifier rule with ≥5 confirmations — criteria a
+                    # refund cluster cannot meet by definition).
+                    boosted_confidence = max(boosted_confidence, 0.95)
+
             clusters.append(
                 Cluster(
                     fingerprint=bucket.fingerprint,
@@ -473,6 +569,10 @@ class ImportClusterService:
                     global_pattern_category_name=global_match.suggested_category_name if global_match else None,
                     global_pattern_user_count=global_match.user_count if global_match else 0,
                     global_pattern_total_confirms=global_match.total_confirms if global_match else 0,
+                    is_refund=bucket.is_refund,
+                    refund_brand=bucket.refund_brand,
+                    refund_resolved_counterparty_id=refund_cp_id,
+                    refund_resolved_counterparty_name=refund_cp_name,
                 )
             )
 
@@ -518,6 +618,11 @@ class ImportClusterService:
             # so pulling the primary into a "one category for all" flow would
             # override that and break the pair. See project_bulk_clusters.md.
             if normalized.get("transfer_match"):
+                excluded_row_ids.add(row.id)
+            # User-requested detach: a row explicitly unchecked in the
+            # cluster-card UI should leave the bulk/brand/counterparty
+            # aggregations and land standalone in the attention bucket.
+            if normalized.get("detached_from_cluster"):
                 excluded_row_ids.add(row.id)
 
         all_clusters = self.build_clusters(session)
@@ -720,8 +825,19 @@ class ImportClusterService:
         )
         cp_by_id = {cp.id: cp for cp in cp_rows}
 
-        # Bucket clusters by (counterparty_id, direction) — never cross income
-        # and expense under the same counterparty (e.g. refund vs. purchase).
+        # Bucket clusters by (counterparty_id, direction). We keep income and
+        # expense separate as a rule — a counterparty might be both a payroll
+        # source (income) and a service you pay (expense), and conflating
+        # those is misleading.
+        #
+        # EXCEPTION — refunds. A refund is income by direction but semantically
+        # an expense compensator: "Отмена операции оплаты KOFEMOLOKO" belongs
+        # under the same "Кофе Молоко" card as the purchases it reverses, not
+        # as a separate income card next door. We detect refund-only income
+        # groups (all member clusters have is_refund=True) and fold them into
+        # the counterparty's expense group. The card's display direction stays
+        # "expense" (so the UI shows expense-kind categories); per-row
+        # operation_type stays "refund" so analytics still net them out.
         buckets: dict[tuple[int, str], list[Cluster]] = {}
         for cluster in clusters:
             cp_id = fp_map.get(cluster.fingerprint)
@@ -732,10 +848,37 @@ class ImportClusterService:
             key = (cp_id, cluster.direction)
             buckets.setdefault(key, []).append(cluster)
 
+        # Fold refund-only income groups into the matching expense group.
+        for key in list(buckets.keys()):
+            cp_id, direction = key
+            if direction != "income":
+                continue
+            members = buckets[key]
+            if not members or not all(getattr(m, "is_refund", False) for m in members):
+                continue
+            expense_key = (cp_id, "expense")
+            if expense_key not in buckets:
+                # No matching expense group — keep the refund income card
+                # standalone rather than hiding it entirely.
+                continue
+            buckets[expense_key].extend(members)
+            del buckets[key]
+
         groups: list[CounterpartyGroup] = []
         for (cp_id, direction), members in buckets.items():
             total_count = sum(m.count for m in members)
-            total_amount = sum((m.total_amount for m in members), Decimal("0"))
+            # Net spend for mixed cards: subtract refund member amounts so the
+            # subtitle ("64 операций · 34 275 ₽") reflects what the user
+            # effectively paid, not the gross sum of purchases + refund.
+            refund_amount = sum(
+                (m.total_amount for m in members if getattr(m, "is_refund", False)),
+                Decimal("0"),
+            )
+            gross_amount = sum(
+                (m.total_amount for m in members if not getattr(m, "is_refund", False)),
+                Decimal("0"),
+            )
+            total_amount = gross_amount - refund_amount
             groups.append(CounterpartyGroup(
                 counterparty_id=cp_id,
                 counterparty_name=cp_by_id[cp_id].name,
@@ -907,6 +1050,82 @@ class ImportClusterService:
                         id_match, rule.confirms, rule.rejections)
 
         return None, None, "none", _CONF_FLOOR, _ID_MATCH_ABSENT, 0, 0
+
+    def _resolve_refund_counterparty(
+        self, *, user_id: int, brand: str,
+    ) -> tuple[int | None, str | None, int | None]:
+        """For a refund cluster, find the best (counterparty, category) pair.
+
+        Search strategy: among the user's **expense** transactions over the last
+        365 days, find those whose counterparty name or description contains
+        `brand` (case-insensitive). Pick the counterparty with the most such
+        transactions; within that counterparty, pick the category used in the
+        most transactions. Both picks are majority vote — no weighting.
+
+        Returns `(counterparty_id, counterparty_name, category_id)`. Any field
+        may be None when no confident match exists (no hits → all None;
+        counterparty found but none of its purchases were categorized →
+        (id, name, None), in which case the cluster stays in attention
+        bucket to let the user pick a category manually).
+        """
+        from collections import Counter as _Counter
+
+        if not brand:
+            return None, None, None
+
+        brand_lc = brand.strip().lower()
+        if not brand_lc:
+            return None, None, None
+
+        lookback_start = datetime.now(timezone.utc) - timedelta(days=365)
+        like_pattern = f"%{brand_lc}%"
+
+        rows = (
+            self.db.query(
+                Transaction.counterparty_id,
+                Transaction.category_id,
+                Counterparty.name,
+            )
+            .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.type == "expense",
+                Transaction.transaction_date >= lookback_start,
+                or_(
+                    func.lower(Counterparty.name).like(like_pattern),
+                    func.lower(Transaction.description).like(like_pattern),
+                    func.lower(Transaction.normalized_description).like(like_pattern),
+                ),
+            )
+            .all()
+        )
+
+        if not rows:
+            return None, None, None
+
+        # Pick counterparty by frequency. Counterparty_id can be NULL on older
+        # rows — those are dropped here because we need a concrete binding to
+        # inherit; description-match alone is not enough to create one.
+        cp_counter: _Counter = _Counter(
+            r.counterparty_id for r in rows if r.counterparty_id is not None
+        )
+        if not cp_counter:
+            return None, None, None
+
+        top_cp_id, _ = cp_counter.most_common(1)[0]
+        cp_name = next(
+            (r.name for r in rows if r.counterparty_id == top_cp_id and r.name),
+            None,
+        )
+
+        # Dominant category for the chosen counterparty.
+        cat_counter: _Counter = _Counter(
+            r.category_id for r in rows
+            if r.counterparty_id == top_cp_id and r.category_id is not None
+        )
+        top_cat_id = cat_counter.most_common(1)[0][0] if cat_counter else None
+
+        return top_cp_id, cp_name, top_cat_id
 
     @staticmethod
     def _classify_identifier_match(bucket: "_ClusterAccumulator", rule: Any) -> str:

@@ -105,6 +105,20 @@ _TRANSFER_KEYWORDS: tuple[str, ...] = (
 )
 
 
+# Refund / reversal markers. A row matching any of these is considered a
+# reversal of a prior purchase from the same merchant, regardless of direction
+# enrichment. Used by the clusterer to flag `is_refund=True` so downstream
+# stages (commit_import, metrics) treat it as an expense-compensator income.
+_REFUND_KEYWORDS: tuple[str, ...] = (
+    "возврат",
+    "refund",
+    "reversal",
+    "отмена операции",
+    "отмена оплаты",
+    "chargeback",
+)
+
+
 def is_transfer_like(description: str, operation_type: str | None = None) -> bool:
     """Return True if the row should use identifier-aware fingerprinting.
 
@@ -113,13 +127,64 @@ def is_transfer_like(description: str, operation_type: str | None = None) -> boo
          when bank mechanics or history classify the row as an internal move.
       2. Transfer keyword in the description — catches rows that haven't been
          enriched yet (e.g. cross-session matcher runs before enrichment).
+
+    Refund rows are *not* transfers — an "Отмена операции оплаты KOFEMOLOKO"
+    is a reversal of a purchase, not an internal money move. Callers relying
+    on this helper to decide transfer-aware fingerprinting shouldn't pull
+    refund rows into that branch.
     """
     if (operation_type or "").strip().lower() == "transfer":
         return True
     if not description:
         return False
     lowered = description.lower()
+    if any(kw in lowered for kw in _REFUND_KEYWORDS):
+        return False
     return any(kw in lowered for kw in _TRANSFER_KEYWORDS)
+
+
+def is_refund_like(description: str, operation_type: str | None = None) -> bool:
+    """Return True if the row reads as a reversal of a prior purchase.
+
+    Two signals:
+      1. `operation_type == "refund"` — already classified upstream.
+      2. A refund keyword ("возврат", "отмена операции", "refund", ...) in
+         the description — catches rows before enrichment has run.
+
+    Kept strict: "отмена" alone is *not* enough — it can appear in unrelated
+    bank messages. Require the phrase "отмена операции" / "отмена оплаты"
+    so noise doesn't trigger the refund path.
+    """
+    if (operation_type or "").strip().lower() == "refund":
+        return True
+    if not description:
+        return False
+    lowered = description.lower()
+    return any(kw in lowered for kw in _REFUND_KEYWORDS)
+
+
+def pick_refund_brand(description: str, tokens: "ExtractedTokens | None" = None) -> str | None:
+    """Best-effort brand extraction for a refund description.
+
+    Builds a skeleton via `normalize_skeleton` (placeholders in place of
+    phone / contract / card / person / org), then delegates to
+    `brand_extractor_service.extract_brand`. That extractor's filler list
+    already drops refund keywords, locales and legal forms — so
+    "Отмена операции оплаты KOFEMOLOKO Volgodonsk RUS" → "kofemoloko".
+
+    Returns None when no token survives the filter — in that case the
+    caller falls back to manual counterparty selection in the moderator UI.
+    """
+    if not description:
+        return None
+    # Local import breaks a circular dependency: brand_extractor is a pure
+    # helper that doesn't touch this module, but importing it at module top
+    # would pull its module-load cost into every normalizer import.
+    from app.services.brand_extractor_service import extract_brand
+
+    used_tokens = tokens if tokens is not None else extract_tokens(description)
+    skeleton = normalize_skeleton(description, used_tokens)
+    return extract_brand(skeleton)
 
 
 def pick_transfer_identifier(tokens: ExtractedTokens) -> tuple[str, str] | None:

@@ -260,8 +260,28 @@ class FinancialHealthService:
             if month_key not in month_keys or not transaction.affects_analytics:
                 continue
             amount = self._to_decimal(transaction.amount)
-            if transaction.type == "income" and transaction.operation_type != "credit_disbursement":
+            if (
+                transaction.type == "income"
+                and transaction.operation_type != "credit_disbursement"
+                and transaction.operation_type != "refund"
+            ):
                 totals[month_key]["income"] += amount
+            elif (
+                transaction.type == "income"
+                and transaction.operation_type == "refund"
+            ):
+                # Refund is an expense compensator, not income. Subtract it
+                # from the category's expense bucket (and the total expense /
+                # priority buckets) so Поток and Health reflect the net spend
+                # the user actually experienced that month.
+                totals[month_key]["expense"] -= amount
+                category = categories_by_id.get(transaction.category_id) if transaction.category_id is not None else None
+                if category is None:
+                    continue
+                if category.priority == "expense_essential":
+                    totals[month_key]["essential"] -= amount
+                elif category.priority == "expense_secondary":
+                    totals[month_key]["secondary"] -= amount
             elif transaction.type == "expense":
                 totals[month_key]["expense"] += amount
                 category = categories_by_id.get(transaction.category_id) if transaction.category_id is not None else None

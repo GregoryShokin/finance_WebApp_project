@@ -158,6 +158,10 @@ class BudgetAnalyticsService:
                 Transaction.category_id == category_id,
                 Transaction.type == "income",
                 Transaction.affects_analytics.is_(True),
+                # Refunds sit in expense-kind categories and are compensators,
+                # not income for the category — exclude here so a refund of
+                # a purchase doesn't count as "income earned by category".
+                Transaction.operation_type != "refund",
                 Transaction.transaction_date >= date_from,
                 Transaction.transaction_date <= date_to,
             )
@@ -221,7 +225,29 @@ class BudgetAnalyticsService:
             q = q.filter(Transaction.account_id.notin_(ic_ids))
 
         rows = q.all()
-        return sum((Decimal(str(tx.amount)) for tx in rows), Decimal("0"))
+
+        # Refund compensators for this category: subtract the refund income
+        # so the returned number is the *net* spend. This is the compensator
+        # model — a refund of a KOFEMOLOKO purchase reduces "Кафе и
+        # рестораны" for the same period by that amount.
+        refund_rows = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.category_id == category_id,
+                Transaction.type == "income",
+                Transaction.operation_type == "refund",
+                Transaction.affects_analytics.is_(True),
+                Transaction.transaction_date >= date_from,
+                Transaction.transaction_date <= date_to,
+            )
+            .all()
+        )
+        total = (
+            sum((Decimal(str(tx.amount)) for tx in rows), Decimal("0"))
+            - sum((Decimal(str(tx.amount)) for tx in refund_rows), Decimal("0"))
+        )
+        return total if total > 0 else Decimal("0")
 
     def _avg_monthly_expense(
         self, user_id: int, category_id: int, base_month: date, months: int = 3
@@ -479,13 +505,15 @@ class BudgetAnalyticsService:
 
         # ── C) Month-end forecast ─────────────────────────────────────────────
         if not self._alert_exists_today(user_id, "month_end_forecast", None):
-            # Total income this month (analytics)
+            # Total income this month (analytics) — exclude refund, which is
+            # a compensator rather than real income.
             income_rows = (
                 self.db.query(Transaction)
                 .filter(
                     Transaction.user_id == user_id,
                     Transaction.type == "income",
                     Transaction.affects_analytics.is_(True),
+                    Transaction.operation_type != "refund",
                     Transaction.transaction_date >= _month_start_dt(today),
                     Transaction.transaction_date <= _month_end_dt(today),
                 )
@@ -495,7 +523,7 @@ class BudgetAnalyticsService:
                 (Decimal(str(tx.amount)) for tx in income_rows), Decimal("0")
             )
 
-            # Total expense this month (analytics)
+            # Total expense this month (analytics), net of refund compensators.
             expense_rows = (
                 self.db.query(Transaction)
                 .filter(
@@ -507,9 +535,25 @@ class BudgetAnalyticsService:
                 )
                 .all()
             )
+            refund_rows = (
+                self.db.query(Transaction)
+                .filter(
+                    Transaction.user_id == user_id,
+                    Transaction.type == "income",
+                    Transaction.operation_type == "refund",
+                    Transaction.affects_analytics.is_(True),
+                    Transaction.transaction_date >= _month_start_dt(today),
+                    Transaction.transaction_date <= _month_end_dt(today),
+                )
+                .all()
+            )
             total_expense = sum(
                 (Decimal(str(tx.amount)) for tx in expense_rows), Decimal("0")
+            ) - sum(
+                (Decimal(str(tx.amount)) for tx in refund_rows), Decimal("0")
             )
+            if total_expense < 0:
+                total_expense = Decimal("0")
 
             # Daily expense rate → projected total for the month
             daily_expense_rate = total_expense / days_passed
@@ -563,13 +607,16 @@ class BudgetAnalyticsService:
             ).all()
         }
 
-        # All analytics income + expense transactions for the month
+        # All analytics income + expense transactions for the month.
+        # Refund rows are fetched separately so we can subtract them from the
+        # expense total rather than treat them as income.
         income_rows = (
             self.db.query(Transaction)
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.type == "income",
                 Transaction.affects_analytics.is_(True),
+                Transaction.operation_type != "refund",
                 Transaction.transaction_date >= date_from,
                 Transaction.transaction_date <= date_to,
             )
@@ -580,6 +627,18 @@ class BudgetAnalyticsService:
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.type == "expense",
+                Transaction.affects_analytics.is_(True),
+                Transaction.transaction_date >= date_from,
+                Transaction.transaction_date <= date_to,
+            )
+            .all()
+        )
+        refund_rows = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.user_id == user_id,
+                Transaction.type == "income",
+                Transaction.operation_type == "refund",
                 Transaction.affects_analytics.is_(True),
                 Transaction.transaction_date >= date_from,
                 Transaction.transaction_date <= date_to,
@@ -602,7 +661,16 @@ class BudgetAnalyticsService:
                 if tx.category_id not in excluded_expense_ids
             ),
             Decimal("0"),
+        ) - sum(
+            (
+                Decimal(str(tx.amount))
+                for tx in refund_rows
+                if tx.category_id not in excluded_expense_ids
+            ),
+            Decimal("0"),
         )
+        if total_expenses < 0:
+            total_expenses = Decimal("0")
 
         if total_expenses > 0:
             pct = float(passive_income / total_expenses * 100)

@@ -670,8 +670,21 @@ class TransactionService:
                 raise TransactionValidationError("Для долга нужно указать контрагента.")
             if debt_direction not in {"lent", "borrowed", "repaid", "collected"}:
                 raise TransactionValidationError("Для долга нужно выбрать корректное направление.")
-        elif counterparty_id not in (None, "", 0):
-            raise TransactionValidationError("Контрагента можно указывать только для операций типа долг.")
+        # Counterparty is allowed on any operation that represents an
+        # interaction with a real entity — regular purchases (merchant),
+        # refunds (reversal from the same merchant), and debt (the
+        # counterparty IS the debtor / creditor). It is NOT meaningful on
+        # transfers (internal money move between user's own accounts),
+        # credit disbursement/early repayment (bank is the account owner,
+        # not a merchant), investment buy/sell (instrument, not a person),
+        # or adjustments. Those paths reject counterparty_id to prevent
+        # accidental binding to an unrelated party.
+        elif operation_type in ("transfer", "credit_disbursement", "credit_early_repayment",
+                                "investment_buy", "investment_sell", "adjustment"):
+            if counterparty_id not in (None, "", 0):
+                raise TransactionValidationError(
+                    "Контрагент не применим к этому типу операции."
+                )
 
         if counterparty_id not in (None, "", 0):
             counterparty = self.counterparty_repo.get_by_id_and_user(int(counterparty_id), user_id)

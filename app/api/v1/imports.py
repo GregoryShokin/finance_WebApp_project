@@ -205,6 +205,23 @@ def unexclude_import_row(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
+@router.post("/rows/{row_id}/detach-from-cluster")
+def detach_row_from_cluster(
+    row_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = ImportService(db)
+    try:
+        return service.detach_row_from_cluster(user_id=current_user.id, row_id=row_id)
+    except ImportNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 @router.post("/rows/{row_id}/label", response_model=ImportRowLabelResponse)
 def set_import_row_label(
     row_id: int,
