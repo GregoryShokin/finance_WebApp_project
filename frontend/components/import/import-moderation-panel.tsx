@@ -2198,6 +2198,20 @@ function CategoryPicker({
     },
   });
 
+  // Auto-select on blur: if the user typed a category name and tabbed/clicked
+  // away without clicking the dropdown item, we resolve the match so the
+  // button doesn't stay disabled on exact text matches.
+  const handleBlur = () => {
+    if (value != null) return; // already selected
+    const q = query.trim().toLowerCase();
+    if (!q) return;
+    const match = categories.find((c) => c.name.toLowerCase() === q);
+    if (match) {
+      onChange(match.id);
+      setQuery(match.name);
+    }
+  };
+
   return (
     <>
       <SearchSelect
@@ -2214,6 +2228,7 @@ function CategoryPicker({
           onChange(item.value ? Number(item.value) : null);
           setQuery(item.label);
         }}
+        onBlur={handleBlur}
         showAllOnFocus
         inputSize="sm"
         inputClassName="text-xs font-medium shadow-sm"

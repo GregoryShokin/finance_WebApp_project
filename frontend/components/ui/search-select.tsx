@@ -52,6 +52,7 @@ export function SearchSelect({
   inputSize = 'md',
   hideLabel = false,
   inputClassName,
+  onBlur,
 }: {
   id: string;
   label: string;
@@ -73,6 +74,7 @@ export function SearchSelect({
   inputSize?: 'sm' | 'md';
   hideLabel?: boolean;
   inputClassName?: string;
+  onBlur?: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -305,6 +307,7 @@ export function SearchSelect({
             setOpen(true);
             if (!inline) updateDropdownPosition();
           }}
+          onBlur={onBlur}
           onChange={(event) => {
             setIsBrowsingOnFocus(false);
             setQuery(event.target.value);
