@@ -78,19 +78,26 @@ class RuleStrengthService:
     # Public API
     # ------------------------------------------------------------------
 
-    def on_confirmed(self, rule_id: int) -> RuleTransition:
+    def on_confirmed(self, rule_id: int, confirms_delta: int = 1) -> RuleTransition:
         """Rule was applied and the user left the result unchanged.
 
-        `confirms` always increments. The ``is_active: False → True``
-        transition only fires the first time ``confirms`` reaches
-        ``RULE_ACTIVATE_CONFIRMS`` AND only if ``rejections == 0``. A rule
-        that was previously deactivated via rejections cannot be silently
-        reactivated by a confirm — manual re-enable only (Phase 5).
+        `confirms` increments by `confirms_delta` (default 1). The bulk-confirm
+        endpoint passes `confirms_delta = N` when a single moderator action
+        validates an entire cluster — that's the one click, N confirmations
+        contract from project_bulk_clusters.md, and it lets the rule clear
+        the activate/generalize thresholds in one step.
+
+        The ``is_active: False → True`` transition fires the first time
+        ``confirms`` crosses ``RULE_ACTIVATE_CONFIRMS`` AND only if
+        ``rejections == 0``. A rule previously deactivated via rejections
+        cannot be silently reactivated — manual re-enable only (Phase 5).
         """
+        if confirms_delta < 1:
+            raise ValueError(f"confirms_delta must be >= 1, got {confirms_delta}")
         rule = self._load(rule_id)
         before = _snapshot(rule)
 
-        rule.confirms += 1
+        rule.confirms += confirms_delta
 
         if (
             not rule.is_active

@@ -262,3 +262,73 @@ export type ImportReviewQueueResponse = {
   total: number;
   rows: ImportReviewRow[];
 };
+
+
+// ─── Bulk clusters (И-08 Этап 2) ─────────────────────────────────────────
+
+export type BulkFingerprintCluster = {
+  fingerprint: string;
+  count: number;
+  total_amount: string;
+  direction: string;
+  skeleton: string;
+  row_ids: number[];
+  candidate_category_id: number | null;
+  candidate_rule_id: number | null;
+  rule_source: string;
+  confidence: number;
+  trust_zone: TrustZone;
+  auto_trust: boolean;
+  // Identifier-based header (phone / contract / card / iban / person_hash) for
+  // transfer-like clusters — the UI prefers this over the masked skeleton so
+  // "Перевод на +79…6612" shows instead of "Перевод на <PHONE>".
+  identifier_key?: string | null;
+  identifier_value?: string | null;
+};
+
+export type BulkBrandCluster = {
+  brand: string;
+  direction: string;
+  count: number;
+  total_amount: string;
+  fingerprint_cluster_ids: string[];
+};
+
+export type BulkClustersResponse = {
+  session_id: number;
+  fingerprint_clusters: BulkFingerprintCluster[];
+  brand_clusters: BulkBrandCluster[];
+};
+
+export type BulkClusterRowUpdate = {
+  row_id: number;
+  operation_type?: string | null;
+  category_id?: number | null;
+  counterparty_id?: number | null;
+  target_account_id?: number | null;
+  credit_account_id?: number | null;
+  credit_principal_amount?: string | null;
+  credit_interest_amount?: string | null;
+  debt_direction?: string | null;
+};
+
+export type BulkApplyPayload = {
+  cluster_key: string;
+  cluster_type: 'fingerprint' | 'brand';
+  updates: BulkClusterRowUpdate[];
+};
+
+export type BulkApplyResponse = {
+  session_id: number;
+  confirmed_count: number;
+  skipped_row_ids: number[];
+  rules_affected: number;
+  summary: {
+    total_rows: number;
+    ready_rows: number;
+    warning_rows: number;
+    error_rows: number;
+    duplicate_rows: number;
+    skipped_rows: number;
+  };
+};

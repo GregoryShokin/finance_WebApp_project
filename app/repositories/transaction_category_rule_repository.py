@@ -20,6 +20,54 @@ class TransactionCategoryRuleRepository:
             .first()
         )
 
+    def bulk_upsert(
+        self,
+        *,
+        user_id: int,
+        normalized_description: str,
+        category_id: int,
+        confirms_delta: int,
+        original_description: str | None = None,
+    ) -> tuple[TransactionCategoryRule, bool]:
+        """Find-or-create a rule and set its confirms count in one shot.
+
+        Used by the bulk-cluster moderator action — one UI click validates N
+        rows, so the rule should jump straight to `confirms = N` on creation
+        (or `+= N` on an existing rule). Returns `(rule, is_new)`.
+
+        Strength-level side effects (activation / generalization) stay in
+        `RuleStrengthService.on_confirmed(confirms_delta=N-1)`, which the
+        caller invokes after this. We flush but don't commit — the caller
+        owns the transaction.
+        """
+        if confirms_delta < 1:
+            raise ValueError(f"confirms_delta must be >= 1, got {confirms_delta}")
+        rule = (
+            self.db.query(TransactionCategoryRule)
+            .filter(
+                TransactionCategoryRule.user_id == user_id,
+                TransactionCategoryRule.normalized_description == normalized_description,
+                TransactionCategoryRule.category_id == category_id,
+            )
+            .first()
+        )
+        if rule is None:
+            rule = TransactionCategoryRule(
+                user_id=user_id,
+                normalized_description=normalized_description,
+                original_description=original_description,
+                category_id=category_id,
+                confirms=0,  # on_confirmed will apply the delta
+            )
+            self.db.add(rule)
+            self.db.flush()
+            return rule, True
+        if original_description and not rule.original_description:
+            rule.original_description = original_description
+            self.db.add(rule)
+            self.db.flush()
+        return rule, False
+
     def upsert(self, *, user_id: int, normalized_description: str, category_id: int, original_description: str | None = None, user_label: str | None = None) -> TransactionCategoryRule:
         rule = (
             self.db.query(TransactionCategoryRule)

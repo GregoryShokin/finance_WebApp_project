@@ -21,8 +21,14 @@ from app.services.import_service import ImportService
 
 
 def _session(**overrides):
-    """Minimal ImportSession stand-in (duck-typed; we only touch source_type)."""
-    return SimpleNamespace(id=1, source_type="tbank", **overrides)
+    """Minimal ImportSession stand-in — duck-typed for _apply_v2_normalization.
+
+    The method touches `source_type` and `mapping_json` (for bank_code override).
+    Everything else is irrelevant here.
+    """
+    defaults = {"id": 1, "source_type": "tbank", "mapping_json": {}}
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
 
 
 def test_v2_adds_expected_keys_preserving_v1() -> None:
@@ -88,7 +94,7 @@ def test_v2_fingerprint_stable_for_cluster_mates() -> None:
 
 
 def test_v2_unknown_bank_when_source_type_missing() -> None:
-    session = SimpleNamespace(id=1, source_type=None)
+    session = SimpleNamespace(id=1, source_type=None, mapping_json={})
     out = ImportService._apply_v2_normalization(
         normalized={"description": "x", "type": "expense", "account_id": 1},
         session=session,
@@ -118,6 +124,59 @@ def test_v2_unknown_direction_differs_from_expense() -> None:
     )
 
     assert out_unknown["fingerprint"] != out_expense["fingerprint"]
+
+
+def test_v2_transfer_by_phone_splits_cluster_by_recipient() -> None:
+    """Phase И-08 Этап 1: transfer rows to different phones → different fp.
+
+    Regression: before transfer-aware fingerprinting, the phone was swallowed
+    by the <PHONE> placeholder and all "Внешний перевод по номеру телефона"
+    rows collapsed into one mega-cluster. Now each recipient stands alone.
+    """
+    session = _session()
+    row_a = {
+        "description": "Внешний перевод по номеру телефона +79161111111",
+        "type": "expense",
+        "account_id": 42,
+    }
+    row_b = {
+        "description": "Внешний перевод по номеру телефона +79162222222",
+        "type": "expense",
+        "account_id": 42,
+    }
+
+    out_a = ImportService._apply_v2_normalization(dict(row_a), session, 42, 1)
+    out_b = ImportService._apply_v2_normalization(dict(row_b), session, 42, 2)
+
+    # Different recipients → different clusters.
+    assert out_a["fingerprint"] != out_b["fingerprint"]
+
+
+def test_v2_transfer_by_phone_differs_from_merchant_payment_to_same_phone() -> None:
+    """A transfer TO a phone and a merchant payment mentioning the same phone
+    must end up in different clusters, even though both carry the same phone.
+
+    Merchant payments are not transfer-like → identifier does not feed into
+    the fingerprint; it's masked by <PHONE>. Transfer rows feed the phone in
+    raw form. Different payloads → different fingerprints.
+    """
+    session = _session()
+    transfer = {
+        "description": "Внешний перевод по номеру телефона +79161234567",
+        "type": "expense",
+        "account_id": 42,
+    }
+    merchant = {
+        # Same phone number appears but this is a merchant payment, not a transfer.
+        "description": "Оплата Megafon +79161234567 Volgodonsk RUS",
+        "type": "expense",
+        "account_id": 42,
+    }
+
+    out_transfer = ImportService._apply_v2_normalization(dict(transfer), session, 42, 1)
+    out_merchant = ImportService._apply_v2_normalization(dict(merchant), session, 42, 2)
+
+    assert out_transfer["fingerprint"] != out_merchant["fingerprint"]
 
 
 def test_v2_failure_does_not_break_row(monkeypatch: pytest.MonkeyPatch) -> None:

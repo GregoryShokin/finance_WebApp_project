@@ -218,20 +218,14 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
       !f.isDuplicateSide &&
       !bulkClusterRowIds.has(f.row.id),
   );
-  // Single bucket now: everything that needs the user's attention OR has been
-  // confirmed (manually or auto-trusted by LLM). Confirmed/auto rows render in
-  // collapsed form; the rest — as full editable cards.
   const isConfirmedOrAuto = (f: FeedRow) => f.cluster?.auto_trust === true || f.row.status === 'ready';
-  const attentionCount = remainingFeed.filter((f) => !isConfirmedOrAuto(f)).length;
-  const confirmedCount = remainingFeed.length - attentionCount;
-  // Sort: still-needs-attention first, confirmed/auto rows last so the user
-  // sees outstanding work at the top.
-  const orderedRemainingFeed = [...remainingFeed].sort((a, b) => {
-    const aDone = isConfirmedOrAuto(a) ? 1 : 0;
-    const bDone = isConfirmedOrAuto(b) ? 1 : 0;
-    if (aDone !== bDone) return aDone - bDone;
-    return b.date.localeCompare(a.date);
-  });
+  // Confirmed rows go into their own tile (ExpandableCard), attention rows stay in the inline list.
+  const confirmedFeed = remainingFeed.filter((f) => isConfirmedOrAuto(f))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const attentionFeed = remainingFeed.filter((f) => !isConfirmedOrAuto(f))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const attentionCount = attentionFeed.length;
+  const confirmedCount = confirmedFeed.length;
 
   const startMutation = useMutation({
     mutationFn: () => startModeration(sessionId),
@@ -333,10 +327,19 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
             onApplied={afterMutation}
           />
 
+          <ConfirmedBucket
+            rows={confirmedFeed}
+            categoryById={categoryById}
+            accountById={accountById}
+            sessionId={sessionId}
+            bulkClusters={bulkClustersQuery.data}
+            onAfterAction={afterMutation}
+          />
+
           <AttentionBucket
-            rows={orderedRemainingFeed}
+            rows={attentionFeed}
             attentionCount={attentionCount}
-            confirmedCount={confirmedCount}
+            confirmedCount={0}
             categoryById={categoryById}
             accountById={accountById}
             sessionId={sessionId}
@@ -733,22 +736,13 @@ function AttentionBucket({
   bulkClusters: BulkClustersResponse | undefined;
   onAfterAction: () => void;
 }) {
-  if (rows.length === 0) {
-    return (
-      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-        🎉 Нет строк для разбора.
-      </div>
-    );
-  }
+  // Confirmed rows now live in their own ConfirmedBucket tile, so if there's
+  // nothing here, just render nothing — the confirmed tile already communicates
+  // completion state via its count.
+  if (rows.length === 0) return null;
 
-  const headerLabel = attentionCount > 0
-    ? `Требуют твоего внимания (${attentionCount})`
-    : `Все строки разобраны (${confirmedCount} проверено)`;
-  const subLabel = attentionCount > 0
-    ? (confirmedCount > 0
-        ? `Проверено: ${confirmedCount}. Подтверди оставшиеся или отложи.`
-        : 'Выбери категорию, подтверди или отложи')
-    : 'Можно жать «Импортировать готовые» в шапке';
+  const headerLabel = `Требуют твоего внимания (${attentionCount})`;
+  const subLabel = 'Выбери категорию, подтверди или отложи';
 
   return (
     <div>
@@ -893,7 +887,19 @@ function AttentionCardImpl({
     red: 'border-slate-200 bg-white',
     green: 'border-slate-200 bg-white',
   };
+  // Row-level category from normalized_data is the strongest signal (rule
+  // already matched or backend-resolved), so it takes priority over
+  // cluster-level hints. Otherwise a refund matched by the cross-session
+  // matcher won't surface its category in the UI — the cluster hasn't
+  // learned a rule yet, but the row already knows its answer.
+  const rowLevelCatId = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.category_id;
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  })();
   const suggestedCatId =
+    rowLevelCatId ??
     cluster?.candidate_category_id ??
     cluster?.hypothesis?.predicted_category_id ??
     cluster?.global_pattern_category_id ??
@@ -1391,7 +1397,7 @@ function AttentionCardImpl({
           <AttachToClusterButton
             open={attachPickerOpen}
             setOpen={setAttachPickerOpen}
-            clusters={bulkClusters?.fingerprint_clusters ?? []}
+            bulkClusters={bulkClusters}
             sourceDirection={direction === 'income' ? 'income' : 'expense'}
             sourceFingerprint={(row.normalized_data as Record<string, any>)?.fingerprint ?? null}
             sourceAmount={totalAmount}
@@ -1531,7 +1537,7 @@ function SplitButton({ active, onClick }: { active: boolean; onClick: () => void
 function AttachToClusterButton({
   open,
   setOpen,
-  clusters,
+  bulkClusters,
   sourceDirection,
   sourceFingerprint,
   sourceAmount,
@@ -1542,7 +1548,7 @@ function AttachToClusterButton({
 }: {
   open: boolean;
   setOpen: (next: boolean) => void;
-  clusters: BulkClustersResponse['fingerprint_clusters'];
+  bulkClusters: BulkClustersResponse | undefined;
   sourceDirection: 'income' | 'expense';
   sourceFingerprint: string | null;
   sourceAmount: number;
@@ -1556,7 +1562,6 @@ function AttachToClusterButton({
       <button
         type="button"
         onClick={(e) => {
-          // Save click coords so the modal can FLIP-animate from the icon.
           (window as any).__lastAttachClick = { x: e.clientX, y: e.clientY };
           setOpen(true);
         }}
@@ -1569,7 +1574,6 @@ function AttachToClusterButton({
         } disabled:opacity-50`}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
-          {/* "merge-into" icon: two lines joining into one */}
           <path d="M6 4v4l-3 3" />
           <path d="M18 4v4l3 3" />
           <path d="M12 11v10" />
@@ -1582,7 +1586,7 @@ function AttachToClusterButton({
         sourceRow={{ amount: sourceAmount, direction: sourceDirection, description: sourceDescription }}
       >
         <AttachClusterPicker
-          clusters={clusters}
+          bulkClusters={bulkClusters}
           sourceDirection={sourceDirection}
           sourceFingerprint={sourceFingerprint}
           onPick={onAttach}
@@ -1737,15 +1741,20 @@ function AttachClusterModal({
 // Full-width cluster picker — rendered inside AttachClusterModal. Lists every
 // matching cluster (no cap), with type-ahead filter. Each row shows the
 // cluster's category badge, direction, count, total amount.
+// A unified pick item — either a brand cluster or a standalone FP cluster.
+type AttachPickItem =
+  | { kind: 'brand'; brand: string; direction: string; count: number; total: number; targetFp: string; catName: string | null }
+  | { kind: 'fp'; fp: string; direction: string; count: number; total: number; skeleton: string; identifier_value?: string | null; catName: string | null };
+
 function AttachClusterPicker({
-  clusters,
+  bulkClusters,
   sourceDirection,
   sourceFingerprint,
   onPick,
   isPending,
   categoryById,
 }: {
-  clusters: BulkClustersResponse['fingerprint_clusters'];
+  bulkClusters: BulkClustersResponse | undefined;
   sourceDirection: 'income' | 'expense';
   sourceFingerprint: string | null;
   onPick: (targetFingerprint: string) => void;
@@ -1753,18 +1762,92 @@ function AttachClusterPicker({
   categoryById: Map<number, Category>;
 }) {
   const [query, setQuery] = useState('');
+
+  // Build a unified list: brand clusters (collapsed) + standalone FP clusters.
+  // FP clusters that are members of a brand are excluded to avoid duplicates.
+  const { items, totalCount } = useMemo<{ items: AttachPickItem[]; totalCount: number }>(() => {
+    const fps = bulkClusters?.fingerprint_clusters ?? [];
+    const brands = bulkClusters?.brand_clusters ?? [];
+
+    // FP index for quick lookup.
+    const fpById = new Map(fps.map((c) => [c.fingerprint, c]));
+
+    // Collect all FP fingerprints that belong to a brand cluster.
+    const brandedFps = new Set<string>();
+    for (const b of brands) {
+      for (const fp of b.fingerprint_cluster_ids) brandedFps.add(fp);
+    }
+
+    const result: AttachPickItem[] = [];
+
+    // Brand entries — pick the largest FP member as the attach target.
+    for (const b of brands) {
+      if (b.direction !== sourceDirection) continue;
+      // Find the FP member with highest count to use as canonical target.
+      let bestFp: string | null = null;
+      let bestCount = -1;
+      for (const fp of b.fingerprint_cluster_ids) {
+        const c = fpById.get(fp);
+        const cnt = c?.count ?? 0;
+        if (cnt > bestCount && fp !== sourceFingerprint) {
+          bestCount = cnt;
+          bestFp = fp;
+        }
+      }
+      if (!bestFp) continue;
+      // Category: try each member FP, take first with a category.
+      let catName: string | null = null;
+      for (const fp of b.fingerprint_cluster_ids) {
+        const c = fpById.get(fp);
+        if (c?.candidate_category_id) {
+          catName = categoryById.get(c.candidate_category_id)?.name ?? null;
+          if (catName) break;
+        }
+      }
+      result.push({
+        kind: 'brand',
+        brand: b.brand.charAt(0).toUpperCase() + b.brand.slice(1),
+        direction: b.direction,
+        count: b.count,
+        total: Math.round(Math.abs(Number(b.total_amount) || 0)),
+        targetFp: bestFp,
+        catName,
+      });
+    }
+
+    // Standalone FP clusters — not in any brand, direction matches, not the source.
+    for (const c of fps) {
+      if (c.direction !== sourceDirection) continue;
+      if (c.fingerprint === sourceFingerprint) continue;
+      if (brandedFps.has(c.fingerprint)) continue;
+      const catName = c.candidate_category_id
+        ? (categoryById.get(c.candidate_category_id)?.name ?? null)
+        : null;
+      result.push({
+        kind: 'fp',
+        fp: c.fingerprint,
+        direction: c.direction,
+        count: c.count,
+        total: Math.round(Math.abs(Number(c.total_amount) || 0)),
+        skeleton: c.skeleton ?? '',
+        identifier_value: c.identifier_value,
+        catName,
+      });
+    }
+
+    return { items: result, totalCount: result.length };
+  }, [bulkClusters, sourceDirection, sourceFingerprint, categoryById]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return clusters
-      .filter((c) => c.direction === sourceDirection)
-      .filter((c) => c.fingerprint !== sourceFingerprint)
-      .filter((c) => {
-        if (!q) return true;
-        const title = headerFromClusterForToast(c).toLowerCase();
-        const skel = (c.skeleton ?? '').toLowerCase();
-        return title.includes(q) || skel.includes(q);
-      });
-  }, [clusters, query, sourceDirection, sourceFingerprint]);
+    if (!q) return items;
+    return items.filter((item) => {
+      if (item.kind === 'brand') return item.brand.toLowerCase().includes(q);
+      const skel = item.skeleton.toLowerCase();
+      const iv = (item.identifier_value ?? '').toLowerCase();
+      return skel.includes(q) || iv.includes(q);
+    });
+  }, [items, query]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -1777,63 +1860,68 @@ function AttachClusterPicker({
         className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-800 focus:border-slate-400 focus:outline-none"
       />
       <p className="text-xs text-slate-400">
-        Показаны {filtered.length} из {clusters.filter((c) => c.direction === sourceDirection).length}{' '}
-        {sourceDirection === 'income' ? 'приходных' : 'расходных'} кластеров. Клик по любому — операция уйдёт в этот кластер и запомнит привязку для будущих импортов.
+        Показано {filtered.length} из {totalCount}{' '}
+        {sourceDirection === 'income' ? 'приходных' : 'расходных'} групп.
+        Клик — операция уйдёт в эту группу и запомнит привязку для будущих импортов.
       </p>
       {filtered.length === 0 ? (
         <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
-          {clusters.length === 0
+          {totalCount === 0
             ? 'В этой сессии пока нет сформированных кластеров.'
             : 'Ничего не найдено. Попробуй другой запрос.'}
         </div>
       ) : (
         <div className="flex flex-col gap-2">
-          {filtered.map((c) => {
-            const title = headerFromClusterForToast(c);
-            const catName = c.candidate_category_id
-              ? categoryById.get(c.candidate_category_id)?.name ?? null
+          {filtered.map((item) => {
+            const key = item.kind === 'brand' ? `brand:${item.brand}` : `fp:${item.fp}`;
+            const targetFp = item.kind === 'brand' ? item.targetFp : item.fp;
+            const title = item.kind === 'brand'
+              ? item.brand
+              : item.identifier_value
+                ? item.identifier_value
+                : (() => {
+                    const s = item.skeleton.trim();
+                    return s.length > 60 ? s.slice(0, 60) + '…' : s;
+                  })();
+            const subline = item.kind === 'fp' && item.skeleton
+              ? (item.skeleton.length > 90 ? item.skeleton.slice(0, 90) + '…' : item.skeleton)
               : null;
-            const skelLine = (c.skeleton ?? '').trim();
-            const skelShort = skelLine.length > 90 ? skelLine.slice(0, 90) + '…' : skelLine;
-            const total = Math.round(Math.abs(Number(c.total_amount) || 0));
+            const isBrand = item.kind === 'brand';
             return (
               <button
-                key={c.fingerprint}
+                key={key}
                 type="button"
                 disabled={isPending}
-                onClick={() => onPick(c.fingerprint)}
-                className="flex w-full flex-col gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/30 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => onPick(targetFp)}
+                className="flex w-full flex-col gap-1.5 rounded-xl border bg-white px-4 py-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/30 disabled:cursor-not-allowed disabled:opacity-50 border-slate-200"
               >
                 <div className="flex items-center gap-2">
+                  {isBrand && (
+                    <span className="shrink-0 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
+                      бренд
+                    </span>
+                  )}
                   <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900">
                     {title}
                   </span>
-                  {catName ? (
+                  {item.catName ? (
                     <span className="shrink-0 rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">
-                      {catName}
+                      {item.catName}
                     </span>
                   ) : (
                     <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-500">
                       Без категории
                     </span>
                   )}
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                      c.direction === 'income'
-                        ? 'bg-emerald-50 text-emerald-700'
-                        : 'bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    {c.direction === 'income' ? 'Доход' : 'Расход'}
-                  </span>
                 </div>
-                {skelShort ? (
-                  <p className="truncate text-xs text-slate-500">{skelShort}</p>
+                {subline ? (
+                  <p className="truncate text-xs text-slate-500">{subline}</p>
                 ) : null}
                 <div className="flex items-center gap-3 text-xs text-slate-400">
-                  <span>{c.count} операц{c.count === 1 ? 'ия' : c.count < 5 ? 'ии' : 'ий'}</span>
+                  <span>{item.count} операц{item.count === 1 ? 'ия' : item.count < 5 ? 'ии' : 'ий'}</span>
                   <span>·</span>
-                  <span className="tabular-nums">{total.toLocaleString('ru-RU')} ₽</span>
+                  <span className="tabular-nums">{item.total.toLocaleString('ru-RU')} ₽</span>
+                  {isBrand ? <span>· все магазины сети</span> : null}
                 </div>
               </button>
             );
@@ -2195,6 +2283,91 @@ function SplitEditor({
 // and `accountById` are already stable `useMemo` Maps, and `onAfterAction` is
 // a stable `useCallback` in the root panel.
 const AttentionCard = memo(AttentionCardImpl);
+
+// ───────────────────────────────────────────────────────────────────────────
+// Bucket: Проверено — тайл, открывающийся в центр экрана
+// ───────────────────────────────────────────────────────────────────────────
+
+function ConfirmedBucket({
+  rows,
+  categoryById,
+  accountById,
+  sessionId,
+  bulkClusters,
+  onAfterAction,
+}: {
+  rows: FeedRow[];
+  categoryById: Map<number, Category>;
+  accountById: Map<number, Account>;
+  sessionId: number;
+  bulkClusters: BulkClustersResponse | undefined;
+  onAfterAction: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (rows.length === 0) return null;
+
+  const totalAmount = rows.reduce((s, r) => s + Math.abs(Number(r.amount) || 0), 0);
+
+  const summaryNode = (
+    <div className="flex w-full items-start gap-3">
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white">
+        <CheckCircle2 className="size-5" />
+      </div>
+      <div className="flex-1">
+        <p className="text-base font-semibold text-slate-950">Проверено</p>
+        <p className="text-sm text-slate-600">
+          {rows.length} операц{rows.length === 1 ? 'ия' : rows.length < 5 ? 'ии' : 'ий'} на {formatMoney(totalAmount)} — готовы к импорту
+        </p>
+      </div>
+    </div>
+  );
+
+  const collapsedNode = (
+    <div className="flex w-full items-start gap-3">
+      <div className="flex-1">{summaryNode}</div>
+      <CollapsibleChevron open={expanded} className="size-4 shrink-0 self-center text-emerald-500" />
+    </div>
+  );
+
+  const expandedNode = (
+    <div className="flex flex-col gap-3">
+      <div className="pr-10">{summaryNode}</div>
+      <div
+        className="overflow-y-auto rounded-2xl bg-white p-2 ring-1 ring-emerald-100"
+        style={{ maxHeight: 'min(58vh, 600px)' }}
+      >
+        <div className="flex flex-col gap-2">
+          {rows.map((feedRow) => (
+            <AttentionCard
+              key={feedRow.row.id}
+              feedRow={feedRow}
+              categoryById={categoryById}
+              accountById={accountById}
+              sessionId={sessionId}
+              bulkClusters={bulkClusters}
+              onAfterAction={onAfterAction}
+            />
+          ))}
+        </div>
+      </div>
+      <p className="text-xs text-slate-400">
+        Эти строки уже помечены как «готовые»: категория проставлена, ошибок нет. Можно жать «Импортировать готовые» в шапке, чтобы создать транзакции разом, или пересмотреть отдельные строки здесь.
+      </p>
+    </div>
+  );
+
+  return (
+    <div className="rounded-2xl border-2 border-emerald-200 bg-emerald-50 p-4">
+      <ExpandableCard
+        isOpen={expanded}
+        onToggle={() => setExpanded((v) => !v)}
+        expandedWidth="860px"
+        collapsed={collapsedNode}
+        expanded={expandedNode}
+      />
+    </div>
+  );
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Bucket 3: Исключённые — коллапсируемый список с кнопкой «Вернуть»

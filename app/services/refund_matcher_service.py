@@ -33,6 +33,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from app.services.brand_extractor_service import extract_brand
+
 MAX_DATE_DIFF_DAYS = 14
 MIN_CONFIDENCE = 0.60
 
@@ -202,13 +204,36 @@ def _score(exp: _Candidate, inc: _Candidate) -> tuple[float, list[str]]:
         reasons.append("same_counterparty_org")
         return 0.95, reasons
 
-    if _has_refund_keyword(inc.description) or _has_refund_keyword(exp.description):
+    # Refund keyword is a strong signal, but it ONLY identifies the income side
+    # as a reversal — it does NOT guarantee the expense side is the correct
+    # purchase. Without a merchant/brand match, a 700₽ POPLAVO purchase can be
+    # wrongly bundled with a 700₽ "Отмена оплаты KOFEMOLOKO" just because both
+    # happened on the same day. Require a merchant signal on top of the keyword.
+    has_refund_kw = _has_refund_keyword(inc.description) or _has_refund_keyword(exp.description)
+    exp_brand = extract_brand(exp.skeleton) if exp.skeleton else None
+    inc_brand = extract_brand(inc.skeleton) if inc.skeleton else None
+    brands_match = bool(exp_brand and inc_brand and exp_brand == inc_brand)
+
+    if has_refund_kw and brands_match:
         reasons.append("refund_keyword")
+        reasons.append("same_brand")
         return 0.95, reasons
 
     if exp.skeleton and inc.skeleton and exp.skeleton == inc.skeleton:
         reasons.append("same_skeleton")
         return 0.80, reasons
+
+    if has_refund_kw and not brands_match:
+        # Keyword-only — treat as weak hint. Falls below MIN_CONFIDENCE and is
+        # dropped, so accidental pairs across merchants don't auto-label.
+        reasons.append("refund_keyword_no_brand")
+        return 0.50, reasons
+
+    if brands_match:
+        # Same brand, no keyword — still a plausible purchase↔refund pair but
+        # weaker than keyword+brand.
+        reasons.append("same_brand")
+        return 0.75, reasons
 
     # Window + amount + direction only — weak but still worth surfacing.
     reasons.append("amount_and_window")

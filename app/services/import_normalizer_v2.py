@@ -85,6 +85,62 @@ STOPWORDS: frozenset[str] = frozenset({
 })
 
 
+# Keywords that mark a row as "transfer-like" for fingerprint purposes — meaning
+# the identifier (phone/contract/card) should participate in the fingerprint in
+# its raw form instead of being swallowed by a placeholder.
+#
+# Kept narrow on purpose: anything matching here pulls the row into the
+# identifier-aware branch, which splits one broad cluster ("Внешний перевод по
+# номеру телефона") into per-recipient sub-clusters. False positives are
+# cheap (over-splitting into smaller clusters), false negatives are
+# expensive (all recipients merged into one undistinguishable group).
+_TRANSFER_KEYWORDS: tuple[str, ...] = (
+    "перевод",
+    "transfer",
+    "с карты на карту",
+    "c2c",
+    "внутрибанковский",
+    "внешний перевод",
+    "внутренний перевод",
+)
+
+
+def is_transfer_like(description: str, operation_type: str | None = None) -> bool:
+    """Return True if the row should use identifier-aware fingerprinting.
+
+    Two signals:
+      1. `operation_type == "transfer"` — set upstream by the enrichment service
+         when bank mechanics or history classify the row as an internal move.
+      2. Transfer keyword in the description — catches rows that haven't been
+         enriched yet (e.g. cross-session matcher runs before enrichment).
+    """
+    if (operation_type or "").strip().lower() == "transfer":
+        return True
+    if not description:
+        return False
+    lowered = description.lower()
+    return any(kw in lowered for kw in _TRANSFER_KEYWORDS)
+
+
+def pick_transfer_identifier(tokens: ExtractedTokens) -> tuple[str, str] | None:
+    """Pick the best identifier to split a transfer cluster by.
+
+    Priority: phone → contract → card → iban. The first present wins — all of
+    them uniquely identify the counterparty, and banks typically provide only
+    one. `None` means "no identifier available" — caller should fall back to
+    plain fingerprint (which will over-merge, but there's nothing to split on).
+    """
+    if tokens.phone:
+        return ("phone", tokens.phone)
+    if tokens.contract:
+        return ("contract", tokens.contract)
+    if tokens.card:
+        return ("card", tokens.card)
+    if tokens.iban:
+        return ("iban", tokens.iban)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Dataclass
 # ---------------------------------------------------------------------------
@@ -240,13 +296,30 @@ def fingerprint(
     direction: str,
     skeleton: str,
     contract: str | None = None,
+    transfer_identifier: tuple[str, str] | None = None,
 ) -> str:
     """Deterministic 16-hex-char hash over the cluster-defining inputs.
 
     `contract` is included only when present — None values would otherwise
     cross-pollute rows that genuinely share the other four inputs.
+
+    `transfer_identifier` is a `(kind, value)` pair (e.g. `("phone", "+79…")`)
+    that participates in the payload in raw form. Use this for transfer-like
+    rows so that `Внешний перевод на +79161111111` and `Внешний перевод на
+    +79162222222` end up in different clusters — the skeleton masks the phone
+    as `<PHONE>`, which would otherwise merge all transfers into one.
+
+    When `transfer_identifier` is given **and** its `kind == "contract"`, the
+    separate `contract` positional arg is ignored to avoid double-including
+    the same value.
     """
     parts = [bank, str(account_id), direction, skeleton]
+    if transfer_identifier is not None:
+        kind, value = transfer_identifier
+        parts.append(f"transfer:{kind}:{value}")
+        if kind == "contract":
+            # Identifier already carries the contract; don't double-append.
+            contract = None
     if contract:
         parts.append(contract)
     payload = "|".join(parts).encode("utf-8")

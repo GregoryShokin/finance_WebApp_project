@@ -240,3 +240,70 @@ def test_unknown_rule_raises(db, service):
         service.on_confirmed(999_999)
     with pytest.raises(RuleNotFound):
         service.on_rejected(999_999)
+
+
+# ---------------------------------------------------------------------------
+# bulk-confirm: one call, N confirmations (И-08 Этап 2)
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_confirm_activates_and_generalizes_in_one_call(
+    db, user, category, service,
+):
+    """One bulk-apply click confirms N cluster rows, crossing both thresholds.
+
+    Fresh exact rule with bank_code → confirms_delta=92 crosses both the
+    activation (≥3) and generalization (≥7) thresholds, so the rule ends up
+    active AND scope='bank' after a single call.
+    """
+    rule = _make_rule(db, user, category, bank_code="tbank")
+    assert rule.is_active is False
+    assert rule.scope == "exact"
+
+    tx = service.on_confirmed(rule.id, confirms_delta=92)
+    db.refresh(rule)
+
+    assert rule.confirms == 92
+    assert rule.is_active is True
+    assert rule.scope == "bank"
+    assert tx.activated is True
+    assert tx.generalized is True
+    assert tx.confirms_before == 0
+    assert tx.confirms_after == 92
+
+
+def test_bulk_confirm_delta_accumulates_on_existing_rule(
+    db, user, category, service,
+):
+    """Existing rule with some confirms receives +N more from bulk-apply."""
+    rule = _make_rule(db, user, category, confirms=2, is_active=False)
+
+    service.on_confirmed(rule.id, confirms_delta=5)
+    db.refresh(rule)
+
+    assert rule.confirms == 7
+    assert rule.is_active is True
+
+
+def test_bulk_confirm_rejects_zero_and_negative_delta(db, user, category, service):
+    rule = _make_rule(db, user, category)
+    with pytest.raises(ValueError):
+        service.on_confirmed(rule.id, confirms_delta=0)
+    with pytest.raises(ValueError):
+        service.on_confirmed(rule.id, confirms_delta=-3)
+
+
+def test_bulk_confirm_on_deactivated_rule_does_not_reactivate(
+    db, user, category, service,
+):
+    """Rule previously deactivated via rejections stays inactive even under
+    a large bulk-confirm — same invariant as the single-confirm path."""
+    rule = _make_rule(
+        db, user, category,
+        confirms=5, rejections=3, is_active=False,
+    )
+    service.on_confirmed(rule.id, confirms_delta=50)
+    db.refresh(rule)
+
+    assert rule.confirms == 55
+    assert rule.is_active is False

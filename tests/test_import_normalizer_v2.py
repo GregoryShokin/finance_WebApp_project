@@ -13,7 +13,9 @@ from app.services.import_normalizer_v2 import (
     ExtractedTokens,
     extract_tokens,
     fingerprint,
+    is_transfer_like,
     normalize_skeleton,
+    pick_transfer_identifier,
 )
 
 
@@ -243,3 +245,139 @@ def test_fingerprint_different_contract_different_fp() -> None:
         fingerprint("tbank", 1, "income", s1, t1.contract)
         != fingerprint("tbank", 1, "income", s2, t2.contract)
     )
+
+
+# ---------------------------------------------------------------------------
+# Transfer-aware fingerprint (Phase И-08 bulk clusters, Этап 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("description,op,expected", [
+    ("Внешний перевод по номеру телефона +79161234567", None, True),
+    ("Перевод брату", None, True),
+    ("Внутрибанковский перевод с договора 7001", None, True),
+    ("Оплата в PYATEROCHKA 14130", None, False),
+    ("Оплата Megafon", None, False),
+    # operation_type signal alone is enough even without a keyword in the text.
+    ("Списание", "transfer", True),
+    # Case-insensitive & embedded-in-sentence.
+    ("С карты на карту по заявке", None, True),
+])
+def test_is_transfer_like(description: str, op: str | None, expected: bool) -> None:
+    assert is_transfer_like(description, op) is expected
+
+
+def test_pick_transfer_identifier_priority() -> None:
+    # Phone wins over contract and card when all are present.
+    tokens = extract_tokens(
+        "Перевод на +79161234567 по договору №7001 карта **** 9876"
+    )
+    assert pick_transfer_identifier(tokens) == ("phone", "+79161234567")
+
+
+def test_pick_transfer_identifier_none_when_no_identifiers() -> None:
+    tokens = extract_tokens("Перевод между своими")
+    assert pick_transfer_identifier(tokens) is None
+
+
+def test_transfer_fingerprint_splits_by_phone() -> None:
+    """Two transfers to different phones → different fingerprints."""
+    raw1 = "Внешний перевод по номеру телефона +79161234567"
+    raw2 = "Внешний перевод по номеру телефона +79167654321"
+    t1, t2 = extract_tokens(raw1), extract_tokens(raw2)
+    s1 = normalize_skeleton(raw1, t1)
+    s2 = normalize_skeleton(raw2, t2)
+    # Skeletons collapse the phone to <PHONE>, so without transfer_identifier
+    # they would share a fingerprint — that's the bug we're fixing.
+    assert s1 == s2
+
+    fp1 = fingerprint(
+        "tbank", 1, "expense", s1, t1.contract,
+        transfer_identifier=pick_transfer_identifier(t1),
+    )
+    fp2 = fingerprint(
+        "tbank", 1, "expense", s2, t2.contract,
+        transfer_identifier=pick_transfer_identifier(t2),
+    )
+    assert fp1 != fp2
+
+
+def test_transfer_fingerprint_merges_same_phone() -> None:
+    """Two transfers to the same phone → one fingerprint (same recipient)."""
+    raw1 = "Перевод на +79161234567 15.03.2026 500,00"
+    raw2 = "Перевод на +79161234567 20.04.2026 1 500,00"
+    t1, t2 = extract_tokens(raw1), extract_tokens(raw2)
+    s1 = normalize_skeleton(raw1, t1)
+    s2 = normalize_skeleton(raw2, t2)
+    fp1 = fingerprint(
+        "tbank", 1, "expense", s1, t1.contract,
+        transfer_identifier=pick_transfer_identifier(t1),
+    )
+    fp2 = fingerprint(
+        "tbank", 1, "expense", s2, t2.contract,
+        transfer_identifier=pick_transfer_identifier(t2),
+    )
+    assert fp1 == fp2
+
+
+def test_nontransfer_merchant_rows_not_pulled_into_transfer_branch() -> None:
+    """Merchant rows must not trigger transfer-identifier fingerprinting.
+
+    The anti-regression guarantee for Этап 1: two Pyaterochka rows (even with
+    bare TT numbers in the description) are classified as non-transfer, so
+    their fingerprints are built without folding identifiers in raw form. The
+    fact that different TT numbers live in different clusters here is a
+    *separate* concern — Этап 2 (brand extractor) merges them at the
+    brand-key layer, not at the fingerprint layer.
+    """
+    raw1 = "Оплата в PYATEROCHKA 14130 Volgodonsk RUS"
+    raw2 = "Оплата в PYATEROCHKA 20046 Volgodonsk RUS"
+    assert is_transfer_like(raw1, None) is False
+    assert is_transfer_like(raw2, None) is False
+    t1, t2 = extract_tokens(raw1), extract_tokens(raw2)
+    assert pick_transfer_identifier(t1) is None
+    assert pick_transfer_identifier(t2) is None
+
+
+def test_transfer_identifier_does_not_double_include_contract() -> None:
+    """When transfer_identifier=('contract', X), positional `contract` is ignored."""
+    # Same contract value fed via both paths — result must equal the
+    # identifier-only call (i.e. not the sum of both).
+    fp_identifier_only = fingerprint(
+        "tbank", 1, "income", "skel",
+        transfer_identifier=("contract", "A-1"),
+    )
+    fp_both = fingerprint(
+        "tbank", 1, "income", "skel", contract="A-1",
+        transfer_identifier=("contract", "A-1"),
+    )
+    assert fp_identifier_only == fp_both
+
+
+def test_transfer_fingerprint_vs_payment_fingerprint_diverge() -> None:
+    """Transfer to Megafon phone vs merchant payment to Megafon → different fp.
+
+    The payment is not transfer-like (no 'перевод' keyword, operation_type is
+    not 'transfer'), so its identifier is swallowed by the skeleton. The
+    actual transfer feeds the phone into the fingerprint raw. Different
+    payloads → different fingerprints, which is exactly what we want.
+    """
+    transfer_desc = "Внешний перевод по номеру телефона +79161234567"
+    payment_desc = "Оплата Megafon +79161234567"
+
+    t_transfer = extract_tokens(transfer_desc)
+    t_payment = extract_tokens(payment_desc)
+    s_transfer = normalize_skeleton(transfer_desc, t_transfer)
+    s_payment = normalize_skeleton(payment_desc, t_payment)
+
+    fp_transfer = fingerprint(
+        "tbank", 1, "expense", s_transfer, t_transfer.contract,
+        transfer_identifier=pick_transfer_identifier(t_transfer)
+        if is_transfer_like(transfer_desc, None) else None,
+    )
+    fp_payment = fingerprint(
+        "tbank", 1, "expense", s_payment, t_payment.contract,
+        transfer_identifier=pick_transfer_identifier(t_payment)
+        if is_transfer_like(payment_desc, None) else None,
+    )
+    assert fp_transfer != fp_payment

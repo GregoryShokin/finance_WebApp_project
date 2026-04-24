@@ -130,16 +130,37 @@ class TestConfidenceBands:
         assert len(result) == 1
         assert result[0].confidence == pytest.approx(0.95)
 
-    def test_strong_on_refund_keyword(self, svc):
+    def test_strong_on_refund_keyword_with_matching_brand(self, svc):
+        """Refund keyword alone is not enough — needs same merchant/brand."""
         now = datetime(2026, 4, 22)
         rows = [
-            _row(1, "500", "expense", now, description="Покупка"),
-            _row(2, "500", "income", now + timedelta(days=2), description="Возврат покупки"),
+            _row(1, "500", "expense", now,
+                 description="Оплата в Pyaterochka",
+                 skeleton="оплата в pyaterochka"),
+            _row(2, "500", "income", now + timedelta(days=2),
+                 description="Возврат в Pyaterochka",
+                 skeleton="возврат в pyaterochka"),
         ]
         result = svc.match(rows)
         assert len(result) == 1
         assert result[0].confidence == pytest.approx(0.95)
         assert "refund_keyword" in result[0].reasons
+        assert "same_brand" in result[0].reasons
+
+    def test_refund_keyword_without_brand_match_is_rejected(self, svc):
+        """Regression: KOFEMOLOKO refund ↔ POPLAVO purchase must NOT pair up
+        just because amounts align and one side contains 'отмена'."""
+        now = datetime(2026, 4, 22)
+        rows = [
+            _row(1, "700", "expense", now,
+                 description="Оплата в POPLAVO Volgodonsk RUS",
+                 skeleton="оплата в poplavo volgodonsk rus"),
+            _row(2, "700", "income", now,
+                 description="Отмена операции оплаты KOFEMOLOKO Volgodonsk RUS",
+                 skeleton="отмена операции оплаты kofemoloko volgodonsk rus"),
+        ]
+        result = svc.match(rows)
+        assert len(result) == 0
 
     def test_medium_on_matching_skeleton(self, svc):
         now = datetime(2026, 4, 22)

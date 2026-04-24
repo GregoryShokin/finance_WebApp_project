@@ -86,10 +86,27 @@ function formatMoney(value: string | number): string {
 function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: Props) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
-  const [bulkCategoryId, setBulkCategoryId] = useState<number | null>(
-    meta.kind === 'fingerprint' ? meta.cluster.candidate_category_id : null,
-  );
-  const [bulkQuery, setBulkQuery] = useState('');
+  const [bulkCategoryId, setBulkCategoryId] = useState<number | null>(() => {
+    if (meta.kind === 'fingerprint') return meta.cluster.candidate_category_id;
+    // Brand clusters inherit the category from their first member that has an
+    // active rule. Without this, single-word brands ("Pyaterochka", "Magnit")
+    // always open with empty category even though per-fingerprint members
+    // already know the answer — the user sees it as "ran out of its tag".
+    for (const m of meta.members) {
+      if (m.candidate_category_id != null) return m.candidate_category_id;
+    }
+    return null;
+  });
+  // Prefill the search input with the inherited category name so the user
+  // sees "Продукты" in the picker instead of an empty field when the brand
+  // already has a rule-matched category.
+  const [bulkQuery, setBulkQuery] = useState(() => {
+    const initialCatId = meta.kind === 'fingerprint'
+      ? meta.cluster.candidate_category_id
+      : (meta.members.find((m) => m.candidate_category_id != null)?.candidate_category_id ?? null);
+    if (initialCatId == null) return '';
+    return categories.find((c) => c.id === initialCatId)?.name ?? '';
+  });
   const [bulkCounterpartyId, setBulkCounterpartyId] = useState<number | null>(null);
   const [bulkCounterpartyQuery, setBulkCounterpartyQuery] = useState('');
   const [rowState, setRowState] = useState<Record<number, RowState>>({});
