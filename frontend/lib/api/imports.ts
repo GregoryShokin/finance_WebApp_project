@@ -105,12 +105,15 @@ export function bulkApplyCluster(sessionId: number, payload: BulkApplyPayload) {
 export type AttachRowToClusterResponse = {
   row_id: number;
   transaction_id: number | null;
-  target_fingerprint: string;
+  target_fingerprint: string | null;
+  counterparty_id: number | null;
   alias_created: boolean;
+  binding_created: boolean;
   source_fingerprint: string | null;
   summary: Record<string, number>;
 };
 
+// Legacy: attach to a fingerprint cluster (creates FingerprintAlias).
 export function attachRowToCluster(
   sessionId: number,
   rowId: number,
@@ -121,6 +124,23 @@ export function attachRowToCluster(
     {
       method: 'POST',
       body: JSON.stringify({ target_fingerprint: targetFingerprint }),
+    },
+  );
+}
+
+// Preferred Phase 3 path: attach to a counterparty. Creates a
+// CounterpartyFingerprint binding so future imports of the same skeleton
+// group under the counterparty automatically.
+export function attachRowToCounterparty(
+  sessionId: number,
+  rowId: number,
+  counterpartyId: number,
+) {
+  return apiClient<AttachRowToClusterResponse>(
+    `/imports/${sessionId}/rows/${rowId}/attach-to-cluster`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ counterparty_id: counterpartyId }),
     },
   );
 }

@@ -28,11 +28,13 @@ import { Button } from '@/components/ui/button';
 import { CollapsibleChevron } from '@/components/ui/collapsible';
 import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
 import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
-import { bulkApplyCluster } from '@/lib/api/imports';
+import { AttachToCounterpartyButton } from '@/components/import/attach-counterparty';
+import { attachRowToCounterparty, bulkApplyCluster } from '@/lib/api/imports';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
 import type {
   BulkApplyPayload,
   BulkClusterRowUpdate,
+  BulkClustersResponse,
   BulkFingerprintCluster,
   ImportPreviewRow,
 } from '@/types/import';
@@ -51,6 +53,16 @@ export type ClusterCardMeta =
       count: number;
       totalAmount: string;
       members: BulkFingerprintCluster[];
+    }
+  | {
+      // Phase 3 — counterparty-centric grouping.
+      kind: 'counterparty';
+      counterpartyId: number;
+      counterpartyName: string;
+      direction: string;
+      count: number;
+      totalAmount: string;
+      members: BulkFingerprintCluster[];
     };
 
 type Props = {
@@ -58,6 +70,7 @@ type Props = {
   sessionId: number;
   rowsById: Map<number, ImportPreviewRow>;
   categories: Category[];
+  bulkClusters?: BulkClustersResponse;
   onApplied: () => void;
 };
 
@@ -83,23 +96,20 @@ function formatMoney(value: string | number): string {
   }).format(Math.abs(n));
 }
 
-function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: Props) {
+function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, onApplied }: Props) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [bulkCategoryId, setBulkCategoryId] = useState<number | null>(() => {
     if (meta.kind === 'fingerprint') return meta.cluster.candidate_category_id;
-    // Brand clusters inherit the category from their first member that has an
-    // active rule. Without this, single-word brands ("Pyaterochka", "Magnit")
-    // always open with empty category even though per-fingerprint members
-    // already know the answer — the user sees it as "ran out of its tag".
+    // Brand and counterparty clusters inherit the category from their first
+    // member that has an active rule. Without this, single-word brands
+    // ("Pyaterochka", "Magnit") and counterparties always open with empty
+    // category even though per-fingerprint members already know the answer.
     for (const m of meta.members) {
       if (m.candidate_category_id != null) return m.candidate_category_id;
     }
     return null;
   });
-  // Prefill the search input with the inherited category name so the user
-  // sees "Продукты" in the picker instead of an empty field when the brand
-  // already has a rule-matched category.
   const [bulkQuery, setBulkQuery] = useState(() => {
     const initialCatId = meta.kind === 'fingerprint'
       ? meta.cluster.candidate_category_id
@@ -107,8 +117,13 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: P
     if (initialCatId == null) return '';
     return categories.find((c) => c.id === initialCatId)?.name ?? '';
   });
-  const [bulkCounterpartyId, setBulkCounterpartyId] = useState<number | null>(null);
-  const [bulkCounterpartyQuery, setBulkCounterpartyQuery] = useState('');
+  // Counterparty kind prefills the counterparty picker with its own id/name.
+  const [bulkCounterpartyId, setBulkCounterpartyId] = useState<number | null>(
+    meta.kind === 'counterparty' ? meta.counterpartyId : null,
+  );
+  const [bulkCounterpartyQuery, setBulkCounterpartyQuery] = useState(
+    meta.kind === 'counterparty' ? meta.counterpartyName : '',
+  );
   const [rowState, setRowState] = useState<Record<number, RowState>>({});
 
   const counterpartiesQuery = useQuery({
@@ -133,12 +148,11 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: P
     onError: (err: Error) => toast.error(err.message || 'Не удалось создать контрагента'),
   });
 
-  // Aggregate rows across members (brand) or use the single cluster's ids.
+  // Aggregate rows across members (brand/counterparty) or use the single
+  // cluster's ids.
   const allRowIds = useMemo<number[]>(() => {
-    if (meta.kind === 'brand') {
-      return meta.members.flatMap((m) => m.row_ids);
-    }
-    return meta.cluster.row_ids;
+    if (meta.kind === 'fingerprint') return meta.cluster.row_ids;
+    return meta.members.flatMap((m) => m.row_ids);
   }, [meta]);
 
   const rows = useMemo<ImportPreviewRow[]>(
@@ -147,11 +161,11 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: P
   );
 
   // Only show categories compatible with the cluster direction.
+  const metaDirection = meta.kind === 'fingerprint' ? meta.cluster.direction : meta.direction;
   const filteredCategories = useMemo<Category[]>(() => {
-    const direction = meta.kind === 'fingerprint' ? meta.cluster.direction : meta.direction;
-    const wanted = direction === 'income' ? 'income' : 'expense';
+    const wanted = metaDirection === 'income' ? 'income' : 'expense';
     return categories.filter((c) => c.kind === wanted);
-  }, [categories, meta]);
+  }, [categories, metaDirection]);
 
   const categoryItems = useMemo<SearchSelectItem[]>(
     () => filteredCategories.map((c) => ({ value: String(c.id), label: c.name })),
@@ -168,19 +182,20 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: P
   // Transfer-like fingerprint clusters carry a concrete identifier (phone /
   // contract / card / iban) — prefer that over the masked skeleton so users
   // see "Перевод по номеру телефона +79…6612" instead of "… <PHONE>".
-  const title =
-    meta.kind === 'brand'
-      ? meta.brand.charAt(0).toUpperCase() + meta.brand.slice(1)
-      : meta.cluster.identifier_value
-        ? headerFromIdentifier(
-            meta.cluster.identifier_key ?? null,
-            meta.cluster.identifier_value,
-            meta.cluster.skeleton,
-          )
-        : headerFromSkeleton(meta.cluster.skeleton);
-  const count = meta.kind === 'brand' ? meta.count : meta.cluster.count;
-  const totalAmount = meta.kind === 'brand' ? meta.totalAmount : String(meta.cluster.total_amount);
-  const direction = meta.kind === 'brand' ? meta.direction : meta.cluster.direction;
+  const title = (() => {
+    if (meta.kind === 'counterparty') return meta.counterpartyName;
+    if (meta.kind === 'brand') return meta.brand.charAt(0).toUpperCase() + meta.brand.slice(1);
+    return meta.cluster.identifier_value
+      ? headerFromIdentifier(
+          meta.cluster.identifier_key ?? null,
+          meta.cluster.identifier_value,
+          meta.cluster.skeleton,
+        )
+      : headerFromSkeleton(meta.cluster.skeleton);
+  })();
+  const count = meta.kind === 'fingerprint' ? meta.cluster.count : meta.count;
+  const totalAmount = meta.kind === 'fingerprint' ? String(meta.cluster.total_amount) : meta.totalAmount;
+  const direction = metaDirection;
   const subtitle = `${count} операц${count === 1 ? 'ия' : count < 5 ? 'ии' : 'ий'} · ${formatMoney(totalAmount)}`;
 
   function defaultRowState(): RowState {
@@ -249,9 +264,13 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: P
       if (updates.length === 0) {
         throw new Error('Ни одной строки с выбранной категорией');
       }
+      const clusterKey = (() => {
+        if (meta.kind === 'fingerprint') return meta.cluster.fingerprint;
+        if (meta.kind === 'brand') return meta.brand;
+        return `counterparty:${meta.counterpartyId}`;
+      })();
       const payload: BulkApplyPayload = {
-        cluster_key:
-          meta.kind === 'brand' ? meta.brand : meta.cluster.fingerprint,
+        cluster_key: clusterKey,
         cluster_type: meta.kind,
         updates,
       };
@@ -417,6 +436,9 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, onApplied }: P
           toggleRowIncluded={toggleRowIncluded}
           setRowCategory={setRowCategory}
           categories={filteredCategories}
+          sessionId={sessionId}
+          bulkClusters={bulkClusters}
+          onAfterAction={onApplied}
           expanded
         />
       </div>
@@ -445,6 +467,9 @@ function ClusterRowList({
   toggleRowIncluded,
   setRowCategory,
   categories,
+  sessionId,
+  bulkClusters,
+  onAfterAction,
   expanded = false,
 }: {
   rows: ImportPreviewRow[];
@@ -452,6 +477,9 @@ function ClusterRowList({
   toggleRowIncluded: (rowId: number) => void;
   setRowCategory: (rowId: number, categoryId: number | null) => void;
   categories: Category[];
+  sessionId: number;
+  bulkClusters?: BulkClustersResponse;
+  onAfterAction: () => void;
   expanded?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -511,6 +539,12 @@ function ClusterRowList({
                 categories={categories}
                 onChange={(id) => setRowCategory(row.id, id)}
               />
+              <RowAttachToCounterpartyButton
+                row={row}
+                sessionId={sessionId}
+                bulkClusters={bulkClusters}
+                onAttached={onAfterAction}
+              />
             </div>
           );
         })}
@@ -558,6 +592,54 @@ function RowCategoryPicker({
       showAllOnFocus
       inputSize="sm"
       disabled={disabled}
+    />
+  );
+}
+
+// Per-row "→ to counterparty" button inside the cluster row list. Lets the
+// user pull one stray row out of a brand cluster and put it under its own
+// counterparty. Uses the shared AttachToCounterpartyButton (same FLIP modal
+// + picker as the attention-card action).
+function RowAttachToCounterpartyButton({
+  row,
+  sessionId,
+  bulkClusters,
+  onAttached,
+}: {
+  row: ImportPreviewRow;
+  sessionId: number;
+  bulkClusters?: BulkClustersResponse;
+  onAttached: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const nd = (row.normalized_data || {}) as Record<string, any>;
+  const amountRaw = Number(nd.amount ?? 0);
+  const direction: 'income' | 'expense' = (nd.direction === 'income' ? 'income' : 'expense');
+  const description = descriptionOf(row);
+
+  const mutation = useMutation({
+    mutationFn: (cp: { id: number; name: string }) =>
+      attachRowToCounterparty(sessionId, row.id, cp.id).then((data) => ({ ...data, _cpName: cp.name })),
+    onSuccess: (data) => {
+      setOpen(false);
+      toast.success(`Добавлено к контрагенту «${data._cpName}»`);
+      onAttached();
+    },
+    onError: (err: Error) => toast.error(err.message || 'Не удалось добавить'),
+  });
+
+  return (
+    <AttachToCounterpartyButton
+      open={open}
+      setOpen={setOpen}
+      bulkClusters={bulkClusters}
+      sourceDirection={direction}
+      sourceAmount={Math.abs(amountRaw)}
+      sourceDescription={description}
+      onAttach={(cp) => mutation.mutate(cp)}
+      isPending={mutation.isPending}
+      size="sm"
+      title="Переместить к контрагенту"
     />
   );
 }

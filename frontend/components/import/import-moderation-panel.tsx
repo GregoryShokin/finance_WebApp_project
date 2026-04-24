@@ -19,7 +19,7 @@ import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, CheckCircle2, Loader2, Sparkles } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Loader2, Plus, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -28,7 +28,7 @@ import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-sele
 import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 import { CategoryDialog } from '@/components/categories/category-dialog';
 import {
-  attachRowToCluster,
+  attachRowToCounterparty,
   commitImport,
   excludeImportRow,
   getBulkClusters,
@@ -40,9 +40,12 @@ import {
   updateImportRow,
 } from '@/lib/api/imports';
 import { ClusterCard, type ClusterCardMeta } from '@/components/import/cluster-card';
+import { AttachToCounterpartyButton } from '@/components/import/attach-counterparty';
 import { getAccounts } from '@/lib/api/accounts';
 import { createCategory, getCategories } from '@/lib/api/categories';
+import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
 import type { Account } from '@/types/account';
+import type { Counterparty } from '@/types/counterparty';
 import type {
   BulkClustersResponse,
   ClusterHypothesis,
@@ -636,22 +639,46 @@ function BulkClustersBucket({
     return map;
   }, [rows]);
 
-  // Build cards: brand clusters first (biggest wins), then fingerprint
-  // clusters that aren't already included in any brand group.
+  // Build cards, precedence (highest first):
+  //   1. counterparty groups (Phase 3) — authoritative, beat brand and fingerprint
+  //   2. brand clusters — group per-TT fingerprints by their first token
+  //   3. standalone fingerprint clusters — no counterparty, no brand
+  // Each fingerprint lands in exactly one card.
   const cards = useMemo<Array<{ key: string; meta: ClusterCardMeta }>>(() => {
     if (!bulkClusters) return [];
     const fpById = new Map<string, typeof bulkClusters.fingerprint_clusters[number]>();
     for (const c of bulkClusters.fingerprint_clusters) fpById.set(c.fingerprint, c);
 
-    const coveredByBrand = new Set<string>();
+    const covered = new Set<string>();
     const result: Array<{ key: string; meta: ClusterCardMeta }> = [];
+
+    for (const group of bulkClusters.counterparty_groups ?? []) {
+      const members = group.fingerprint_cluster_ids
+        .map((id) => fpById.get(id))
+        .filter((m): m is typeof bulkClusters.fingerprint_clusters[number] => !!m);
+      if (members.length === 0) continue;
+      for (const m of members) covered.add(m.fingerprint);
+      result.push({
+        key: `cp:${group.counterparty_id}:${group.direction}`,
+        meta: {
+          kind: 'counterparty',
+          counterpartyId: group.counterparty_id,
+          counterpartyName: group.counterparty_name,
+          direction: group.direction,
+          count: group.count,
+          totalAmount: group.total_amount,
+          members,
+        },
+      });
+    }
 
     for (const brand of bulkClusters.brand_clusters) {
       const members = brand.fingerprint_cluster_ids
         .map((id) => fpById.get(id))
-        .filter((m): m is typeof bulkClusters.fingerprint_clusters[number] => !!m);
+        .filter((m): m is typeof bulkClusters.fingerprint_clusters[number] => !!m)
+        .filter((m) => !covered.has(m.fingerprint));
       if (members.length === 0) continue;
-      for (const m of members) coveredByBrand.add(m.fingerprint);
+      for (const m of members) covered.add(m.fingerprint);
       result.push({
         key: `brand:${brand.brand}:${brand.direction}`,
         meta: {
@@ -666,7 +693,7 @@ function BulkClustersBucket({
     }
 
     const standalone = bulkClusters.fingerprint_clusters.filter(
-      (c) => !coveredByBrand.has(c.fingerprint),
+      (c) => !covered.has(c.fingerprint),
     );
     for (const c of standalone) {
       result.push({
@@ -703,6 +730,7 @@ function BulkClustersBucket({
                 sessionId={sessionId}
                 rowsById={rowsById}
                 categories={categories}
+                bulkClusters={bulkClusters}
                 onApplied={onApplied}
               />
             </motion.div>
@@ -1086,17 +1114,11 @@ function AttentionCardImpl({
 
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const attachMutation = useMutation({
-    mutationFn: (targetFingerprint: string) =>
-      attachRowToCluster(sessionId, row.id, targetFingerprint),
+    mutationFn: (cp: { id: number; name: string }) =>
+      attachRowToCounterparty(sessionId, row.id, cp.id).then((data) => ({ ...data, _cpName: cp.name })),
     onSuccess: (data) => {
       setAttachPickerOpen(false);
-      const targetTitle = bulkClusters?.fingerprint_clusters.find(
-        (c) => c.fingerprint === data.target_fingerprint,
-      );
-      const label = targetTitle
-        ? headerFromClusterForToast(targetTitle)
-        : 'кластер';
-      toast.success(`Добавлено в ${label}`);
+      toast.success(`Добавлено к контрагенту «${data._cpName}»`);
       onAfterAction();
     },
     onError: (error: Error) => toast.error(`Не удалось добавить: ${error.message}`),
@@ -1394,17 +1416,15 @@ function AttentionCardImpl({
             active={splitOpen || splitParts.some((p) => p.amount)}
             onClick={() => setSplitOpen(true)}
           />
-          <AttachToClusterButton
+          <AttachToCounterpartyButton
             open={attachPickerOpen}
             setOpen={setAttachPickerOpen}
             bulkClusters={bulkClusters}
             sourceDirection={direction === 'income' ? 'income' : 'expense'}
-            sourceFingerprint={(row.normalized_data as Record<string, any>)?.fingerprint ?? null}
             sourceAmount={totalAmount}
             sourceDescription={displayDescription}
-            onAttach={(fp) => attachMutation.mutate(fp)}
+            onAttach={(cp) => attachMutation.mutate(cp)}
             isPending={attachMutation.isPending}
-            categoryById={categoryById}
           />
           <Button
             variant="secondary"
@@ -1528,422 +1548,6 @@ function SplitButton({ active, onClick }: { active: boolean; onClick: () => void
   );
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Attach-to-cluster — кнопка + picker
-// Anchored popover with type-ahead filter; lists every existing cluster in
-// the current session so the user can redirect a stray row into a cluster.
-// ───────────────────────────────────────────────────────────────────────────
-
-function AttachToClusterButton({
-  open,
-  setOpen,
-  bulkClusters,
-  sourceDirection,
-  sourceFingerprint,
-  sourceAmount,
-  sourceDescription,
-  onAttach,
-  isPending,
-  categoryById,
-}: {
-  open: boolean;
-  setOpen: (next: boolean) => void;
-  bulkClusters: BulkClustersResponse | undefined;
-  sourceDirection: 'income' | 'expense';
-  sourceFingerprint: string | null;
-  sourceAmount: number;
-  sourceDescription: string;
-  onAttach: (targetFingerprint: string) => void;
-  isPending: boolean;
-  categoryById: Map<number, Category>;
-}) {
-  return (
-    <>
-      <button
-        type="button"
-        onClick={(e) => {
-          (window as any).__lastAttachClick = { x: e.clientX, y: e.clientY };
-          setOpen(true);
-        }}
-        title="Добавить в существующий кластер"
-        disabled={isPending}
-        className={`flex items-center justify-center h-8 w-8 rounded-md border transition ${
-          open
-            ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
-            : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-700'
-        } disabled:opacity-50`}
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="size-4">
-          <path d="M6 4v4l-3 3" />
-          <path d="M18 4v4l3 3" />
-          <path d="M12 11v10" />
-          <path d="M3 11h18" />
-        </svg>
-      </button>
-      <AttachClusterModal
-        isOpen={open}
-        onClose={() => setOpen(false)}
-        sourceRow={{ amount: sourceAmount, direction: sourceDirection, description: sourceDescription }}
-      >
-        <AttachClusterPicker
-          bulkClusters={bulkClusters}
-          sourceDirection={sourceDirection}
-          sourceFingerprint={sourceFingerprint}
-          onPick={onAttach}
-          isPending={isPending}
-          categoryById={categoryById}
-        />
-      </AttachClusterModal>
-    </>
-  );
-}
-
-// FLIP-modal for "Attach to cluster" — same pattern as SplitModal (animates
-// from the click point to screen center and back).
-function AttachClusterModal({
-  isOpen,
-  onClose,
-  sourceRow,
-  children,
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  sourceRow: { amount: number; direction: 'income' | 'expense'; description: string };
-  children: React.ReactNode;
-}) {
-  const panelRef = useRef<HTMLDivElement>(null);
-  const [phase, setPhase] = useState<'closed' | 'measure' | 'enter' | 'open' | 'exit'>('closed');
-  const originRef = useRef<{ x: number; y: number } | null>(null);
-  const DURATION = 320;
-  const EASING = 'cubic-bezier(0.4, 0, 0.15, 1)';
-
-  useEffect(() => {
-    if (isOpen && phase === 'closed') {
-      const lastClick = (window as any).__lastAttachClick as { x: number; y: number } | undefined;
-      originRef.current = lastClick ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-      setPhase('measure');
-    }
-  }, [isOpen, phase]);
-
-  useLayoutEffect(() => {
-    if (phase !== 'measure') return;
-    const panel = panelRef.current;
-    const origin = originRef.current;
-    if (!panel || !origin) return;
-    panel.style.transition = 'none';
-    panel.style.transform = 'translate(-50%, -50%) scale(1)';
-    panel.style.opacity = '0';
-    const rect = panel.getBoundingClientRect();
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
-    const dx = origin.x - centerX;
-    const dy = origin.y - centerY;
-    panel.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.05)`;
-    panel.getBoundingClientRect();
-    panel.style.transition = `transform ${DURATION}ms ${EASING}, opacity ${Math.round(DURATION * 0.6)}ms ease`;
-    panel.style.transform = 'translate(-50%, -50%) scale(1)';
-    panel.style.opacity = '1';
-    setPhase('enter');
-  }, [phase]);
-
-  useEffect(() => {
-    if (!isOpen && phase !== 'closed' && phase !== 'exit') {
-      const panel = panelRef.current;
-      const origin = originRef.current;
-      if (!panel || !origin) {
-        setPhase('closed');
-        return;
-      }
-      const rect = panel.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
-      const dx = origin.x - centerX;
-      const dy = origin.y - centerY;
-      panel.style.transition = `transform ${DURATION}ms ${EASING}, opacity ${Math.round(DURATION * 0.5)}ms ease`;
-      panel.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.05)`;
-      panel.style.opacity = '0';
-      setPhase('exit');
-    }
-  }, [isOpen, phase]);
-
-  const handleTransitionEnd = useCallback(
-    (e: React.TransitionEvent) => {
-      if (e.propertyName !== 'transform') return;
-      if (phase === 'enter') setPhase('open');
-      if (phase === 'exit') setPhase('closed');
-    },
-    [phase],
-  );
-
-  useEffect(() => {
-    if (phase !== 'exit') return;
-    const t = setTimeout(() => setPhase('closed'), DURATION + 100);
-    return () => clearTimeout(t);
-  }, [phase]);
-
-  useEffect(() => {
-    if (phase === 'closed') return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    document.addEventListener('keydown', onKey);
-    const sw = window.innerWidth - document.documentElement.clientWidth;
-    document.body.style.overflow = 'hidden';
-    if (sw > 0) document.body.style.paddingRight = `${sw}px`;
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = '';
-      document.body.style.paddingRight = '';
-    };
-  }, [phase, onClose]);
-
-  if (phase === 'closed' || typeof document === 'undefined') return null;
-  const backdropVisible = phase === 'enter' || phase === 'open';
-
-  return createPortal(
-    <>
-      <div
-        onClick={onClose}
-        className="fixed inset-0 z-[100]"
-        style={{
-          backgroundColor: 'rgba(0,0,0,0.25)',
-          opacity: backdropVisible ? 1 : 0,
-          transition: `opacity ${DURATION}ms ease`,
-        }}
-      />
-      <div
-        ref={panelRef}
-        onTransitionEnd={handleTransitionEnd}
-        className="fixed left-1/2 top-1/2 z-[101] max-h-[85vh] w-[720px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-3xl bg-white p-6 shadow-[0_25px_80px_rgba(0,0,0,0.18)]"
-      >
-        <button
-          type="button"
-          onClick={onClose}
-          className="absolute right-4 top-4 z-10 flex size-8 items-center justify-center rounded-full bg-slate-100 text-base text-slate-500 transition hover:bg-slate-200"
-        >
-          ✕
-        </button>
-        <div className="mb-3 pr-10">
-          <h3 className="text-base font-semibold text-slate-900">Добавить в кластер</h3>
-          <p className="mt-0.5 text-xs text-slate-500">
-            {sourceRow.direction === 'income' ? '↓ Доход' : '↑ Расход'} · {sourceRow.amount.toFixed(2)} ₽ · {sourceRow.description}
-          </p>
-        </div>
-        <div className={phase === 'open' ? 'overflow-y-auto max-h-[calc(85vh-9rem)]' : ''}>
-          {children}
-        </div>
-      </div>
-    </>,
-    document.body,
-  );
-}
-
-// Full-width cluster picker — rendered inside AttachClusterModal. Lists every
-// matching cluster (no cap), with type-ahead filter. Each row shows the
-// cluster's category badge, direction, count, total amount.
-// A unified pick item — either a brand cluster or a standalone FP cluster.
-type AttachPickItem =
-  | { kind: 'brand'; brand: string; direction: string; count: number; total: number; targetFp: string; catName: string | null }
-  | { kind: 'fp'; fp: string; direction: string; count: number; total: number; skeleton: string; identifier_value?: string | null; catName: string | null };
-
-function AttachClusterPicker({
-  bulkClusters,
-  sourceDirection,
-  sourceFingerprint,
-  onPick,
-  isPending,
-  categoryById,
-}: {
-  bulkClusters: BulkClustersResponse | undefined;
-  sourceDirection: 'income' | 'expense';
-  sourceFingerprint: string | null;
-  onPick: (targetFingerprint: string) => void;
-  isPending: boolean;
-  categoryById: Map<number, Category>;
-}) {
-  const [query, setQuery] = useState('');
-
-  // Build a unified list: brand clusters (collapsed) + standalone FP clusters.
-  // FP clusters that are members of a brand are excluded to avoid duplicates.
-  const { items, totalCount } = useMemo<{ items: AttachPickItem[]; totalCount: number }>(() => {
-    const fps = bulkClusters?.fingerprint_clusters ?? [];
-    const brands = bulkClusters?.brand_clusters ?? [];
-
-    // FP index for quick lookup.
-    const fpById = new Map(fps.map((c) => [c.fingerprint, c]));
-
-    // Collect all FP fingerprints that belong to a brand cluster.
-    const brandedFps = new Set<string>();
-    for (const b of brands) {
-      for (const fp of b.fingerprint_cluster_ids) brandedFps.add(fp);
-    }
-
-    const result: AttachPickItem[] = [];
-
-    // Brand entries — pick the largest FP member as the attach target.
-    for (const b of brands) {
-      if (b.direction !== sourceDirection) continue;
-      // Find the FP member with highest count to use as canonical target.
-      let bestFp: string | null = null;
-      let bestCount = -1;
-      for (const fp of b.fingerprint_cluster_ids) {
-        const c = fpById.get(fp);
-        const cnt = c?.count ?? 0;
-        if (cnt > bestCount && fp !== sourceFingerprint) {
-          bestCount = cnt;
-          bestFp = fp;
-        }
-      }
-      if (!bestFp) continue;
-      // Category: try each member FP, take first with a category.
-      let catName: string | null = null;
-      for (const fp of b.fingerprint_cluster_ids) {
-        const c = fpById.get(fp);
-        if (c?.candidate_category_id) {
-          catName = categoryById.get(c.candidate_category_id)?.name ?? null;
-          if (catName) break;
-        }
-      }
-      result.push({
-        kind: 'brand',
-        brand: b.brand.charAt(0).toUpperCase() + b.brand.slice(1),
-        direction: b.direction,
-        count: b.count,
-        total: Math.round(Math.abs(Number(b.total_amount) || 0)),
-        targetFp: bestFp,
-        catName,
-      });
-    }
-
-    // Standalone FP clusters — not in any brand, direction matches, not the source.
-    for (const c of fps) {
-      if (c.direction !== sourceDirection) continue;
-      if (c.fingerprint === sourceFingerprint) continue;
-      if (brandedFps.has(c.fingerprint)) continue;
-      const catName = c.candidate_category_id
-        ? (categoryById.get(c.candidate_category_id)?.name ?? null)
-        : null;
-      result.push({
-        kind: 'fp',
-        fp: c.fingerprint,
-        direction: c.direction,
-        count: c.count,
-        total: Math.round(Math.abs(Number(c.total_amount) || 0)),
-        skeleton: c.skeleton ?? '',
-        identifier_value: c.identifier_value,
-        catName,
-      });
-    }
-
-    return { items: result, totalCount: result.length };
-  }, [bulkClusters, sourceDirection, sourceFingerprint, categoryById]);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((item) => {
-      if (item.kind === 'brand') return item.brand.toLowerCase().includes(q);
-      const skel = item.skeleton.toLowerCase();
-      const iv = (item.identifier_value ?? '').toLowerCase();
-      return skel.includes(q) || iv.includes(q);
-    });
-  }, [items, query]);
-
-  return (
-    <div className="flex flex-col gap-3">
-      <input
-        autoFocus
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Поиск по названию или шаблону…"
-        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-800 focus:border-slate-400 focus:outline-none"
-      />
-      <p className="text-xs text-slate-400">
-        Показано {filtered.length} из {totalCount}{' '}
-        {sourceDirection === 'income' ? 'приходных' : 'расходных'} групп.
-        Клик — операция уйдёт в эту группу и запомнит привязку для будущих импортов.
-      </p>
-      {filtered.length === 0 ? (
-        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
-          {totalCount === 0
-            ? 'В этой сессии пока нет сформированных кластеров.'
-            : 'Ничего не найдено. Попробуй другой запрос.'}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {filtered.map((item) => {
-            const key = item.kind === 'brand' ? `brand:${item.brand}` : `fp:${item.fp}`;
-            const targetFp = item.kind === 'brand' ? item.targetFp : item.fp;
-            const title = item.kind === 'brand'
-              ? item.brand
-              : item.identifier_value
-                ? item.identifier_value
-                : (() => {
-                    const s = item.skeleton.trim();
-                    return s.length > 60 ? s.slice(0, 60) + '…' : s;
-                  })();
-            const subline = item.kind === 'fp' && item.skeleton
-              ? (item.skeleton.length > 90 ? item.skeleton.slice(0, 90) + '…' : item.skeleton)
-              : null;
-            const isBrand = item.kind === 'brand';
-            return (
-              <button
-                key={key}
-                type="button"
-                disabled={isPending}
-                onClick={() => onPick(targetFp)}
-                className="flex w-full flex-col gap-1.5 rounded-xl border bg-white px-4 py-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/30 disabled:cursor-not-allowed disabled:opacity-50 border-slate-200"
-              >
-                <div className="flex items-center gap-2">
-                  {isBrand && (
-                    <span className="shrink-0 rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
-                      бренд
-                    </span>
-                  )}
-                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900">
-                    {title}
-                  </span>
-                  {item.catName ? (
-                    <span className="shrink-0 rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700">
-                      {item.catName}
-                    </span>
-                  ) : (
-                    <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-500">
-                      Без категории
-                    </span>
-                  )}
-                </div>
-                {subline ? (
-                  <p className="truncate text-xs text-slate-500">{subline}</p>
-                ) : null}
-                <div className="flex items-center gap-3 text-xs text-slate-400">
-                  <span>{item.count} операц{item.count === 1 ? 'ия' : item.count < 5 ? 'ии' : 'ий'}</span>
-                  <span>·</span>
-                  <span className="tabular-nums">{item.total.toLocaleString('ru-RU')} ₽</span>
-                  {isBrand ? <span>· все магазины сети</span> : null}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function headerFromClusterForToast(
-  c: BulkClustersResponse['fingerprint_clusters'][number],
-): string {
-  // Prefer a human-readable identifier value, then skeleton.
-  if (c.identifier_value) {
-    return `«${c.identifier_value}»`;
-  }
-  const s = (c.skeleton ?? '').trim();
-  if (!s) return 'кластер';
-  const trimmed = s.length > 60 ? s.slice(0, 60) + '…' : s;
-  return `«${trimmed}»`;
-}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Split modal — FLIP-анимация из точки клика, как у дашборда expandable-card

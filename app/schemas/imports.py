@@ -297,10 +297,24 @@ class BulkBrandClusterResponse(BaseModel):
     fingerprint_cluster_ids: list[str]
 
 
+class BulkCounterpartyGroupResponse(BaseModel):
+    """Phase 3 — counterparty-centric grouping. Several fingerprint clusters
+    bound to the same counterparty collapse under one UI card labelled with
+    the counterparty name instead of a merchant skeleton."""
+
+    counterparty_id: int
+    counterparty_name: str
+    direction: str
+    count: int
+    total_amount: Decimal
+    fingerprint_cluster_ids: list[str]
+
+
 class BulkClustersResponse(BaseModel):
     session_id: int
     fingerprint_clusters: list[BulkFingerprintClusterResponse]
     brand_clusters: list[BulkBrandClusterResponse]
+    counterparty_groups: list[BulkCounterpartyGroupResponse] = []
 
 
 class BulkClusterRowUpdate(BaseModel):
@@ -341,22 +355,31 @@ class BulkApplyResponse(BaseModel):
 
 
 class AttachRowToClusterRequest(BaseModel):
-    """Attach an "Требуют внимания" row to an existing cluster.
+    """Attach an "Требуют внимания" row to a counterparty or existing cluster.
 
-    Atomic operation (see project_import_moderator.md, И-08 phase: manual
-    cluster merging):
-      1. Copy target cluster's category/counterparty/operation_type onto the row.
-      2. Create a FingerprintAlias (source row.fingerprint → target).
-      3. Commit the row as a regular Transaction (status → 'ready' → committed).
+    Two modes (exactly one must be provided):
+      * `counterparty_id` — Phase 3 preferred path. Binds the row's fingerprint
+        to the given counterparty; future imports with the same skeleton
+        group under that counterparty automatically. Copies the
+        counterparty's common category (from prior bindings) if known.
+      * `target_fingerprint` — legacy path. Creates a FingerprintAlias and
+        routes the row to that fingerprint's cluster. Kept for backwards
+        compatibility; UI should prefer counterparty_id.
+
+    Atomic: resolves target metadata, creates binding/alias, commits the row
+    as a regular Transaction.
     """
 
-    target_fingerprint: str
+    counterparty_id: int | None = None
+    target_fingerprint: str | None = None
 
 
 class AttachRowToClusterResponse(BaseModel):
     row_id: int
     transaction_id: int | None  # None if validation errored and we rolled back
-    target_fingerprint: str
-    alias_created: bool
+    target_fingerprint: str | None = None
+    counterparty_id: int | None = None
+    alias_created: bool = False
+    binding_created: bool = False
     source_fingerprint: str | None
     summary: ImportPreviewSummary

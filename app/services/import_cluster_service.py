@@ -29,6 +29,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.models.counterparty import Counterparty
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
 from app.repositories.account_repository import AccountRepository
@@ -39,6 +40,7 @@ from app.repositories.transaction_category_rule_repository import (
 )
 from app.services.bank_mechanics_service import BankMechanicsResult, BankMechanicsService
 from app.services.brand_extractor_service import extract_brand
+from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
 from app.services.global_pattern_service import GlobalPatternService
 from app.services.import_normalizer_v2 import is_transfer_like as v2_is_transfer_like
 
@@ -237,6 +239,40 @@ class Cluster:
 
 
 @dataclass(frozen=True)
+class CounterpartyGroup:
+    """Phase 3 — counterparty-centric grouping over fingerprint clusters.
+
+    Emitted when two or more fingerprint clusters are bound to the same
+    counterparty via `CounterpartyFingerprint`. The UI renders one card per
+    counterparty, collapsing all member fingerprints so the user sees
+    "Вкусная точка" once instead of three sub-clusters (different
+    skeletons: "vkusnaya_tochka", "vkusnoitochka", "Вкусная Точка").
+
+    Single-member groups are also emitted so the UI can replace the
+    fingerprint card with a counterparty card (clearer label, history). A
+    counterparty binding is always authoritative — it overrides brand
+    grouping.
+    """
+
+    counterparty_id: int
+    counterparty_name: str
+    direction: str
+    count: int
+    total_amount: Decimal
+    fingerprint_cluster_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "counterparty_id": self.counterparty_id,
+            "counterparty_name": self.counterparty_name,
+            "direction": self.direction,
+            "count": self.count,
+            "total_amount": str(self.total_amount),
+            "fingerprint_cluster_ids": list(self.fingerprint_cluster_ids),
+        }
+
+
+@dataclass(frozen=True)
 class BrandCluster:
     """Bulk-confirm group: several fingerprint clusters sharing a brand key.
 
@@ -301,6 +337,7 @@ class ImportClusterService:
         self.category_repo = CategoryRepository(db)
         self.bank_mechanics = BankMechanicsService(db)
         self.global_patterns = GlobalPatternService(db)
+        self.counterparty_fp_service = CounterpartyFingerprintService(db)
 
     # ------------------------------------------------------------------
     # Public API
@@ -446,7 +483,7 @@ class ImportClusterService:
 
     def build_bulk_clusters(
         self, session: ImportSession,
-    ) -> tuple[list[Cluster], list[BrandCluster]]:
+    ) -> tuple[list[Cluster], list[BrandCluster], list[CounterpartyGroup]]:
         """Return clusters eligible for bulk-confirm, plus brand-level groups.
 
         Filter pipeline — applied to rows BEFORE size threshold:
@@ -546,14 +583,69 @@ class ImportClusterService:
         #     groups) — so the frontend can look them up by fingerprint when
         #     expanding a brand card. Without this, the brand card would list
         #     row_ids the frontend can't resolve to a cluster.
+        # Phase 3 — third aggregation layer: counterparty groups. A fingerprint
+        # bound to a counterparty is always rendered under that counterparty
+        # in the UI, regardless of brand. Counterparty wins over brand.
+        counterparty_groups = self._group_by_counterparty(
+            live_clusters, user_id=session.user_id,
+        )
+        counterparty_bound_fps: set[str] = {
+            fp for g in counterparty_groups for fp in g.fingerprint_cluster_ids
+        }
+
         eligible_fps = {c.fingerprint for c in eligible}
         aux_fps: set[str] = set()
+        # Aux from brand clusters — but skip fingerprints already owned by a
+        # counterparty (the counterparty view will render them, so the brand
+        # view shouldn't double-count them).
         for b in brand_clusters:
             for fp in b.fingerprint_cluster_ids:
+                if fp in counterparty_bound_fps:
+                    continue
+                if fp not in eligible_fps:
+                    aux_fps.add(fp)
+        # Aux from counterparty groups — same reason the brand layer needs
+        # them: UI must be able to resolve each member fingerprint's rows.
+        for g in counterparty_groups:
+            for fp in g.fingerprint_cluster_ids:
                 if fp not in eligible_fps:
                     aux_fps.add(fp)
         aux_clusters = [c for c in live_clusters if c.fingerprint in aux_fps]
-        return eligible + aux_clusters, brand_clusters
+
+        # Drop brand clusters that are fully subsumed by counterparty groups —
+        # otherwise the user sees the same rows under both "Pyaterochka" brand
+        # and "Пятёрочка" counterparty cards. Partial overlap (some members
+        # belong to counterparty, others don't) keeps the brand card with its
+        # still-unbound members.
+        filtered_brand_clusters: list[BrandCluster] = []
+        for b in brand_clusters:
+            remaining_fps = tuple(
+                fp for fp in b.fingerprint_cluster_ids
+                if fp not in counterparty_bound_fps
+            )
+            if not remaining_fps:
+                continue
+            if len(remaining_fps) == len(b.fingerprint_cluster_ids):
+                filtered_brand_clusters.append(b)
+                continue
+            # Recompute count/total_amount for the reduced membership.
+            fp_lookup = {c.fingerprint: c for c in live_clusters}
+            members = [fp_lookup[fp] for fp in remaining_fps if fp in fp_lookup]
+            if len(members) < MIN_FINGERPRINT_COUNT_FOR_BRAND:
+                continue
+            total_count = sum(m.count for m in members)
+            if total_count < MIN_BRAND_CLUSTER_SIZE:
+                continue
+            total_amount = sum((m.total_amount for m in members), Decimal("0"))
+            filtered_brand_clusters.append(BrandCluster(
+                brand=b.brand,
+                direction=b.direction,
+                count=total_count,
+                total_amount=total_amount,
+                fingerprint_cluster_ids=remaining_fps,
+            ))
+
+        return eligible + aux_clusters, filtered_brand_clusters, counterparty_groups
 
     @staticmethod
     def _group_by_brand(clusters: list[Cluster]) -> list[BrandCluster]:
@@ -596,6 +688,64 @@ class ImportClusterService:
 
         brand_clusters.sort(key=lambda b: (-b.count, b.brand))
         return brand_clusters
+
+    def _group_by_counterparty(
+        self, clusters: list[Cluster], *, user_id: int,
+    ) -> list[CounterpartyGroup]:
+        """Aggregate fingerprint clusters by their bound counterparty.
+
+        Each fingerprint is resolved through `CounterpartyFingerprintService`;
+        only those bound to a counterparty participate. The resulting groups
+        collapse all fingerprints sharing one counterparty under a single
+        card in the UI.
+
+        Single-member groups are still emitted — the counterparty label ("Вкусная
+        точка") beats the raw skeleton in the UI even when only one
+        fingerprint is bound so far.
+        """
+        if not clusters:
+            return []
+        fp_map = self.counterparty_fp_service.resolve_many(
+            user_id=user_id,
+            fingerprints=[c.fingerprint for c in clusters],
+        )
+        if not fp_map:
+            return []
+        # Name lookup for each counterparty_id referenced.
+        cp_ids = set(fp_map.values())
+        cp_rows = (
+            self.db.query(Counterparty)
+            .filter(Counterparty.id.in_(cp_ids), Counterparty.user_id == user_id)
+            .all()
+        )
+        cp_by_id = {cp.id: cp for cp in cp_rows}
+
+        # Bucket clusters by (counterparty_id, direction) — never cross income
+        # and expense under the same counterparty (e.g. refund vs. purchase).
+        buckets: dict[tuple[int, str], list[Cluster]] = {}
+        for cluster in clusters:
+            cp_id = fp_map.get(cluster.fingerprint)
+            if cp_id is None:
+                continue
+            if cp_id not in cp_by_id:
+                continue  # counterparty deleted; ignore binding
+            key = (cp_id, cluster.direction)
+            buckets.setdefault(key, []).append(cluster)
+
+        groups: list[CounterpartyGroup] = []
+        for (cp_id, direction), members in buckets.items():
+            total_count = sum(m.count for m in members)
+            total_amount = sum((m.total_amount for m in members), Decimal("0"))
+            groups.append(CounterpartyGroup(
+                counterparty_id=cp_id,
+                counterparty_name=cp_by_id[cp_id].name,
+                direction=direction,
+                count=total_count,
+                total_amount=total_amount,
+                fingerprint_cluster_ids=tuple(m.fingerprint for m in members),
+            ))
+        groups.sort(key=lambda g: (-g.count, g.counterparty_name))
+        return groups
 
     # ------------------------------------------------------------------
     # Internals

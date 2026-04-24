@@ -19,6 +19,7 @@ from app.models.budget_alert import BudgetAlert
 from app.models.capital_snapshot import CapitalSnapshot
 from app.models.category import Category
 from app.models.counterparty import Counterparty
+from app.models.counterparty_fingerprint import CounterpartyFingerprint
 from app.models.fingerprint_alias import FingerprintAlias
 from app.models.goal import Goal
 from app.models.import_row import ImportRow
@@ -40,6 +41,7 @@ __all__ = [
     "CapitalSnapshot",
     "Category",
     "Counterparty",
+    "CounterpartyFingerprint",
     "FingerprintAlias",
     "Goal",
     "ImportRow",

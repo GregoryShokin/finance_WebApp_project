@@ -285,6 +285,7 @@ def attach_row_to_cluster(
             session_id=session_id,
             row_id=row_id,
             target_fingerprint=payload.target_fingerprint,
+            counterparty_id=payload.counterparty_id,
         )
     except ImportNotFoundError as exc:
         db.rollback()

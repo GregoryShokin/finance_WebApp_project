@@ -165,6 +165,8 @@ def _make_svc_with_rows(row_objects: list) -> ImportClusterService:
     )
     svc.global_patterns = MagicMock()
     svc.global_patterns.get_matching_pattern.return_value = None
+    svc.counterparty_fp_service = MagicMock()
+    svc.counterparty_fp_service.resolve_many.return_value = {}
     return svc
 
 
@@ -197,7 +199,7 @@ class TestBuildBulkClustersFilters:
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
-        fp_clusters, brand_clusters = svc.build_bulk_clusters(session)
+        fp_clusters, brand_clusters, _ = svc.build_bulk_clusters(session)
         assert fp_clusters == []
         assert brand_clusters == []
 
@@ -214,7 +216,7 @@ class TestBuildBulkClustersFilters:
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
-        fp_clusters, _ = svc.build_bulk_clusters(session)
+        fp_clusters, _, _ = svc.build_bulk_clusters(session)
         assert fp_clusters == []
 
     def test_rows_with_any_transfer_match_excluded(self) -> None:
@@ -232,7 +234,7 @@ class TestBuildBulkClustersFilters:
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
-        fp_clusters, _ = svc.build_bulk_clusters(session)
+        fp_clusters, _, _ = svc.build_bulk_clusters(session)
         assert fp_clusters == []
 
     def test_primary_transfer_match_rows_also_excluded(self) -> None:
@@ -252,7 +254,7 @@ class TestBuildBulkClustersFilters:
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
-        fp_clusters, _ = svc.build_bulk_clusters(session)
+        fp_clusters, _, _ = svc.build_bulk_clusters(session)
         assert fp_clusters == []
 
     def test_transfer_cluster_with_phone_identifier_qualifies_at_low_threshold(self) -> None:
@@ -270,7 +272,7 @@ class TestBuildBulkClustersFilters:
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
-        fp_clusters, brand_clusters = svc.build_bulk_clusters(session)
+        fp_clusters, brand_clusters, _ = svc.build_bulk_clusters(session)
         assert len(fp_clusters) == 1
         assert fp_clusters[0].count == 2
         assert fp_clusters[0].identifier_key == "phone"
@@ -287,7 +289,7 @@ class TestBuildBulkClustersFilters:
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
-        fp_clusters, _ = svc.build_bulk_clusters(session)
+        fp_clusters, _, _ = svc.build_bulk_clusters(session)
         assert fp_clusters == []
 
     def test_pure_merchant_cluster_still_qualifies(self) -> None:
@@ -298,6 +300,6 @@ class TestBuildBulkClustersFilters:
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
-        fp_clusters, _ = svc.build_bulk_clusters(session)
+        fp_clusters, _, _ = svc.build_bulk_clusters(session)
         assert len(fp_clusters) == 1
         assert fp_clusters[0].count == 6

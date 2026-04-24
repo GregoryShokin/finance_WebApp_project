@@ -18,6 +18,7 @@ from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.imports import ImportMappingRequest, ImportPreviewSummary, ImportRowUpdateRequest
+from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
 from app.services.fingerprint_alias_service import FingerprintAliasService
 from app.services.import_confidence import ImportConfidenceService
 from app.services.import_extractors import ExtractionResult, ImportExtractorRegistry
@@ -78,6 +79,7 @@ class ImportService:
         self.category_rule_repo = TransactionCategoryRuleRepository(db)
         self.transfer_matcher = TransferMatcherService(db)
         self._alias_service = FingerprintAliasService(db)
+        self._counterparty_fp_service = CounterpartyFingerprintService(db)
 
     def upload_source(
         self,
@@ -240,7 +242,7 @@ class ImportService:
 
         session = self.get_session(user_id=user_id, session_id=session_id)
         cluster_svc = ImportClusterService(self.db)
-        fp_clusters, brand_clusters = cluster_svc.build_bulk_clusters(session)
+        fp_clusters, brand_clusters, counterparty_groups = cluster_svc.build_bulk_clusters(session)
 
         fp_dicts = []
         for c in fp_clusters:
@@ -261,10 +263,12 @@ class ImportService:
                 "identifier_value": c.identifier_value,
             })
         brand_dicts = [b.to_dict() for b in brand_clusters]
+        counterparty_dicts = [g.to_dict() for g in counterparty_groups]
         return {
             "session_id": session.id,
             "fingerprint_clusters": fp_dicts,
             "brand_clusters": brand_dicts,
+            "counterparty_groups": counterparty_dicts,
         }
 
     def bulk_apply_cluster(
@@ -289,6 +293,10 @@ class ImportService:
         # Rows keyed by (fingerprint, category_id) for rule upsert.
         by_rule_key: dict[tuple[str, int], list[dict[str, Any]]] = {}
         confirmed_count = 0
+        # Phase 3 — collect fingerprints to bind to a counterparty.
+        # A single cluster may span many fingerprints (brand cluster), and one
+        # counterparty choice binds all of them at once.
+        counterparty_bindings_by_cp: dict[int, set[str]] = {}
 
         for update in payload.updates:
             row_id = update.row_id
@@ -338,6 +346,15 @@ class ImportService:
                     "original_description": original_desc,
                 })
 
+            # Phase 3 — fingerprint → counterparty binding. When the user
+            # picks a counterparty for a cluster, every fingerprint in the
+            # cluster gets bound so future imports of ANY of its skeletons
+            # resolve to the same counterparty automatically.
+            if fp and update.counterparty_id is not None:
+                counterparty_bindings_by_cp.setdefault(
+                    int(update.counterparty_id), set()
+                ).add(fp)
+
         # Apply rule strength transitions in a second pass — one upsert per
         # (fingerprint, category) group, with confirms_delta equal to the
         # group size. A 92-row Pyaterochka cluster therefore creates one
@@ -357,6 +374,17 @@ class ImportService:
             )
             strength_svc.on_confirmed(rule.id, confirms_delta=len(rows_for_rule))
             rules_affected += 1
+
+        # Phase 3 — persist counterparty bindings. Bindings accumulate across
+        # bulk-apply calls so a brand that lives in 5 different fingerprints
+        # gets all 5 bound to the same counterparty after one confirmation.
+        counterparty_bindings_count = 0
+        for cp_id, fps in counterparty_bindings_by_cp.items():
+            counterparty_bindings_count += self._counterparty_fp_service.bind_many(
+                user_id=user_id,
+                fingerprints=list(fps),
+                counterparty_id=cp_id,
+            )
 
         self.db.commit()
 
@@ -379,24 +407,39 @@ class ImportService:
         user_id: int,
         session_id: int,
         row_id: int,
-        target_fingerprint: str,
+        target_fingerprint: str | None = None,
+        counterparty_id: int | None = None,
     ) -> dict[str, Any]:
-        """Attach a single «Требуют внимания» row to an existing cluster.
+        """Attach a row to a counterparty (Phase 3) or an existing cluster.
 
-        Atomic operation (Level 3 alias-based merging):
-          1. Resolve target cluster's suggested category / counterparty / op_type
-             from already-classified rows in this session (or from a confirmed
-             rule for the target skeleton).
-          2. Create FingerprintAlias(source=row.fingerprint, target=target_fp)
-             so future imports with the same source pattern land in the target
-             cluster automatically.
-          3. Rewrite row's normalized_data fingerprint to target, so the row
-             joins the target cluster in the current session view too.
-          4. Commit the row as a Transaction via the regular update_row path.
+        Exactly one of `counterparty_id` / `target_fingerprint` must be set.
 
-        Raises ImportValidationError when the target cluster can't be resolved
-        (empty in current session AND no rule exists).
+        Counterparty path (preferred):
+          1. Verify counterparty belongs to the user.
+          2. Try to resolve a category from the counterparty's existing
+             bindings (look at other fingerprints bound to this counterparty
+             in any of the user's sessions — take the category from the most
+             common rule).
+          3. Create `CounterpartyFingerprint(source_fp → counterparty_id)`.
+          4. Commit the row with that category + counterparty.
+
+        Fingerprint path (legacy):
+          1. Resolve target cluster's metadata from this session's rows or
+             from a rule matching the target's skeleton.
+          2. Create FingerprintAlias(source_fp → target_fp).
+          3. Commit the row as a Transaction.
+
+        Raises ImportValidationError on any precondition failure.
         """
+        if counterparty_id is None and not target_fingerprint:
+            raise ImportValidationError(
+                "Нужно указать контрагента или целевой кластер"
+            )
+        if counterparty_id is not None and target_fingerprint:
+            raise ImportValidationError(
+                "Нельзя указать одновременно контрагента и кластер"
+            )
+
         session = self.get_session(user_id=user_id, session_id=session_id)
         session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
         if session_row is None:
@@ -415,14 +458,149 @@ class ImportService:
             raise ImportValidationError(
                 "У строки нет fingerprint — пересобери preview и попробуй ещё раз"
             )
+
+        if counterparty_id is not None:
+            return self._attach_via_counterparty(
+                user_id=user_id,
+                session=session,
+                row=row,
+                row_id=row_id,
+                source_fp=source_fp,
+                normalized=normalized,
+                counterparty_id=counterparty_id,
+            )
+        return self._attach_via_fingerprint(
+            user_id=user_id,
+            session=session,
+            row=row,
+            row_id=row_id,
+            source_fp=source_fp,
+            normalized=normalized,
+            target_fingerprint=target_fingerprint,
+        )
+
+    def _attach_via_counterparty(
+        self,
+        *,
+        user_id: int,
+        session: ImportSession,
+        row: ImportRow,
+        row_id: int,
+        source_fp: str,
+        normalized: dict[str, Any],
+        counterparty_id: int,
+    ) -> dict[str, Any]:
+        # Counterparty must belong to the user.
+        from app.models.counterparty import Counterparty
+        cp = (
+            self.db.query(Counterparty)
+            .filter(Counterparty.id == counterparty_id, Counterparty.user_id == user_id)
+            .first()
+        )
+        if cp is None:
+            raise ImportNotFoundError(f"counterparty {counterparty_id} not found")
+
+        # Resolve the counterparty's prevailing category. Simplest source:
+        # look at all transactions already tagged with this counterparty and
+        # pick the most common category. If the counterparty is new (no
+        # transactions yet), fall back to the row's own cluster hint.
+        target_category_id: int | None = None
+        target_operation_type: str = "regular"
+
+        from collections import Counter as _Counter
+        from app.models.transaction import Transaction as _Transaction
+        tx_cats = (
+            self.db.query(_Transaction.category_id)
+            .filter(
+                _Transaction.user_id == user_id,
+                _Transaction.counterparty_id == counterparty_id,
+                _Transaction.category_id.isnot(None),
+            )
+            .all()
+        )
+        cat_votes: _Counter[int] = _Counter(
+            int(r[0]) for r in tx_cats if r[0] is not None
+        )
+        if cat_votes:
+            target_category_id = cat_votes.most_common(1)[0][0]
+
+        # Fallback to row's own hint (candidate_category_id from its cluster).
+        if target_category_id is None:
+            hint = normalized.get("category_id")
+            if hint is not None:
+                try:
+                    target_category_id = int(hint)
+                except (TypeError, ValueError):
+                    target_category_id = None
+
+        if target_category_id is None:
+            raise ImportValidationError(
+                "У контрагента пока нет категории — подтверди хотя бы один его "
+                "кластер с категорией, и попробуй ещё раз"
+            )
+
+        # Create the binding.
+        binding_created = False
+        try:
+            before = self._counterparty_fp_service.repo.get_by_fingerprint(
+                user_id=user_id, fingerprint=source_fp,
+            )
+            self._counterparty_fp_service.bind(
+                user_id=user_id,
+                fingerprint=source_fp,
+                counterparty_id=counterparty_id,
+            )
+            binding_created = before is None
+        except ValueError as exc:
+            raise ImportValidationError(str(exc)) from exc
+
+        normalized["attached_to_counterparty_id"] = counterparty_id
+        normalized["attached_to_counterparty_name"] = cp.name
+        normalized["attached_source_fingerprint"] = source_fp
+        row.normalized_data_json = normalized
+        self.db.add(row)
+        self.db.flush()
+
+        row_payload = ImportRowUpdateRequest(
+            operation_type=target_operation_type,
+            category_id=target_category_id,
+            counterparty_id=counterparty_id,
+            action="confirm",
+        )
+        self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
+
+        self.db.commit()
+        self.db.refresh(row)
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+
+        return {
+            "row_id": row_id,
+            "transaction_id": row.created_transaction_id,
+            "target_fingerprint": None,
+            "counterparty_id": counterparty_id,
+            "alias_created": False,
+            "binding_created": binding_created,
+            "source_fingerprint": source_fp,
+            "summary": summary,
+        }
+
+    def _attach_via_fingerprint(
+        self,
+        *,
+        user_id: int,
+        session: ImportSession,
+        row: ImportRow,
+        row_id: int,
+        source_fp: str,
+        normalized: dict[str, Any],
+        target_fingerprint: str,
+    ) -> dict[str, Any]:
         if source_fp == target_fingerprint:
             raise ImportValidationError("Строка уже относится к этому кластеру")
 
-        # ── Resolve target cluster's suggestion ────────────────────────────
-        # Priority:
-        #   1. Other rows in THIS session with target_fingerprint that already
-        #      have a category applied — take the most recent one.
-        #   2. TransactionCategoryRule for target skeleton — take its category.
         target_category_id: int | None = None
         target_counterparty_id: int | None = None
         target_operation_type: str | None = None
@@ -437,12 +615,9 @@ class ImportService:
                 target_rows.append((candidate, c_norm))
 
         if not target_rows:
-            raise ImportValidationError(
-                "Целевой кластер не найден в этой сессии"
-            )
+            raise ImportValidationError("Целевой кластер не найден в этой сессии")
 
-        # Prefer rows that already have a category (confirmed or rule-suggested).
-        for candidate, c_norm in target_rows:
+        for _candidate, c_norm in target_rows:
             cat = c_norm.get("category_id")
             if cat is not None:
                 try:
@@ -454,7 +629,6 @@ class ImportService:
                 target_skeleton = c_norm.get("skeleton") or (c_norm.get("v2") or {}).get("skeleton")
                 break
 
-        # Fallback: lookup rule for target skeleton.
         if target_category_id is None:
             first_norm = target_rows[0][1]
             target_skeleton = first_norm.get("skeleton") or (first_norm.get("v2") or {}).get("skeleton")
@@ -471,7 +645,6 @@ class ImportService:
                 "В целевом кластере ещё нет категории — сначала подтверди его"
             )
 
-        # ── Create the alias and rewrite fingerprint ───────────────────────
         alias_created = False
         try:
             self._alias_service.create_alias(
@@ -481,14 +654,8 @@ class ImportService:
             )
             alias_created = True
         except ValueError as exc:
-            # source == target or cycle — shouldn't happen given checks above.
             raise ImportValidationError(str(exc)) from exc
 
-        # Do NOT rewrite the row's fingerprint. The alias handles future
-        # imports; this row is committed immediately and leaves the session.
-        # Rewriting the fingerprint would move the row into the target
-        # cluster in the current session view, mixing skeleton data and
-        # creating phantom duplicates in the picker.
         if target_skeleton:
             normalized.setdefault("attached_to_skeleton", target_skeleton)
         normalized["attached_source_fingerprint"] = source_fp
@@ -496,7 +663,6 @@ class ImportService:
         self.db.add(row)
         self.db.flush()
 
-        # ── Commit the row as a transaction via update_row ────────────────
         row_payload = ImportRowUpdateRequest(
             operation_type=target_operation_type or "regular",
             category_id=target_category_id,
@@ -516,7 +682,9 @@ class ImportService:
             "row_id": row_id,
             "transaction_id": row.created_transaction_id,
             "target_fingerprint": target_fingerprint,
+            "counterparty_id": None,
             "alias_created": alias_created,
+            "binding_created": False,
             "source_fingerprint": source_fp,
             "summary": summary,
         }

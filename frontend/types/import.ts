@@ -294,10 +294,23 @@ export type BulkBrandCluster = {
   fingerprint_cluster_ids: string[];
 };
 
+// Phase 3 — counterparty-centric grouping. A counterparty can own many
+// fingerprint clusters (different skeletons for the same merchant). The UI
+// renders one card per counterparty, collapsing all its members.
+export type BulkCounterpartyGroup = {
+  counterparty_id: number;
+  counterparty_name: string;
+  direction: string;
+  count: number;
+  total_amount: string;
+  fingerprint_cluster_ids: string[];
+};
+
 export type BulkClustersResponse = {
   session_id: number;
   fingerprint_clusters: BulkFingerprintCluster[];
   brand_clusters: BulkBrandCluster[];
+  counterparty_groups?: BulkCounterpartyGroup[];
 };
 
 export type BulkClusterRowUpdate = {
@@ -314,7 +327,7 @@ export type BulkClusterRowUpdate = {
 
 export type BulkApplyPayload = {
   cluster_key: string;
-  cluster_type: 'fingerprint' | 'brand';
+  cluster_type: 'fingerprint' | 'brand' | 'counterparty';
   updates: BulkClusterRowUpdate[];
 };
 
