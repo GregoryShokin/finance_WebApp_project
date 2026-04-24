@@ -44,6 +44,7 @@ from app.repositories.transaction_category_rule_repository import (
 from app.services.bank_mechanics_service import BankMechanicsResult, BankMechanicsService
 from app.services.brand_extractor_service import extract_brand
 from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
+from app.services.counterparty_identifier_service import CounterpartyIdentifierService
 from app.services.global_pattern_service import GlobalPatternService
 from app.services.import_normalizer_v2 import (
     is_refund_like as v2_is_refund_like,
@@ -363,6 +364,7 @@ class ImportClusterService:
         self.bank_mechanics = BankMechanicsService(db)
         self.global_patterns = GlobalPatternService(db)
         self.counterparty_fp_service = CounterpartyFingerprintService(db)
+        self.counterparty_id_service = CounterpartyIdentifierService(db)
 
     # ------------------------------------------------------------------
     # Public API
@@ -810,14 +812,37 @@ class ImportClusterService:
         """
         if not clusters:
             return []
+        # Identifier binding takes precedence — it's cross-account and
+        # cross-bank, so a phone/contract/IBAN bound on one statement resolves
+        # on the next. Fingerprint binding is the fallback for skeleton/brand
+        # clusters without an identifier (or with an unsupported one).
+        id_pairs: list[tuple[str, str]] = [
+            (c.identifier_key, c.identifier_value)
+            for c in clusters
+            if c.identifier_key and c.identifier_value
+        ]
+        id_map = self.counterparty_id_service.resolve_many(
+            user_id=user_id, pairs=id_pairs,
+        )
         fp_map = self.counterparty_fp_service.resolve_many(
             user_id=user_id,
             fingerprints=[c.fingerprint for c in clusters],
         )
-        if not fp_map:
+        # Per-cluster resolved counterparty_id: identifier wins when present.
+        cluster_cp: dict[str, int] = {}
+        for c in clusters:
+            if c.identifier_key and c.identifier_value:
+                cp = id_map.get((c.identifier_key, c.identifier_value))
+                if cp is not None:
+                    cluster_cp[c.fingerprint] = cp
+                    continue
+            cp = fp_map.get(c.fingerprint)
+            if cp is not None:
+                cluster_cp[c.fingerprint] = cp
+        if not cluster_cp:
             return []
         # Name lookup for each counterparty_id referenced.
-        cp_ids = set(fp_map.values())
+        cp_ids = set(cluster_cp.values())
         cp_rows = (
             self.db.query(Counterparty)
             .filter(Counterparty.id.in_(cp_ids), Counterparty.user_id == user_id)
@@ -840,7 +865,7 @@ class ImportClusterService:
         # operation_type stays "refund" so analytics still net them out.
         buckets: dict[tuple[int, str], list[Cluster]] = {}
         for cluster in clusters:
-            cp_id = fp_map.get(cluster.fingerprint)
+            cp_id = cluster_cp.get(cluster.fingerprint)
             if cp_id is None:
                 continue
             if cp_id not in cp_by_id:
@@ -1174,8 +1199,13 @@ class ImportClusterService:
           similarity alone.
         - Result is clamped to [0, 1].
         """
-        total = confirms + rejections
-        error_ratio_factor = 1.0 if total == 0 else (confirms / total)
+        # Rule counters are Numeric/Decimal after migration 0053 — coerce to
+        # float up-front so the mixed-type multiplication below stays pure
+        # float arithmetic. Mixing Decimal with float raises TypeError.
+        _c = float(confirms or 0)
+        _r = float(rejections or 0)
+        total = _c + _r
+        error_ratio_factor = 1.0 if total == 0 else (_c / total)
         if skip_singleton_drag:
             evidence_factor = 1.0
         else:
