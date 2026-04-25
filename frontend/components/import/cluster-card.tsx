@@ -865,9 +865,12 @@ function ClusterRowList({
                 <div className="flex items-center gap-2">
                   <p className="truncate text-slate-800">{descriptionOf(row)}</p>
                   {hasSplit ? (
-                    <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
-                      🔀 Разбито на {persistedSplit.length}
-                    </span>
+                    <SplitBadgeWithDetails
+                      parts={persistedSplit}
+                      categories={categories}
+                      transferAccounts={transferAccounts}
+                      debtPartners={debtPartners}
+                    />
                   ) : (
                     <RowOpTypeBadge op={s.operationType} isRefundRowFallback={isRefundRow(row)} />
                   )}
@@ -875,7 +878,7 @@ function ClusterRowList({
                 <p className="text-xs text-slate-400">#{row.row_index} · {dateOf(row)} · {amountOf(row)}</p>
               </div>
               {/* Picker по типу операции:
-                  - split-row    → плитки частей вместо category/debt picker
+                  - split-row    → пустая зона; детализация скрыта в badge-popover
                   - regular/refund → категория
                   - debt           → дебитор/кредитор (DebtPartner)
                   - transfer/investment/credit_operation → приглушённая надпись
@@ -883,12 +886,9 @@ function ClusterRowList({
                   отвергается, требуется debt_partner_id (см. CLAUDE.md
                   § Counterparty vs DebtPartner). */}
               {hasSplit ? (
-                <SplitSummaryChips
-                  parts={persistedSplit}
-                  categories={categories}
-                  transferAccounts={transferAccounts}
-                  debtPartners={debtPartners}
-                />
+                <span className="w-40 shrink-0 truncate text-right text-xs italic text-slate-400">
+                  части в бейдже ↑
+                </span>
               ) : rowNeedsCategory(s.operationType) ? (
                 <RowCategoryPicker
                   rowId={row.id}
@@ -1167,8 +1167,13 @@ function RowSplitButton({
   );
 }
 
-/** Compact summary chips for a persisted split inside a cluster row. */
-function SplitSummaryChips({
+/** Inline split-indicator badge with hover-popover that lists every part.
+ * Visual contract: the row stays as compact as a non-split row; the «🔀
+ * Разбито на N» pill is the single visual signal. Hovering it pops up a
+ * card with one chip per part — keeps the row clean while still letting
+ * the user inspect the split without opening the editor.
+ */
+function SplitBadgeWithDetails({
   parts,
   categories,
   transferAccounts,
@@ -1195,29 +1200,46 @@ function SplitSummaryChips({
     return m;
   }, [debtPartners]);
 
+  const labelFor = (p: any) => {
+    const opType = String(p.operation_type ?? 'regular');
+    if (opType === 'transfer') {
+      const tgt = p.target_account_id != null ? accById.get(Number(p.target_account_id)) : null;
+      return tgt ? `→ ${tgt.name}` : '→ счёт';
+    }
+    if (opType === 'debt') {
+      const dp = p.debt_partner_id != null ? dpById.get(Number(p.debt_partner_id)) : null;
+      return dp ? `Долг · ${dp.name}` : 'Долг';
+    }
+    if (opType === 'refund') {
+      const cat = p.category_id != null ? catById.get(Number(p.category_id)) : null;
+      return cat ? `Возврат · ${cat.name}` : 'Возврат';
+    }
+    const cat = p.category_id != null ? catById.get(Number(p.category_id)) : null;
+    return cat?.name ?? '—';
+  };
+
   return (
-    <div className="flex w-72 shrink-0 flex-wrap items-center justify-end gap-1 text-[11px]">
-      {parts.map((p, i) => {
-        const opType = String(p.operation_type ?? 'regular');
-        const amt = p.amount != null ? Number(p.amount) : 0;
-        let label = '—';
-        if (opType === 'transfer') {
-          const tgt = p.target_account_id != null ? accById.get(Number(p.target_account_id)) : null;
-          label = tgt ? `→ ${tgt.name}` : '→ счёт';
-        } else if (opType === 'debt') {
-          const dp = p.debt_partner_id != null ? dpById.get(Number(p.debt_partner_id)) : null;
-          label = dp ? `Долг · ${dp.name}` : 'Долг';
-        } else {
-          const cat = p.category_id != null ? catById.get(Number(p.category_id)) : null;
-          label = cat?.name ?? '—';
-        }
-        return (
-          <span key={i} className="rounded bg-indigo-50 px-1.5 py-0.5 text-indigo-900">
-            {amt.toFixed(0)} ₽ · {label}
-          </span>
-        );
-      })}
-    </div>
+    <span className="group relative inline-block shrink-0">
+      <span className="cursor-help rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+        🔀 Разбито на {parts.length}
+      </span>
+      {/* Popover — appears on hover/focus. Right-aligned so it doesn't push off-screen on long rows. */}
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute left-0 top-full z-30 mt-1 flex w-max max-w-sm flex-col gap-1 rounded-lg border border-slate-200 bg-white p-2 text-[11px] text-slate-800 shadow-lg opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+      >
+        {parts.map((p, i) => {
+          const amt = p.amount != null ? Number(p.amount) : 0;
+          return (
+            <span key={i} className="whitespace-nowrap">
+              <span className="font-mono text-slate-500">{amt.toFixed(0)} ₽</span>
+              {' · '}
+              <span className="text-slate-800">{labelFor(p)}</span>
+            </span>
+          );
+        })}
+      </span>
+    </span>
   );
 }
 
