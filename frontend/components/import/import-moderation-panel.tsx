@@ -1175,7 +1175,12 @@ function AttentionCardImpl({
   const totalAmount = Math.abs(parseFloat(amount.replace(',', '.')) || 0);
   const splitSum = splitParts.reduce((acc, p) => acc + (parseFloat(p.amount.replace(',', '.')) || 0), 0);
   const splitRemaining = +(totalAmount - splitSum).toFixed(2);
-  const splitValid = splitOpen && splitParts.length >= 2 && Math.abs(splitRemaining) < 0.01 && splitParts.every((p) => {
+  // Validity follows the split *content*, not the dialog visibility. Once the
+  // user fills both parts and closes the «Разбивка операции» dialog, splitOpen
+  // flips to false but the parts stay in state — the apply button must remain
+  // enabled. Earlier the gate was `splitOpen && …`, which made closing the
+  // dialog re-disable «Применить» even though the split was perfectly valid.
+  const splitValid = splitParts.length >= 2 && Math.abs(splitRemaining) < 0.01 && splitParts.every((p) => {
     const amt = parseFloat(p.amount.replace(',', '.')) || 0;
     if (amt <= 0) return false;
     if ((p.operation_type === 'regular' || p.operation_type === 'refund') && !p.category_id) return false;

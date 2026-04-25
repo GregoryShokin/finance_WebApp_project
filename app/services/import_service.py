@@ -341,6 +341,7 @@ class ImportService:
                 operation_type=update.operation_type,
                 category_id=update.category_id,
                 counterparty_id=update.counterparty_id,
+                debt_partner_id=update.debt_partner_id,
                 target_account_id=update.target_account_id,
                 credit_account_id=update.credit_account_id,
                 credit_principal_amount=update.credit_principal_amount,
@@ -1253,7 +1254,7 @@ class ImportService:
         _prior_rule_id = normalized.get("applied_rule_id")
         _prior_rule_cat = normalized.get("applied_rule_category_id")
 
-        for field in ("account_id", "target_account_id", "credit_account_id", "category_id", "counterparty_id", "amount", "type", "operation_type", "debt_direction", "description", "currency", "credit_principal_amount", "credit_interest_amount"):
+        for field in ("account_id", "target_account_id", "credit_account_id", "category_id", "counterparty_id", "debt_partner_id", "amount", "type", "operation_type", "debt_direction", "description", "currency", "credit_principal_amount", "credit_interest_amount"):
             value = getattr(payload, field)
             if value is not None:
                 normalized[field] = value
@@ -1296,18 +1297,25 @@ class ImportService:
             if action == "restore" and row_status == "skipped":
                 status = "warning"
             elif action == "confirm":
-                # §5.4 / §10.2 (v1.1): individual confirm on a warning row is
-                # a full-touch signal — the user read THIS row and vouched
-                # for it. Stamp user_confirmed_at so commit can: (a) let
-                # the row through, (b) apply Case A weight 1.0 (not 0.5).
-                # Preserved even when the status resolves to `ready` because
-                # bulk-ack paths distinguish by which flag is present.
+                # §5.4 / §10.2 (v1.1): individual confirm is a full-touch
+                # signal — the user read THIS row and vouched for it. Stamp
+                # user_confirmed_at so commit can: (a) let the row through,
+                # (b) apply Case A weight 1.0 (not 0.5). Preserved even when
+                # the status resolves to `ready` because bulk-ack paths
+                # distinguish by which flag is present.
+                #
+                # v1.8: stamp the timestamp regardless of prior status. An
+                # auto-trust row also lands in `ready`, but on the next
+                # /moderation-status fetch its cluster.auto_trust may flip
+                # to false (cluster recompute lowered confidence) and §1.2
+                # honesty gate kicks the row back into attention. The user
+                # already explicitly confirmed it once — without the stamp
+                # the UI keeps demanding re-confirmation after every refresh.
                 from datetime import datetime as _dt, timezone as _tz
-                if row_status == "warning":
-                    normalized["user_confirmed_at"] = _dt.now(_tz.utc).isoformat()
-                    # Individual confirm supersedes any lingering cluster-ack
-                    # from a prior bulk pass on the same row.
-                    normalized.pop("cluster_bulk_acked_at", None)
+                normalized["user_confirmed_at"] = _dt.now(_tz.utc).isoformat()
+                # Individual confirm supersedes any lingering cluster-ack
+                # from a prior bulk pass on the same row.
+                normalized.pop("cluster_bulk_acked_at", None)
                 status = "ready"
                 # If auto-detected as transfer but has no target, revert to regular
                 # so the user can confirm without a validation blocker.
