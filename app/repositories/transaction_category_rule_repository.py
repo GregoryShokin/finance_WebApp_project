@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.models.transaction_category_rule import TransactionCategoryRule
+from app.models.transaction_category_rule import (
+    ACTIVE_PREVIEW_SCOPES,
+    TransactionCategoryRule,
+)
 
 
 class TransactionCategoryRuleRepository:
@@ -10,11 +13,20 @@ class TransactionCategoryRuleRepository:
         self.db = db
 
     def get_best_rule(self, *, user_id: int, normalized_description: str) -> TransactionCategoryRule | None:
+        """Return the highest-confidence matching rule for skeleton-based
+        preview lookup. §6.5 + PR1 cleanup: only `is_active=True` rules
+        with one of the post-migration scopes (`specific`, `general`) are
+        eligible. Legacy `bank` / `legacy_pattern` rules stay in the table
+        per §11.3 (history, possible review) but never silently apply.
+        Inactive rules also never match — even if they share a skeleton.
+        """
         return (
             self.db.query(TransactionCategoryRule)
             .filter(
                 TransactionCategoryRule.user_id == user_id,
                 TransactionCategoryRule.normalized_description == normalized_description,
+                TransactionCategoryRule.is_active.is_(True),
+                TransactionCategoryRule.scope.in_(tuple(ACTIVE_PREVIEW_SCOPES)),
             )
             .order_by(TransactionCategoryRule.confirms.desc(), TransactionCategoryRule.updated_at.desc(), TransactionCategoryRule.id.desc())
             .first()
@@ -106,14 +118,18 @@ class TransactionCategoryRuleRepository:
         user_id: int,
         normalized_description: str,
     ) -> TransactionCategoryRule | None:
-        """Legacy-scope lookup: active rules without an identifier anchor.
+        """Skeleton-only lookup, third-priority in the cluster service.
 
-        Used as the last-priority match in the cluster service. Critically,
-        we EXCLUDE rules that have a bound identifier_value — those are
-        meant to match only their exact identifier, not any row that shares
-        the same skeleton. This is the fix for the «перевод по договору»
-        false-green problem: before this, an exact-rule for ДГ-12345 could
-        wrongly match ДГ-99999 through the legacy `get_best_rule` path.
+        Active rules without an identifier anchor. Same legacy-scope cleanup
+        as `get_best_rule`: rules with `scope='bank'` or `'legacy_pattern'`
+        are deprecated (PR1) and never participate in matching, even when
+        they're still flagged active by an old code path. The post-migration
+        scope `general` is the supported skeleton-bound scope.
+
+        We EXCLUDE rules that have a bound identifier_value — those are
+        meant to match only their exact identifier (path 1), not any row
+        that shares the same skeleton. This is the fix for the «перевод по
+        договору» false-green problem.
         """
         return (
             self.db.query(TransactionCategoryRule)
@@ -122,6 +138,7 @@ class TransactionCategoryRuleRepository:
                 TransactionCategoryRule.normalized_description == normalized_description,
                 TransactionCategoryRule.is_active.is_(True),
                 TransactionCategoryRule.identifier_value.is_(None),
+                TransactionCategoryRule.scope.in_(tuple(ACTIVE_PREVIEW_SCOPES)),
             )
             .order_by(
                 TransactionCategoryRule.confirms.desc(),

@@ -1349,6 +1349,56 @@ class ImportService:
             "summary": summary,
         }
 
+    @staticmethod
+    def _gate_transfer_integrity(
+        *,
+        normalized: dict[str, Any],
+        current_status: str,
+        issues: list[str],
+    ) -> tuple[str, list[str]]:
+        """§12.1 / §5.2 v1.1 trigger 6 — transfer with only one known account
+        is forbidden.
+
+        Called after the preview loop has resolved `account_id` and
+        `target_account_id` for an `operation_type='transfer'` row. If either
+        side is missing, promote the row to `error` with a human-readable
+        issue. Do NOT silently demote `operation_type` to `regular` — that
+        hides the problem from the moderator UI and lets a half-transfer
+        slip into a regular-expense commit, breaking balances.
+
+        Pure function: no DB access, no side effects beyond the returned
+        `(status, issues)` tuple. Unit-tested directly.
+        """
+        if str(normalized.get("operation_type") or "") != "transfer":
+            return current_status, issues
+
+        account_id = normalized.get("account_id")
+        target_account_id = normalized.get("target_account_id")
+        source_missing = account_id in (None, "", 0)
+        target_missing = target_account_id in (None, "", 0)
+        if not (source_missing or target_missing):
+            return current_status, issues
+
+        tx_type = str(normalized.get("type") or "expense")
+        if source_missing and target_missing:
+            msg = "Перевод определён, но оба счёта не распознаны — укажи их вручную."
+        elif source_missing:
+            msg = "Перевод определён, но счёт из выписки не распознан — укажи вручную."
+        else:
+            msg = (
+                "Перевод определён, но счёт отправителя не распознан."
+                if tx_type == "income"
+                else "Перевод определён, но счёт получателя не распознан."
+            )
+        next_issues = list(issues)
+        if msg not in next_issues:
+            next_issues.append(msg)
+        # §5.2 v1.1: error is sticky — never downgrade. `current_status`
+        # might already be `duplicate` (terminal), leave it.
+        if current_status == "duplicate":
+            return current_status, next_issues
+        return "error", next_issues
+
     def _validate_manual_row(self, *, normalized: dict[str, Any], current_status: str, issues: list[str], allow_ready_status: bool = True) -> tuple[str, list[str]]:
         status = current_status
         local_issues = [item for item in issues if item]
@@ -1982,15 +2032,14 @@ class ImportService:
                         # target_account_id = destination side.
                         normalized["target_account_id"] = enrichment.get("suggested_target_account_id")
 
-                    # Final guard: if we still have no resolved counter-account after
-                    # all adjustments, the "transfer" label is unwarranted — downgrade
-                    # to regular so the row lands in the attention feed instead of the
-                    # silent TransfersBucket. This covers e.g. income rows where the
-                    # enricher resolved suggested_account_id as the session account
-                    # itself (self-transfer, impossible), which got nulled above.
-                    if normalized.get("target_account_id") in (None, "", 0):
-                        normalized["operation_type"] = "regular"
-                        normalized.pop("target_account_id", None)
+                    # §12.1 / §5.2 v1.1 trigger 6 — enforced in a helper so
+                    # the same invariant is unit-tested independently from the
+                    # full preview pipeline.
+                    status, issues = self._gate_transfer_integrity(
+                        normalized=normalized,
+                        current_status=status,
+                        issues=issues,
+                    )
                 else:
                     normalized["account_id"] = enrichment.get("suggested_account_id") or payload.account_id
                     normalized["target_account_id"] = enrichment.get("suggested_target_account_id")

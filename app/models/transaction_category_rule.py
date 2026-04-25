@@ -13,8 +13,23 @@ from app.models.base import Base
 # Allowed values for `scope`. Stored as plain VARCHAR(32) in PG (enums are
 # painful to evolve), validated in Python — business rules land in Phase 2.3.
 RULE_SCOPES: frozenset[str] = frozenset(
-    {"exact", "bank", "global", "legacy_pattern"}
+    {"exact", "bank", "global", "legacy_pattern", "specific", "general"}
 )
+
+# Scopes admitted to the preview rule-matching path. §6.1 + §14.7: the
+# old `bank` / `legacy_pattern` scopes are deprecated and must NOT match
+# silently; they live on in the table for history (organic decay /
+# manual migration), but rule lookup ignores them. `exact` rules are
+# matched through a different identifier-based code path, not through
+# `get_best_rule`. `general` is the future skeleton-based scope (post
+# §14.7 migration). `specific` is reserved for the new identifier-based
+# scope name. See PR1 of the legacy-cleanup work.
+ACTIVE_PREVIEW_SCOPES: frozenset[str] = frozenset({"specific", "general"})
+
+# Scopes considered LEGACY — kept inactive after the cleanup migration,
+# never participate in matching. Listed here so callers can detect &
+# report them rather than hardcode the enum.
+LEGACY_RULE_SCOPES: frozenset[str] = frozenset({"bank", "legacy_pattern"})
 
 # Allowed values for `identifier_key` when scope == 'exact'.
 RULE_IDENTIFIER_KEYS: frozenset[str] = frozenset(
