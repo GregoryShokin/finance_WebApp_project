@@ -136,31 +136,67 @@ function formatMoney(value: string | number): string {
 function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, onApplied }: Props) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
-  const [bulkCategoryId, setBulkCategoryId] = useState<number | null>(() => {
-    if (meta.kind === 'fingerprint') return meta.cluster.candidate_category_id;
-    // Brand and counterparty clusters inherit the category from their first
-    // member that has an active rule. Without this, single-word brands
-    // ("Pyaterochka", "Magnit") and counterparties always open with empty
-    // category even though per-fingerprint members already know the answer.
-    for (const m of meta.members) {
-      if (m.candidate_category_id != null) return m.candidate_category_id;
+  // Derive a row-level consensus for `category_id` / `counterparty_id`. After
+  // bulk-apply backend writes the chosen value into every member row's
+  // normalized_data and creates a TransactionCategoryRule with confirms+=N,
+  // but cluster.candidate_category_id can still come back null on next
+  // /moderation-status fetch (rule confidence below the cluster-rule
+  // threshold), which used to make the «Транспорт» badge disappear after
+  // refresh even though every row inside the card carried category_id=Y.
+  // Spec §3.2 v1.5 / §6.3: persisted state in normalized_data wins over
+  // cluster predictions for any field the user can persist.
+  const memberRowIds: number[] = (() => {
+    if (meta.kind === 'fingerprint') return meta.cluster.row_ids;
+    return meta.members.flatMap((m) => m.row_ids);
+  })();
+  const consensusFromRows = (field: string): number | null => {
+    let agreed: number | null = null;
+    for (const id of memberRowIds) {
+      const row = rowsById.get(id);
+      if (!row) continue;
+      const v = (row.normalized_data as Record<string, unknown> | undefined)?.[field];
+      if (v == null) continue;
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      if (agreed == null) {
+        agreed = n;
+      } else if (agreed !== n) {
+        return null; // members disagree → no consensus
+      }
     }
-    return null;
-  });
+    return agreed;
+  };
+  const initialBulkCategoryId = (() => {
+    const fromCluster =
+      meta.kind === 'fingerprint'
+        ? meta.cluster.candidate_category_id
+        : meta.members.find((m) => m.candidate_category_id != null)?.candidate_category_id ?? null;
+    if (fromCluster != null) return fromCluster;
+    return consensusFromRows('category_id');
+  })();
+  const [bulkCategoryId, setBulkCategoryId] = useState<number | null>(initialBulkCategoryId);
   const [bulkQuery, setBulkQuery] = useState(() => {
-    const initialCatId = meta.kind === 'fingerprint'
-      ? meta.cluster.candidate_category_id
-      : (meta.members.find((m) => m.candidate_category_id != null)?.candidate_category_id ?? null);
-    if (initialCatId == null) return '';
-    return categories.find((c) => c.id === initialCatId)?.name ?? '';
+    if (initialBulkCategoryId == null) return '';
+    return categories.find((c) => c.id === initialBulkCategoryId)?.name ?? '';
   });
   // Counterparty kind prefills the counterparty picker with its own id/name.
-  const [bulkCounterpartyId, setBulkCounterpartyId] = useState<number | null>(
-    meta.kind === 'counterparty' ? meta.counterpartyId : null,
-  );
-  const [bulkCounterpartyQuery, setBulkCounterpartyQuery] = useState(
-    meta.kind === 'counterparty' ? meta.counterpartyName : '',
-  );
+  // For fingerprint / brand clusters consult row consensus too — after a
+  // counterparty bulk-bind backend writes counterparty_id into every member
+  // row, even if the cluster meta itself doesn't carry that information.
+  const initialBulkCounterpartyId = (() => {
+    if (meta.kind === 'counterparty') return meta.counterpartyId;
+    return consensusFromRows('counterparty_id');
+  })();
+  const [bulkCounterpartyId, setBulkCounterpartyId] = useState<number | null>(initialBulkCounterpartyId);
+  const [bulkCounterpartyQuery, setBulkCounterpartyQuery] = useState(() => {
+    if (meta.kind === 'counterparty') return meta.counterpartyName;
+    if (initialBulkCounterpartyId == null) return '';
+    // counterparties prop isn't available here (it lives in a query loaded
+    // below), so the picker will fill the visible label on first render
+    // once counterpartiesQuery resolves; bulkCounterpartyId being non-null
+    // is enough to render the badge.
+    return '';
+  });
   const [rowState, setRowState] = useState<Record<number, RowState>>({});
   const counterpartiesQuery = useQuery({
     queryKey: ['counterparties'],
