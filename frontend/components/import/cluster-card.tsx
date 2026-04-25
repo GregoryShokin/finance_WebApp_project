@@ -31,7 +31,7 @@ import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 import { AttachToCounterpartyButton } from '@/components/import/attach-counterparty';
 import { CategoryDialog } from '@/components/categories/category-dialog';
 import { DebtPartnerDialog } from '@/components/debt-partners/debt-partner-dialog';
-import { attachRowToCounterparty, bulkApplyCluster, detachImportRowFromCluster } from '@/lib/api/imports';
+import { attachRowToCounterparty, bulkApplyCluster, detachImportRowFromCluster, excludeImportRow, parkImportRow } from '@/lib/api/imports';
 import { createCategory } from '@/lib/api/categories';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
 import { createDebtPartner, getDebtPartners } from '@/lib/api/debt-partners';
@@ -912,10 +912,85 @@ function ClusterRowList({
                 bulkClusters={bulkClusters}
                 onAttached={onAfterAction}
               />
+              <RowExcludeParkButtons
+                rowId={row.id}
+                rowIndex={row.row_index}
+                disabled={!s.included}
+                onAfterAction={onAfterAction}
+              />
             </div>
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** Per-row Исключить / Отложить buttons inside a cluster card. */
+function RowExcludeParkButtons({
+  rowId,
+  rowIndex,
+  disabled,
+  onAfterAction,
+}: {
+  rowId: number;
+  rowIndex: number;
+  disabled: boolean;
+  onAfterAction: () => void;
+}) {
+  const [showActions, setShowActions] = useState(false);
+  const excludeMutation = useMutation({
+    mutationFn: () => excludeImportRow(rowId),
+    onSuccess: () => { toast.success(`#${rowIndex} исключено`); onAfterAction(); },
+    onError: (e: Error) => toast.error(`Не удалось исключить: ${e.message}`),
+  });
+  const parkMutation = useMutation({
+    mutationFn: () => parkImportRow(rowId),
+    onSuccess: () => { toast.success(`#${rowIndex} отложено`); onAfterAction(); },
+    onError: (e: Error) => toast.error(`Не удалось отложить: ${e.message}`),
+  });
+  const isPending = excludeMutation.isPending || parkMutation.isPending;
+
+  return (
+    <div
+      className="relative flex items-center"
+      onMouseEnter={() => setShowActions(true)}
+      onMouseLeave={() => setShowActions(false)}
+    >
+      {/* Trigger: ellipsis dot — always visible so users discover the menu */}
+      <button
+        type="button"
+        disabled={disabled || isPending}
+        className="flex size-6 items-center justify-center rounded text-slate-300 hover:bg-slate-100 hover:text-slate-500 disabled:opacity-30"
+        title="Действия со строкой"
+        onClick={() => setShowActions((v) => !v)}
+      >
+        {isPending ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : (
+          <span className="text-[10px] leading-none">•••</span>
+        )}
+      </button>
+
+      {/* Dropdown actions */}
+      {showActions && !disabled && !isPending && (
+        <div className="absolute right-0 top-7 z-20 flex flex-col gap-0.5 rounded-lg border border-slate-200 bg-white p-1 shadow-md">
+          <button
+            type="button"
+            onClick={() => { setShowActions(false); parkMutation.mutate(); }}
+            className="whitespace-nowrap rounded px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+          >
+            Отложить
+          </button>
+          <button
+            type="button"
+            onClick={() => { setShowActions(false); excludeMutation.mutate(); }}
+            className="whitespace-nowrap rounded px-3 py-1.5 text-left text-xs text-rose-600 hover:bg-rose-50"
+          >
+            Исключить
+          </button>
+        </div>
+      )}
     </div>
   );
 }
