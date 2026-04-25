@@ -608,26 +608,35 @@ function TransferRow({ feedRow, accountById }: { feedRow: FeedRow; accountById: 
   const isPairSecondary = !!transferMatchMeta && transferMatchMeta.is_secondary === true;
   const isRealDuplicate = isDuplicateSide && !isPairSecondary;
 
-  // For the secondary (income) leg, target = THIS row's account, source = the paired account.
+  // Counterparty side: для primary pair это targetName; для secondary это
+  // matched_account_name (счёт уже-committed зеркала). «Наш» счёт строки —
+  // всегда sourceName (account_id из normalized_data).
+  const counterpartyName = isPairSecondary
+    ? ((transferMatchMeta?.matched_account_name as string | undefined) ?? null)
+    : targetName;
+
+  // Стрелка показывает физическое направление денег:
+  //   expense (мы отдали)  →  стрелка вправо: <наш> → <контрагент>
+  //   income  (мы получили) →  стрелка влево:  <наш> ← <контрагент>
+  const arrow = direction === 'income' ? '←' : '→';
+
   const pairLabel = (() => {
-    if (isPairSecondary) {
-      const pairedName = transferMatchMeta?.matched_account_name as string | undefined;
-      const thisName = sourceName;
-      if (pairedName && thisName) return `${pairedName} → ${thisName}`;
-      if (pairedName) return `${pairedName} → ${direction === 'income' ? 'этот счёт' : 'другой счёт'}`;
-    }
-    if (sourceName && targetName) return `${sourceName} → ${targetName}`;
-    if (sourceName && targetAccountId) return `${sourceName} → счёт #${targetAccountId}`;
-    if (targetName) return `→ ${targetName}`;
+    if (sourceName && counterpartyName) return `${sourceName} ${arrow} ${counterpartyName}`;
+    if (sourceName && targetAccountId && !counterpartyName) return `${sourceName} ${arrow} счёт #${targetAccountId}`;
+    if (counterpartyName) return `${arrow} ${counterpartyName}`;
     return 'перевод между своими';
   })();
 
   const linkLabel = isRealDuplicate ? 'Дубль · другая сессия' : pairLabel;
+  // Цвет ссылки — по направлению (а не по primary/secondary):
+  //   income  → indigo (синий, как было)
+  //   expense → orange-600 (оранжевый — деньги уходят с нашего счёта)
+  // Real duplicates приглушены серым.
   const linkClass = isRealDuplicate
     ? 'text-slate-400'
-    : isPairSecondary
-      ? 'text-indigo-500 font-medium'
-      : 'text-indigo-700 font-medium';
+    : direction === 'income'
+      ? 'text-indigo-700 font-medium'
+      : 'text-orange-600 font-medium';
 
   const rowClass = isRealDuplicate ? 'text-slate-400 italic' : 'text-slate-800';
   const amountClass = [
@@ -1290,8 +1299,19 @@ function AttentionCardImpl({
 
   // ── Compact (collapsed) view for confirmed / auto-trust rows ─────────────
   if (collapsed) {
+    // Priority mirrors `suggestedCatId` (line 994): the row's saved
+    // `normalized_data.category_id` is the strongest signal — it's what's in
+    // the DB after the user pressed Apply. Cluster-level `candidate_category_id`
+    // is recomputed on every /moderation-status fetch from rules/LLM and does
+    // NOT trail user edits (by design — cluster predictions stay model-side
+    // until commit), so without `rowLevelCatId` first the badge in the
+    // collapsed card snaps back to the LLM suggestion right after Apply.
     const catId =
-      cluster?.candidate_category_id ?? cluster?.hypothesis?.predicted_category_id ?? pickedCatId ?? null;
+      rowLevelCatId ??
+      cluster?.candidate_category_id ??
+      cluster?.hypothesis?.predicted_category_id ??
+      pickedCatId ??
+      null;
     const catName = catId ? categoryById.get(catId)?.name ?? '—' : '—';
     const badgeText = isConfirmed && !isAutoTrust ? '✓ Проверено' : '✓ Авто';
     const badgeClass = isConfirmed && !isAutoTrust
