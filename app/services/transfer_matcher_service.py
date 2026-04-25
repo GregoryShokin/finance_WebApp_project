@@ -119,6 +119,7 @@ class _Candidate:
     direction: str           # "income" | "expense"
     contract_number: str | None = None
     description: str | None = None
+    row_skeleton: str | None = None  # nd.get('skeleton') — для §8.1 проверки в _detect_committed_duplicates
 
     @property
     def key(self) -> tuple:
@@ -295,6 +296,7 @@ class TransferMatcherService:
                 direction=direction,
                 contract_number=contract,
                 description=str(nd.get("description") or nd.get("raw_description") or "").lower(),
+                row_skeleton=str(nd.get("skeleton") or "") or None,
             ))
 
         return candidates
@@ -373,9 +375,19 @@ class TransferMatcherService:
     def _load_committed_candidates(
         self, user_id: int, date_from: datetime, date_to: datetime
     ) -> list[_Candidate]:
+        """Committed candidates for transfer-pair matching.
+
+        Loads ALL committed transactions in the date window (not just
+        transfers). Restricting to op=transfer and emitting TWO candidates
+        per transfer (mirror) was experimented with but broke cross-session
+        matching: synthetic mirror candidates competed with real active
+        rows for greedy assignment and starved them of pairs. The
+        committed-tx duplicate detection of the receiving-side input row
+        is handled separately in `_detect_committed_duplicates` (second
+        pass), which uses a mirror INDEX rather than mirror CANDIDATES,
+        so it doesn't compete with active-row matching.
+        """
         buffer = timedelta(days=2)
-        # date_from/date_to are UTC-naive; DB stores timezone-aware values.
-        # Cast to UTC-aware for the DB filter to avoid comparison errors.
         from datetime import timezone as _tz
         df_aware = date_from.replace(tzinfo=_tz.utc) if date_from.tzinfo is None else date_from
         dt_aware = (date_to + buffer).replace(tzinfo=_tz.utc) if (date_to + buffer).tzinfo is None else (date_to + buffer)
@@ -447,6 +459,19 @@ class TransferMatcherService:
 
         diff_seconds = abs((a.date - b.date).total_seconds())
         if diff_seconds > MAX_DATE_DIFF_HOURS * 3600:
+            return 0.0
+
+        # Required filter: at least ONE side must explicitly look like a
+        # transfer (contain "перевод" / "transfer" / similar in description
+        # or skeleton). Two random transactions that happen to share
+        # (date, amount, opposite direction) on different accounts are not
+        # a transfer pair — they are an amount coincidence. Without this
+        # filter the matcher fired false positives across every dataset
+        # where amounts repeat (e.g. round-number cashbacks and refunds).
+        if not (
+            self._has_pro_transfer_keyword(a)
+            or self._has_pro_transfer_keyword(b)
+        ):
             return 0.0
 
         if diff_seconds == 0:
@@ -587,6 +612,12 @@ class TransferMatcherService:
             row.error_message = None
             # Secondary side (income in paired cross-session match) is marked duplicate —
             # committing the expense side auto-creates this side as the transfer pair.
+            # Note: the previously-added `partner_is_committed` branch was removed
+            # because it was marking legitimate cross-session pairs as duplicate
+            # whenever a committed-tx candidate happened to share (date, amount,
+            # opposite direction). The proper place to detect committed-tx
+            # duplicates is `_detect_committed_duplicates` (second pass on rows
+            # that the matcher did NOT pair), not the assignment of paired rows.
             row.status = "duplicate" if is_secondary else "ready"
 
             self.db.add(row)
@@ -631,6 +662,17 @@ class TransferMatcherService:
         )
 
         # Build a lookup: (account_id, direction, amount) → list of (tx, parsed_date)
+        #
+        # Mirror entry for transfers: a single committed `transfer` row
+        # represents BOTH sides of the operation (account_id sends, target
+        # receives). The bank issues two statement lines for the same
+        # operation — one in each account's statement. Without the mirror
+        # the receiving-side input row would never match the committed
+        # transfer (lookup key (target_acc, opposite_direction, amount)
+        # would not exist in the index), and a duplicate transfer would
+        # be created. Observed in sessions 235/236 where Тинькоф and
+        # Тинькоф Дебет statements both arrived after one side had already
+        # been committed earlier.
         committed_index: dict[tuple, list[tuple[TransactionModel, datetime]]] = {}
         for tx in all_txs:
             parsed = self._parse_datetime(tx.transaction_date)
@@ -639,19 +681,48 @@ class TransferMatcherService:
             direction = "income" if tx.type == "income" else "expense"
             key = (tx.account_id, direction, tx.amount)
             committed_index.setdefault(key, []).append((tx, parsed))
+            if (
+                str(tx.operation_type or "") == "transfer"
+                and tx.target_account_id is not None
+            ):
+                mirror_direction = "expense" if direction == "income" else "income"
+                mirror_key = (tx.target_account_id, mirror_direction, tx.amount)
+                committed_index.setdefault(mirror_key, []).append((tx, parsed))
 
         # Match each active candidate against same-account committed txs.
+        # §8.1: дедуп-ключ обязан включать skeleton — без него matcher
+        # ложно склеивал две независимые операции, случайно совпавшие по
+        # (account_id, direction, amount, ±2 дня). Например, СБП-приход
+        # 5000₽ от внешнего отправителя и внутрибанковский перевод
+        # 5000₽ с другой карты в тот же день — суммы совпали, но это
+        # разные операции. Skeleton'ы у них разные («входящий перевод
+        # сбп <PERSON>» vs «внутренний перевод на договор <CONTRACT>»),
+        # и совпадение skeleton'а — то, что отличает повторный импорт
+        # от случайной коллизии сумм.
+        active_row_skeletons = {
+            cand.row_id: (cand.row_skeleton or "").strip()
+            for cand in active_candidates
+            if cand.row_id is not None
+        }
         rows_to_mark: dict[int, TransactionModel] = {}
         for cand in active_candidates:
             if cand.row_id is None or cand.row_id in skip_row_ids:
                 continue
             key = (cand.account_id, cand.direction, cand.amount)
             committed_matches = committed_index.get(key, [])
+            row_skel = active_row_skeletons.get(cand.row_id, "")
             for tx, tx_date in committed_matches:
                 diff_seconds = abs((cand.date - tx_date).total_seconds())
-                if diff_seconds <= buffer.total_seconds():
-                    rows_to_mark[cand.row_id] = tx
-                    break
+                if diff_seconds > buffer.total_seconds():
+                    continue
+                tx_skel = (tx.skeleton or "").strip()
+                # Если у обеих сторон есть skeleton — требуем строгое
+                # совпадение. Если хотя бы у одной нет — это legacy-данные,
+                # пропускаем сравнение (будет применён старый широкий критерий).
+                if row_skel and tx_skel and row_skel != tx_skel:
+                    continue
+                rows_to_mark[cand.row_id] = tx
+                break
 
         if not rows_to_mark:
             return
@@ -668,15 +739,44 @@ class TransferMatcherService:
                 continue
             tx = rows_to_mark[row.id]
             nd: dict = dict(row.normalized_data_json or {})
-            other_account = accounts.get(tx.target_account_id or tx.account_id)
+
+            # Различаем два типа совпадения:
+            #   - mirror match: committed tx живёт на ЧУЖОМ счёте, в наш
+            #     индекс попала через target_account_id (зеркало transfer'a).
+            #     Это вторая сторона уже-committed пары — is_secondary=True,
+            #     partner = tx.account_id (другой счёт, не наш).
+            #   - real-duplicate match: committed tx живёт на НАШЕМ счёте
+            #     (повторный импорт той же выписки или phantom income из
+            #     `_create_transfer_pair_record`). Это «настоящий» дубликат,
+            #     UI показывает как «Дубль · другая сессия». is_secondary=False
+            #     (иначе UI ошибочно рисует pairLabel и получает self-loop).
+            nd_account_id = nd.get("account_id")
+            try:
+                row_account_id = int(nd_account_id) if nd_account_id is not None else None
+            except (TypeError, ValueError):
+                row_account_id = None
+            is_mirror = (
+                row_account_id is not None
+                and tx.account_id != row_account_id
+            )
+            if is_mirror:
+                partner_account_id = tx.account_id
+            else:
+                partner_account_id = tx.target_account_id
+            partner_account = (
+                accounts.get(int(partner_account_id))
+                if partner_account_id is not None
+                else None
+            )
+
             nd["transfer_match"] = {
                 "matched_row_id": None,
                 "matched_tx_id": tx.id,
-                "matched_account_id": tx.account_id,
-                "matched_account_name": other_account.name if other_account else None,
+                "matched_account_id": partner_account_id,
+                "matched_account_name": partner_account.name if partner_account else None,
                 "match_confidence": 0.95,
                 "match_source": "committed_tx_duplicate",
-                "is_secondary": True,
+                "is_secondary": is_mirror,
             }
             row.normalized_data_json = nd
             row.status = "duplicate"

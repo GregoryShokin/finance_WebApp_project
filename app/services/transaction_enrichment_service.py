@@ -255,14 +255,14 @@ class TransactionEnrichmentService:
                     account_confidence = max(account_confidence, inferred_source_confidence)
                     account_reason = inferred_source_reason
 
-        # If operation was detected as transfer but no target account was found:
-        # - strong keyword (confidence 0.92): явно свой счёт → keep as transfer
-        # - weak keyword (confidence 0.70) or history (< 0.88): downgrade to regular when no target found
-        if operation_type == "transfer" and target_account_id is None:
-            if operation_confidence < 0.88:
-                operation_type = "regular"
-                operation_confidence = 0.65
-                operation_reason = "перевод без счёта получателя: понижен до regular"
+        # §12.1 + §5.2 v1.1: a transfer without a resolved target is an
+        # integrity problem — NOT a reason to silently downgrade to regular.
+        # Downgrading hid the row as a valid regular expense and prevented
+        # the cross-session transfer matcher from pairing it (matcher only
+        # looks at op=transfer candidates). The correct response is to leave
+        # op=transfer and let _gate_transfer_integrity escalate status to
+        # warning (preview) → error (post-matcher / commit guard).
+        # The old demotion code is removed; the gate is already wired.
 
 
         category_id, category_confidence, category_reason = self._resolve_category(
@@ -329,22 +329,34 @@ class TransactionEnrichmentService:
         # он остаётся regular с категорией (врач, аренда и т.д.).
         #
         # STRONG (confidence 0.92): явно между своими счетами → keeper даже без target.
+        # Банковские термины «внутренний/внутрибанковский/межбанковский перевод»
+        # — это семантически тоже движение между счетами, эквивалентны явным
+        # фразам выше. До фикса они лежали в WEAK (0.70) и валились ниже порога
+        # 0.88 в caller, из-за чего одна сторона перевода (например, Тинькофф
+        # Дебет: «Внутренний перевод на договор …») классифицировалась как
+        # regular, а вторая (например, Тинькофф Сплит: «Внутрибанковский
+        # перевод с договора …») — как transfer. Matcher не мог свести их,
+        # потому что match идёт на уже размеченных операциях.
         if any(t in haystack for t in [
             "перевод между счетами",
             "перевод на свой счет",
             "перевод на свой счёт",
             "пополнение своего счета",
             "пополнение своего счёта",
+            "внутрибанковский перевод",
+            "внутренний перевод",
+            "межбанковский перевод",
         ]):
             return "transfer", 0.92, "перевод по ключевым словам (явно между своими счетами)"
 
         # WEAK (confidence 0.70): банковский термин — может быть договор/кредит/ссуда.
         # Если target_account_id не найден → downgrade до regular (порог 0.88 в caller).
         if any(t in haystack for t in [
-            "внутрибанковский перевод",
-            "внутренний перевод",
             "зачислено по договору",
-            "межбанковский перевод",
+            # C2A (Card-to-Account) — межбанковский перевод через протокол C2A.
+            # Т-Банк отображает как "Операция в других кредитных организациях YandexBank_C2A...".
+            # Если пользователь импортировал вторую сторону (Яндекс Банк) — transfer matcher найдёт пару.
+            "c2a",
         ]):
             return "transfer", 0.70, "возможный перевод по ключевым словам (требует подтверждения счёта)"
 
@@ -443,13 +455,20 @@ class TransactionEnrichmentService:
                 if matched is not None:
                     return matched.id, 0.95, f"Р В Р’В Р В Р вЂ№Р В Р Р‹Р Р†Р вЂљР Р‹Р В Р Р‹Р Р†Р вЂљР’ВР В Р Р‹Р Р†Р вЂљРЎв„ў Р В Р’В Р РЋРІР‚СћР В Р’В Р РЋРІР‚вЂќР В Р Р‹Р В РІР‚С™Р В Р’В Р вЂ™Р’ВµР В Р’В Р СћРІР‚ВР В Р’В Р вЂ™Р’ВµР В Р’В Р вЂ™Р’В»Р В Р Р‹Р Р†Р вЂљР’ВР В Р’В Р В РІР‚В¦ Р В Р’В Р РЋРІР‚вЂќР В Р’В Р РЋРІР‚Сћ Р В Р’В Р РЋР’ВР В Р’В Р вЂ™Р’В°Р В Р Р‹Р В РЎвЂњР В Р’В Р РЋРІР‚СњР В Р’В Р вЂ™Р’Вµ {last4} Р В Р’В Р РЋРІР‚ВР В Р’В Р вЂ™Р’В· Р В Р’В Р В РІР‚В Р В Р Р‹Р Р†Р вЂљРІвЂћвЂ“Р В Р’В Р РЋРІР‚вЂќР В Р’В Р РЋРІР‚ВР В Р Р‹Р В РЎвЂњР В Р’В Р РЋРІР‚СњР В Р’В Р РЋРІР‚В"
 
-        # Text matching in description is only used for transfer target accounts.
-        # For regular expenses/income the session account is authoritative.
-        if operation_type == "transfer":
+        # Text matching is only used to find the SOURCE of an INCOME transfer
+        # (i.e. who sent the money to this account). For EXPENSE transfers the
+        # source is always session_account_id — that is a §4.1 fact (the bank
+        # statement belongs to the session's account, so every row in it was
+        # paid FROM that account). Overwriting session_account_id with a
+        # text-matched account for expense transfers puts the TARGET account
+        # in the source field, which then causes _resolve_target_account to
+        # find nothing (it already excluded the wrong "source") and triggers
+        # the transfer→regular demotion — breaking matcher pairing.
+        if operation_type == "transfer" and transaction_type == "income":
             transfer_related_account = self._find_account_in_text(
                 accounts=accounts,
                 text=" ".join(filter(None, [description, counterparty])),
-                exclude_account_id=session_account_id if transaction_type == "income" else None,
+                exclude_account_id=session_account_id,
             )
             if transfer_related_account is not None:
                 return transfer_related_account.id, 0.9, "matched account name in description (transfer)"

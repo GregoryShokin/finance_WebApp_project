@@ -229,10 +229,17 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
   // because their own pair was already committed.
   const isCompleteTransfer = (f: FeedRow) =>
     f.operationType === 'transfer' && f.targetAccountId != null;
+  // Bulk-кластеры с обычными покупками (магазины, услуги) остаются только
+  // в bulk-секции — иначе пользователь видел бы их и там, и в виджете
+  // «Переводы и дубли». Но bulk-кластеры transfer'ов (например, серия
+  // внутрибанковских переводов с одним договором) — это полезная сводная
+  // картина для виджета, поэтому для них исключение НЕ применяется.
+  const isBulkNonTransferRow = (f: FeedRow) =>
+    bulkClusterRowIds.has(f.row.id) && !isCompleteTransfer(f);
   const transferFeed = activeFeed.filter(
     (f) =>
       !f.isDetachedFromCluster &&
-      !bulkClusterRowIds.has(f.row.id) &&
+      !isBulkNonTransferRow(f) &&
       (isCompleteTransfer(f) || f.isDuplicateSide),
   );
   const remainingFeed = activeFeed.filter(
@@ -240,7 +247,17 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
       (f.isDetachedFromCluster || (!isCompleteTransfer(f) && !f.isDuplicateSide)) &&
       !bulkClusterRowIds.has(f.row.id),
   );
-  const isConfirmedOrAuto = (f: FeedRow) => f.cluster?.auto_trust === true || f.row.status === 'ready';
+  // §1.2 honesty gate: a `ready` row whose cluster is in the red trust zone
+  // (rule confidence < 0.65) must NOT appear in the «Проверено» bucket. The
+  // backend may have stamped status=ready earlier from a now-low-confidence
+  // rule, but the cluster meta is recomputed live and reflects current truth.
+  // Showing such rows as «Проверено» while simultaneously labelling the
+  // cluster «Нужен ответ» is the «ложная уверенность» the spec warns against.
+  // auto_trust always wins (it's a stricter gate that already requires
+  // identifier match + ≥5 confirms + 0 rejections + confidence ≥ 0.99).
+  const isConfirmedOrAuto = (f: FeedRow) =>
+    f.cluster?.auto_trust === true ||
+    (f.row.status === 'ready' && f.cluster?.trust_zone !== 'red');
   // Confirmed rows go into their own tile (ExpandableCard), attention rows stay in the inline list.
   const confirmedFeed = remainingFeed.filter((f) => isConfirmedOrAuto(f))
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -942,7 +959,10 @@ function AttentionCardImpl({
 }) {
   const { row, cluster, date, description, amount, direction, refundMatch } = feedRow;
   const isAutoTrust = cluster?.auto_trust === true;
-  const isConfirmed = row.status === 'ready';
+  // §1.2: same honesty gate as the bucket filter above. A row in the
+  // attention bucket because its cluster went red must not still wear the
+  // «✓ Проверено» badge inside the card.
+  const isConfirmed = row.status === 'ready' && cluster?.trust_zone !== 'red';
   // Auto-trust rows start collapsed; confirmed rows also collapse after apply.
   const [collapsed, setCollapsed] = useState(isAutoTrust);
   const zone = cluster?.trust_zone ?? 'yellow';

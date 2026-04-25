@@ -1385,11 +1385,26 @@ class ImportService:
         target_account_id = normalized.get("target_account_id")
         source_missing = account_id in (None, "", 0)
         target_missing = target_account_id in (None, "", 0)
-        if not (source_missing or target_missing):
+        # §12.1 (extended): a transfer must move money BETWEEN accounts. If
+        # source and target resolve to the same account, the transfer is
+        # semantically invalid — at commit it would create a balance-neutral
+        # phantom pair against the same account. Surfaces a real bug observed
+        # in session 229: the normalizer rewrote `account_id` from the
+        # session's account to the one mentioned in the description, so both
+        # sides ended up on acc=22. Treat it as a missing target — the user
+        # must pick a real counter-account.
+        self_loop = (
+            not source_missing
+            and not target_missing
+            and account_id == target_account_id
+        )
+        if not (source_missing or target_missing or self_loop):
             return current_status, issues
 
         tx_type = str(normalized.get("type") or "expense")
-        if source_missing and target_missing:
+        if self_loop:
+            msg = "Перевод указан на тот же счёт, что и источник — укажи реальный счёт-получатель."
+        elif source_missing and target_missing:
             msg = "Перевод определён, но оба счёта не распознаны — укажи их вручную."
         elif source_missing:
             msg = "Перевод определён, но счёт из выписки не распознан — укажи вручную."
@@ -2418,11 +2433,29 @@ class ImportService:
                 target_account_id = normalized.get("target_account_id")
 
                 if operation_type == "transfer" and not normalized.get("requires_credit_split") and target_account_id not in (None, "", 0):
-                    expense_tx, _income_tx = self._create_transfer_pair(
-                        user_id=user_id,
-                        payload=payloads[0],
-                    )
-                    last_transaction = expense_tx
+                    # Если transfer_matcher свёл активную строку с уже
+                    # закоммиченным orphan transfer (см. transfer_match.matched_tx_id),
+                    # не создаём новую зеркальную транзакцию — это привело бы к дублю
+                    # и двойному зачёту по балансу target-счёта (старый orphan уже
+                    # сделал income +amount). Вместо этого создаём только активную
+                    # сторону и линкуемся к существующей committed-транзакции.
+                    matched_tx_id = (normalized.get("transfer_match") or {}).get("matched_tx_id")
+                    if matched_tx_id:
+                        linked_tx = self._link_transfer_to_committed_pair(
+                            user_id=user_id,
+                            payload=payloads[0],
+                            committed_tx_id=int(matched_tx_id),
+                        )
+                    else:
+                        linked_tx = None
+                    if linked_tx is not None:
+                        last_transaction = linked_tx
+                    else:
+                        expense_tx, _income_tx = self._create_transfer_pair(
+                            user_id=user_id,
+                            payload=payloads[0],
+                        )
+                        last_transaction = expense_tx
                     imported_count += 1
                 elif normalized.get("requires_credit_split"):
                     # Ref: financeapp-vault/01-Metrics/Поток.md — decision 2026-04-19
@@ -2651,6 +2684,105 @@ class ImportService:
             "review_count": review_count,
             "parked_count": parked_count,
         }
+
+    def _link_transfer_to_committed_pair(
+        self, *, user_id: int, payload: dict[str, Any], committed_tx_id: int
+    ) -> TransactionModel | None:
+        """Линкует активную сторону transfer к уже закоммиченной orphan-транзакции.
+
+        Сценарий: пользователь сначала закоммитил выписку счёта A. На момент
+        коммита второй стороны (счёт B) ещё не было, и транзакции A ушли как
+        orphan transfer (target_account_id=NULL, transfer_pair_id=NULL) либо
+        как regular income/expense. Затем пользователь импортирует выписку
+        счёта B, transfer_matcher свёл строки B с committed-транзакциями A
+        и записал matched_tx_id в normalized.transfer_match. Здесь мы:
+
+          1. Создаём ТОЛЬКО активную сторону (B) как transfer.
+          2. Достраиваем committed-сторону (A): target_account_id, transfer_pair_id,
+             operation_type='transfer', affects_analytics=False.
+          3. Применяем balance ТОЛЬКО к активному счёту (B). Баланс счёта A уже
+             был учтён при предыдущем коммите (income +amount как у regular,
+             так и у transfer-orphan), повторно его не трогаем.
+
+        Возвращает созданную active-сторону или None, если линковка невозможна
+        (например, committed_tx уже спарен — fallback на обычное создание пары
+        в caller).
+        """
+        committed_tx = (
+            self.db.query(TransactionModel)
+            .filter(
+                TransactionModel.id == committed_tx_id,
+                TransactionModel.user_id == user_id,
+            )
+            .first()
+        )
+        if committed_tx is None:
+            return None
+        if committed_tx.transfer_pair_id is not None:
+            return None
+
+        active_account_id = int(payload["account_id"])
+        active_target_account_id = int(payload["target_account_id"])
+        if committed_tx.account_id != active_target_account_id:
+            return None
+
+        amount = ImportService._to_decimal(payload["amount"])
+        if ImportService._to_decimal(committed_tx.amount) != amount:
+            return None
+
+        active_type = str(payload.get("type") or "expense")
+        committed_type = str(committed_tx.type or "")
+        if active_type == committed_type:
+            return None
+
+        currency = str(payload.get("currency") or "RUB").upper()
+        description = (payload.get("description") or "")[:500]
+        transaction_date = ImportService._to_datetime(payload["transaction_date"])
+        needs_review = bool(payload.get("needs_review"))
+        normalized_description = self.enrichment.normalize_description(description)
+        skeleton = payload.get("skeleton") or None
+
+        active_account = self.account_repo.get_by_id_and_user_for_update(active_account_id, user_id)
+        if active_account is None:
+            raise ImportValidationError("РЎС‡С‘С‚ Р°РєС‚РёРІРЅРѕР№ СЃС‚РѕСЂРѕРЅС‹ РЅРµ РЅР°Р№РґРµРЅ.")
+
+        active_tx = TransactionModel(
+            user_id=user_id,
+            account_id=active_account_id,
+            target_account_id=active_target_account_id,
+            amount=amount,
+            currency=currency,
+            type=active_type,
+            operation_type="transfer",
+            description=description,
+            normalized_description=normalized_description,
+            skeleton=skeleton,
+            transaction_date=transaction_date,
+            needs_review=needs_review,
+            affects_analytics=False,
+        )
+        self.db.add(active_tx)
+        self.db.flush()
+
+        committed_tx.target_account_id = active_account_id
+        committed_tx.operation_type = "transfer"
+        committed_tx.affects_analytics = False
+        committed_tx.transfer_pair_id = active_tx.id
+        active_tx.transfer_pair_id = committed_tx.id
+        self.db.add(committed_tx)
+        self.db.add(active_tx)
+
+        if active_type == "expense":
+            active_account.balance -= amount
+        else:
+            active_account.balance += amount
+        self.db.add(active_account)
+
+        self.db.commit()
+        self.db.refresh(active_tx)
+        self.db.refresh(committed_tx)
+
+        return active_tx
 
     def _create_transfer_pair(
         self, *, user_id: int, payload: dict[str, Any]
