@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.services.import_validator import ImportRowValidationError, parse_date, parse_decimal
+
+# Все банки, выписки которых сейчас обрабатываются (Т-Банк, Я-Банк, Озон), печатают
+# время в МСК. Naive datetime из парсера интерпретируется в этой TZ. Когда появятся
+# не-российские банки — TZ нужно поднять на уровень session.mapping_json.bank_timezone
+# (см. бэклог); до тех пор хардкод закрывает 100% реальных выписок.
+_BANK_TZ = ZoneInfo("Europe/Moscow")
 
 
 class ImportNormalizer:
@@ -41,7 +47,7 @@ class ImportNormalizer:
 
         transaction_date = parse_date(date_raw, date_format)
         if transaction_date.tzinfo is None:
-            transaction_date = transaction_date.replace(tzinfo=timezone.utc)
+            transaction_date = transaction_date.replace(tzinfo=_BANK_TZ)
 
         amount: Decimal
         direction: str

@@ -9,15 +9,15 @@ transfer arrives in a new session it is immediately flagged.
 Matching criteria (all required):
   1. Amounts are exactly equal.
   2. Directions are opposite (expense ↔ income).
-  3. Date/time difference is at most 36 hours.
+  3. Calendar-day difference in МСК ≤ 1 (same day or adjacent day).
   4. Rows belong to different sessions (different accounts).
 
-Scoring:
-  • time_diff == 0 s  → 1.00
-  • time_diff ≤ 60 s  → 0.97
-  • time_diff ≤ 1 h   → 0.93
-  • time_diff ≤ 24 h  → 0.88
-  • time_diff ≤ 36 h  → 0.72
+Scoring (within the day-window):
+  • time_diff == 0 s        → 1.00
+  • time_diff ≤ 60 s        → 0.97
+  • time_diff ≤ 1 h         → 0.93
+  • same calendar day, > 1h → 0.88
+  • adjacent calendar day   → 0.80
   Bonus +0.05 if both sides share the same contract_number.
 
 Pairs with score < MIN_SCORE are discarded.
@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -40,7 +41,13 @@ from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_repository import TransactionRepository
 
 MIN_SCORE = 0.60
-MAX_DATE_DIFF_HOURS = 12
+# Календарный допуск окна — ±1 день в банковской TZ (см. _BANK_TZ).
+# Раньше использовался час-бюджет (12ч), но это не покрывало кейс «операция
+# 23:50 одного дня → списание контрагентом 02:00 следующего», где две стороны
+# одной transfer-пары попадают в соседние календарные дни даже после TZ-фикса
+# в нормализаторе. Сравнение по .date() в МСК надёжнее, чем по часам.
+MAX_DATE_DIFF_DAYS = 1
+_BANK_TZ = ZoneInfo("Europe/Moscow")
 
 # Keywords that strongly indicate a payment/purchase — NOT an internal transfer.
 # If either candidate contains one of these, the pair score is penalized.
@@ -253,6 +260,14 @@ class TransferMatcherService:
     # ------------------------------------------------------------------
 
     def _load_active_row_candidates(self, user_id: int) -> list[_Candidate]:
+        # Include `error` rows whose error is specifically "orphan transfer"
+        # (operation_type=transfer + no target_account_id + no transfer_match yet).
+        # Without them the matcher hits a chicken-and-egg: §5.2 trigger 6 escalates
+        # orphan transfers to `error` *after* a fruitless matcher pass, but a later
+        # session bringing the counter-side never gets paired because the matcher
+        # would skip the error-rows from the previous pass. If the matcher now
+        # finds a partner, `_apply_assignments` rewrites status to ready/duplicate
+        # and clears error_message; if not, status stays `error` — same result.
         rows_with_sessions = (
             self.db.query(ImportSession, ImportRow)
             .join(ImportRow, ImportRow.session_id == ImportSession.id)
@@ -260,7 +275,7 @@ class TransferMatcherService:
                 ImportSession.user_id == user_id,
                 ImportSession.status != "committed",
                 ImportSession.account_id.isnot(None),
-                ImportRow.status.in_(["ready", "warning"]),
+                ImportRow.status.in_(["ready", "warning", "error"]),
             )
             .all()
         )
@@ -271,6 +286,15 @@ class TransferMatcherService:
 
             if nd.get("transfer_match_locked"):
                 continue
+
+            if str(row.status or "") == "error":
+                is_orphan_transfer = (
+                    str(nd.get("operation_type") or "") == "transfer"
+                    and nd.get("target_account_id") in (None, "", 0)
+                    and not nd.get("transfer_match")
+                )
+                if not is_orphan_transfer:
+                    continue
 
             amount = self._parse_decimal(nd.get("amount"))
             date = self._parse_datetime(nd.get("transaction_date") or nd.get("date"))
@@ -458,7 +482,14 @@ class TransferMatcherService:
             return 0.0
 
         diff_seconds = abs((a.date - b.date).total_seconds())
-        if diff_seconds > MAX_DATE_DIFF_HOURS * 3600:
+        # Сравниваем календарные дни в банковской TZ: операция в 23:50 одного
+        # дня и списание у контрагента в 02:00 следующего — это та же transfer-
+        # пара (diff_days == 1), но diff_seconds может быть ~3-4ч. Конвертация
+        # в _BANK_TZ нужна на случай committed-tx, у которого date в UTC.
+        date_a = a.date.astimezone(_BANK_TZ).date() if a.date.tzinfo else a.date.date()
+        date_b = b.date.astimezone(_BANK_TZ).date() if b.date.tzinfo else b.date.date()
+        diff_days = abs((date_a - date_b).days)
+        if diff_days > MAX_DATE_DIFF_DAYS:
             return 0.0
 
         # Required filter: at least ONE side must explicitly look like a
@@ -474,16 +505,20 @@ class TransferMatcherService:
         ):
             return 0.0
 
+        # Часы остаются в скоринге как тай-брейкер: чем ближе по времени, тем
+        # выше уверенность. Для пар в один календарный день — старая шкала.
+        # Для пар в соседних днях (diff_days == 1) — отдельная ступень 0.80,
+        # выше MIN_SCORE, но ниже любой пары в один день.
         if diff_seconds == 0:
             score = 1.00
         elif diff_seconds <= 60:
             score = 0.97
         elif diff_seconds <= 3600:
             score = 0.93
-        elif diff_seconds <= 86400:
+        elif diff_days == 0:
             score = 0.88
         else:
-            score = 0.72
+            score = 0.80
 
         if (
             a.contract_number

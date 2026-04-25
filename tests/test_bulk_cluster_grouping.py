@@ -167,6 +167,11 @@ def _make_svc_with_rows(row_objects: list) -> ImportClusterService:
     svc.global_patterns.get_matching_pattern.return_value = None
     svc.counterparty_fp_service = MagicMock()
     svc.counterparty_fp_service.resolve_many.return_value = {}
+    # `counterparty_id_service` is consumed by `_group_by_counterparty` (called
+    # from build_bulk_clusters once it has live clusters). Without this mock
+    # the path raises AttributeError before any of our assertions run.
+    svc.counterparty_id_service = MagicMock()
+    svc.counterparty_id_service.resolve_many.return_value = {}
     return svc
 
 
@@ -251,6 +256,56 @@ class TestBuildBulkClustersFilters:
                 transfer_match={"partner_row_id": 9000 + i, "is_secondary": False},
             )
             for i in range(1, 8)  # 7 rows, enough to exceed MIN_BULK_CLUSTER_SIZE
+        ]
+        svc = _make_svc_with_rows(rows)
+        session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
+        fp_clusters, _, _ = svc.build_bulk_clusters(session)
+        assert fp_clusters == []
+
+    def test_duplicate_status_rows_are_excluded(self) -> None:
+        """Regression: rows already marked `duplicate` (mirror match against a
+        previously-committed transfer pair, detected in build_preview) must
+        NOT show up in bulk-categorize UI. They're already surfaced in the
+        «Переводы и дубли» widget and are terminal — bulk-acking them would
+        be no-op noise. Note that `_find_transfer_pair_duplicate` sets
+        status=duplicate WITHOUT writing transfer_match, so the
+        transfer_match-based exclusion alone misses them."""
+        rows = [
+            _mk_row(
+                i,
+                "fp-internal-contract",
+                "внутрибанковский перевод с договора <contract>",
+                status="duplicate",
+            )
+            for i in range(1, 10)  # 9 rows, well above MIN_BULK_CLUSTER_SIZE
+        ]
+        svc = _make_svc_with_rows(rows)
+        session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})
+        fp_clusters, brand_clusters, _ = svc.build_bulk_clusters(session)
+        assert fp_clusters == []
+        assert brand_clusters == []
+
+    def test_duplicate_rows_dropped_but_remaining_cluster_still_qualifies(self) -> None:
+        """Cluster of 9: 6 marked duplicate (mirror of committed pair) + 3
+        live ones with no terminal status. After filtering only 3 remain —
+        below MIN_BULK_CLUSTER_SIZE for non-transfer skeletons, so the
+        cluster correctly drops from bulk UI without absorbing the live 3
+        into a misleading group of 9."""
+        rows = [
+            _mk_row(
+                i,
+                "fp-merchant",
+                "оплата в pyaterochka 14130 volgodonsk rus",
+                status="duplicate",
+            )
+            for i in range(1, 7)  # 6 duplicate
+        ] + [
+            _mk_row(
+                i + 100,
+                "fp-merchant",
+                "оплата в pyaterochka 14130 volgodonsk rus",
+            )
+            for i in range(3)  # 3 live
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})

@@ -612,6 +612,18 @@ class ImportClusterService:
             if status == "committed" or created_tx is not None:
                 excluded_row_ids.add(row.id)
                 continue
+            # §8.3: `duplicate` is terminal — the row will be auto-skipped on
+            # commit and the user can't override it. It already shows up in
+            # the «Переводы и дубли» widget (via transfer_match or the
+            # build_preview transfer-pair detection), so dragging it into a
+            # bulk-categorize card is pure noise. Note: `transfer_match` is
+            # NOT always written for duplicates — `_find_transfer_pair_duplicate`
+            # in build_preview marks status=duplicate without setting that
+            # field, so the explicit status check below is required in
+            # addition to the `transfer_match` test.
+            if status == "duplicate":
+                excluded_row_ids.add(row.id)
+                continue
             # Any row with a transfer_match is already classified as transfer
             # by the cross-session matcher — both the primary side (this
             # statement's row) and the secondary side (auto-created partner).
