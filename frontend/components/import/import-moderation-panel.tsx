@@ -1474,119 +1474,130 @@ function AttentionCardImpl({
 
       {/* Row 3: operation type + sub-pickers + (optional) category + actions */}
       <div className="mt-2 pl-14 flex flex-wrap items-center gap-2 rounded-xl bg-slate-50 px-2 py-2">
-        {/* Главный тип */}
-        <MainOpPicker value={mainOp} onChange={(v) => { setMainOp(v as typeof mainOp); setPickedCatId(null); }} />
-
-        {/* Под-пикер: долг — направление */}
-        {mainOp === 'debt' && (
-          <SubPicker
-            value={debtDir}
-            onChange={(v) => setDebtDir(v as DebtDir)}
-            options={[
-              { value: 'borrowed', label: 'Мне заняли / взял' },
-              { value: 'lent', label: 'Я одолжил' },
-              { value: 'repaid', label: 'Я вернул долг' },
-              { value: 'collected', label: 'Мне вернули' },
-            ]}
-          />
-        )}
-
-        {/* Дебитор / Кредитор — вместо категории для долга */}
-        {needsDebtPartner && (
-          <CompactSelect
-            value={pickedDebtPartnerId != null ? String(pickedDebtPartnerId) : ''}
-            onChange={(v) => setPickedDebtPartnerId(v ? Number(v) : null)}
-            options={debtPartners.map((p) => ({ value: String(p.id), label: p.name }))}
-            placeholder="— дебитор / кредитор —"
-            widthClassName="w-52"
-            ariaLabel="Дебитор или кредитор"
-            createAction={{
-              visible: !createDebtPartnerMutation.isPending,
-              label: '',
-              onClick: (name) => {
-                if (name) createDebtPartnerMutation.mutate(name);
-              },
-            }}
-          />
-        )}
-
-        {/* Под-пикер: инвестиция — покупка/продажа */}
-        {mainOp === 'investment' && (
-          <SubPicker
-            value={investDir}
-            onChange={(v) => setInvestDir(v as InvestDir)}
-            options={[
-              { value: 'buy', label: 'Покупка' },
-              { value: 'sell', label: 'Продажа' },
-            ]}
-          />
-        )}
-
-        {/* Под-пикер: кредитная операция — вид */}
-        {mainOp === 'credit_operation' && (
-          <SubPicker
-            value={creditKind}
-            onChange={(v) => setCreditKind(v as CreditKind)}
-            options={[
-              { value: 'disbursement', label: 'Получение кредита' },
-              { value: 'payment', label: 'Платёж по кредиту' },
-              { value: 'early_repayment', label: 'Досрочное погашение' },
-            ]}
-          />
-        )}
-
-        {/* Поля суммы для платежа по кредиту */}
-        {mainOp === 'credit_operation' && creditKind === 'payment' && (
+        {/* When the row carries a valid split, the main operation type and
+            single category are meaningless — every part has its own type
+            and category, and the apply payload uses split_items, not the
+            top-level operation_type/category_id. Hiding these inputs
+            removes UX noise («Обычная / Здоровье» beside «🔀 Разбито…»)
+            and prevents the user from second-guessing what the apply will
+            actually persist. SplitButton stays so the split can be
+            re-edited; actions stay so apply / exclude / postpone work. */}
+        {!splitValid && (
           <>
-            <input
-              type="text"
-              value={creditPrincipal}
-              onChange={(e) => setCreditPrincipal(e.target.value)}
-              placeholder="Тело долга, ₽"
-              className="h-8 w-32 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
-            />
-            <input
-              type="text"
-              value={creditInterest}
-              onChange={(e) => setCreditInterest(e.target.value)}
-              placeholder="Проценты, ₽"
-              className="h-8 w-28 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
-            />
+            <MainOpPicker value={mainOp} onChange={(v) => { setMainOp(v as typeof mainOp); setPickedCatId(null); }} />
+
+            {/* Под-пикер: долг — направление */}
+            {mainOp === 'debt' && (
+              <SubPicker
+                value={debtDir}
+                onChange={(v) => setDebtDir(v as DebtDir)}
+                options={[
+                  { value: 'borrowed', label: 'Мне заняли / взял' },
+                  { value: 'lent', label: 'Я одолжил' },
+                  { value: 'repaid', label: 'Я вернул долг' },
+                  { value: 'collected', label: 'Мне вернули' },
+                ]}
+              />
+            )}
+
+            {/* Дебитор / Кредитор — вместо категории для долга */}
+            {needsDebtPartner && (
+              <CompactSelect
+                value={pickedDebtPartnerId != null ? String(pickedDebtPartnerId) : ''}
+                onChange={(v) => setPickedDebtPartnerId(v ? Number(v) : null)}
+                options={debtPartners.map((p) => ({ value: String(p.id), label: p.name }))}
+                placeholder="— дебитор / кредитор —"
+                widthClassName="w-52"
+                ariaLabel="Дебитор или кредитор"
+                createAction={{
+                  visible: !createDebtPartnerMutation.isPending,
+                  label: '',
+                  onClick: (name) => {
+                    if (name) createDebtPartnerMutation.mutate(name);
+                  },
+                }}
+              />
+            )}
+
+            {/* Под-пикер: инвестиция — покупка/продажа */}
+            {mainOp === 'investment' && (
+              <SubPicker
+                value={investDir}
+                onChange={(v) => setInvestDir(v as InvestDir)}
+                options={[
+                  { value: 'buy', label: 'Покупка' },
+                  { value: 'sell', label: 'Продажа' },
+                ]}
+              />
+            )}
+
+            {/* Под-пикер: кредитная операция — вид */}
+            {mainOp === 'credit_operation' && (
+              <SubPicker
+                value={creditKind}
+                onChange={(v) => setCreditKind(v as CreditKind)}
+                options={[
+                  { value: 'disbursement', label: 'Получение кредита' },
+                  { value: 'payment', label: 'Платёж по кредиту' },
+                  { value: 'early_repayment', label: 'Досрочное погашение' },
+                ]}
+              />
+            )}
+
+            {/* Поля суммы для платежа по кредиту */}
+            {mainOp === 'credit_operation' && creditKind === 'payment' && (
+              <>
+                <input
+                  type="text"
+                  value={creditPrincipal}
+                  onChange={(e) => setCreditPrincipal(e.target.value)}
+                  placeholder="Тело долга, ₽"
+                  className="h-8 w-32 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
+                />
+                <input
+                  type="text"
+                  value={creditInterest}
+                  onChange={(e) => setCreditInterest(e.target.value)}
+                  placeholder="Проценты, ₽"
+                  className="h-8 w-28 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-900 shadow-sm outline-none focus:border-slate-400"
+                />
+              </>
+            )}
+
+            {/* Категория — только для regular / debt / refund */}
+            {needsCategory ? (
+              <CategoryPicker
+                value={pickedCatId}
+                onChange={setPickedCatId}
+                categories={availableCategories}
+                kindHint={kindFilter}
+              />
+            ) : null}
+
+            {/* Целевой счёт перевода */}
+            {mainOp === 'transfer' && (
+              <CompactSelect
+                value={pickedTargetAccountId ? String(pickedTargetAccountId) : ''}
+                onChange={(v) => setPickedTargetAccountId(v ? Number(v) : null)}
+                options={transferAccounts.map((acc) => ({ value: String(acc.id), label: acc.name }))}
+                placeholder="Куда перевод…"
+                widthClassName="w-48"
+                ariaLabel="Счёт назначения перевода"
+              />
+            )}
+
+            {/* Кредитный счёт — для всех видов credit_operation */}
+            {mainOp === 'credit_operation' && (
+              <CompactSelect
+                value={pickedCreditAccountId ? String(pickedCreditAccountId) : ''}
+                onChange={(v) => setPickedCreditAccountId(v ? Number(v) : null)}
+                options={creditAccounts.map((acc) => ({ value: String(acc.id), label: acc.name }))}
+                placeholder={creditAccounts.length === 0 ? 'Нет кредитных счетов' : 'Какой кредит…'}
+                widthClassName="w-56"
+                ariaLabel="Кредитный счёт"
+              />
+            )}
           </>
-        )}
-
-        {/* Категория — только для regular / debt / refund */}
-        {needsCategory ? (
-          <CategoryPicker
-            value={pickedCatId}
-            onChange={setPickedCatId}
-            categories={availableCategories}
-            kindHint={kindFilter}
-          />
-        ) : null}
-
-        {/* Целевой счёт перевода */}
-        {mainOp === 'transfer' && (
-          <CompactSelect
-            value={pickedTargetAccountId ? String(pickedTargetAccountId) : ''}
-            onChange={(v) => setPickedTargetAccountId(v ? Number(v) : null)}
-            options={transferAccounts.map((acc) => ({ value: String(acc.id), label: acc.name }))}
-            placeholder="Куда перевод…"
-            widthClassName="w-48"
-            ariaLabel="Счёт назначения перевода"
-          />
-        )}
-
-        {/* Кредитный счёт — для всех видов credit_operation */}
-        {mainOp === 'credit_operation' && (
-          <CompactSelect
-            value={pickedCreditAccountId ? String(pickedCreditAccountId) : ''}
-            onChange={(v) => setPickedCreditAccountId(v ? Number(v) : null)}
-            options={creditAccounts.map((acc) => ({ value: String(acc.id), label: acc.name }))}
-            placeholder={creditAccounts.length === 0 ? 'Нет кредитных счетов' : 'Какой кредит…'}
-            widthClassName="w-56"
-            ariaLabel="Кредитный счёт"
-          />
         )}
 
         <div className="ml-auto flex items-center gap-1">

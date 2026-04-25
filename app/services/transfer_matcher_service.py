@@ -209,26 +209,37 @@ class TransferMatcherService:
         self._escalate_orphan_transfers(user_id=user_id)
 
     def _escalate_orphan_transfers(self, *, user_id: int) -> None:
-        """Promote post-matcher orphan transfers to `error`.
+        """Demote post-matcher orphan transfers to `regular`.
 
         A row qualifies if:
           * status IN ('ready', 'warning')  (not committed/duplicate/excluded)
           * operation_type == 'transfer'
           * target_account_id is None (or empty)
-        Uses `ImportService._gate_transfer_integrity` with final=True so the
-        same human-readable issue text is produced as elsewhere.
-        """
-        # Local import to avoid circular dependency (ImportService imports
-        # TransferMatcherService).
-        from app.services.import_service import ImportService
 
+        v1.9 — semantics flip vs v1.0–v1.8: previously we promoted such rows
+        to `error` (§5.2 trigger 6). UX feedback (2026-04-26): «Внешний
+        перевод по номеру телефона …» without a matched pair is almost
+        always a regular outflow (gift / debt / payment to a person), NOT
+        an inter-account transfer. Showing it as a transfer with «Куда
+        перевод…» empty selector forced the user to either fix the row or
+        live with an error — neither matches the actual semantic.
+
+        Now: switch operation_type → 'regular', clear transfer-side fields,
+        flag `was_orphan_transfer=true` so the user can flip it back to
+        transfer manually if it really was inter-account, set status to
+        warning (because category_id is almost always null at this point
+        and the user must pick one). The original §12.1 invariant — a
+        transfer must have both accounts known — is still enforced for
+        rows the user *explicitly* keeps as transfer (handled in the
+        moderator's apply-time validation, not here).
+        """
         rows = (
             self.db.query(ImportRow)
             .join(ImportSession, ImportRow.session_id == ImportSession.id)
             .filter(
                 ImportSession.user_id == user_id,
                 ImportSession.status != "committed",
-                ImportRow.status.in_(("ready", "warning")),
+                ImportRow.status.in_(("ready", "warning", "error")),
             )
             .all()
         )
@@ -239,17 +250,19 @@ class TransferMatcherService:
                 continue
             if nd.get("target_account_id") not in (None, "", 0):
                 continue
-            new_status, new_issues = ImportService._gate_transfer_integrity(
-                normalized=nd,
-                current_status=str(row.status or ""),
-                issues=list(row.error_message.split(" | ") if row.error_message else []),
-                final=True,
-            )
-            if new_status == row.status:
+            # Skip rows the user already touched — once they've picked
+            # transfer + a counter-account explicitly, we shouldn't undo it.
+            # If user_confirmed_at is set with operation_type=transfer and
+            # no target, that's a manual choice we honor (the apply-time
+            # validator catches it separately).
+            if nd.get("user_confirmed_at"):
                 continue
-            row.status = new_status
-            joined = " | ".join(m for m in new_issues if m)
-            row.error_message = joined or None
+            nd["operation_type"] = "regular"
+            nd["was_orphan_transfer"] = True
+            nd.pop("transfer_match", None)
+            row.normalized_data_json = nd
+            row.error_message = None
+            row.status = "warning"
             self.db.add(row)
             touched += 1
         if touched:
