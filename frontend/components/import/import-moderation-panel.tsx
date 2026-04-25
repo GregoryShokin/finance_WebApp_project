@@ -1049,12 +1049,35 @@ function AttentionCardImpl({
     cluster?.bank_mechanics_operation_type ??
     cluster?.account_context_operation_type ??
     refundOp;
-  const [mainOp, setMainOp] = useState<MainOp>(llmToMainOp(llmOp ?? contextOp));
-  const [debtDir, setDebtDir] = useState<DebtDir>('borrowed');
-  const [investDir, setInvestDir] = useState<InvestDir>(llmToInvestDir(llmOp));
-  const [creditKind, setCreditKind] = useState<CreditKind>(llmToCreditKind(llmOp));
-  const [creditPrincipal, setCreditPrincipal] = useState<string>('');
-  const [creditInterest, setCreditInterest] = useState<string>('');
+  // Persisted operation_type from the BD wins over any cluster/LLM hint.
+  // After build_preview the backend writes operation_type into normalized_data,
+  // and after Apply / bulk-apply / commit the user's explicit choice ends up
+  // there too. Without consulting it first, F5 (or any unmount/mount cycle)
+  // re-initializes useState from cluster predictions, visually rolling back
+  // the user's saved decision — and a subsequent Apply click then sends the
+  // stale state back, overwriting the correct DB row.
+  const persistedOp = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.operation_type;
+    return typeof v === 'string' && v ? v : undefined;
+  })();
+  const persistedDebtDirection = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.debt_direction;
+    return v === 'lent' || v === 'borrowed' || v === 'repaid' || v === 'collected' ? v : undefined;
+  })();
+  const persistedPrincipal = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.principal_amount;
+    return v != null ? String(v) : '';
+  })();
+  const persistedInterest = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.interest_amount;
+    return v != null ? String(v) : '';
+  })();
+  const [mainOp, setMainOp] = useState<MainOp>(llmToMainOp(persistedOp ?? llmOp ?? contextOp));
+  const [debtDir, setDebtDir] = useState<DebtDir>(persistedDebtDirection ?? 'borrowed');
+  const [investDir, setInvestDir] = useState<InvestDir>(llmToInvestDir(persistedOp ?? llmOp));
+  const [creditKind, setCreditKind] = useState<CreditKind>(llmToCreditKind(persistedOp ?? llmOp));
+  const [creditPrincipal, setCreditPrincipal] = useState<string>(persistedPrincipal);
+  const [creditInterest, setCreditInterest] = useState<string>(persistedInterest);
   const [pickedCatId, setPickedCatId] = useState<number | null>(suggestedCatId);
   // Credit account (for credit_payment / disbursement / early_repayment) +
   // target account (for transfer). Initialized from normalized_data so re-opens

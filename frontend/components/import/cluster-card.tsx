@@ -30,9 +30,11 @@ import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-sele
 import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 import { AttachToCounterpartyButton } from '@/components/import/attach-counterparty';
 import { CategoryDialog } from '@/components/categories/category-dialog';
+import { DebtPartnerDialog } from '@/components/debt-partners/debt-partner-dialog';
 import { attachRowToCounterparty, bulkApplyCluster, detachImportRowFromCluster } from '@/lib/api/imports';
 import { createCategory } from '@/lib/api/categories';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
+import { createDebtPartner, getDebtPartners } from '@/lib/api/debt-partners';
 import { getAccounts } from '@/lib/api/accounts';
 import type { Account } from '@/types/account';
 import type {
@@ -44,6 +46,7 @@ import type {
 } from '@/types/import';
 import type { Category, CreateCategoryPayload } from '@/types/category';
 import type { Counterparty } from '@/types/counterparty';
+import type { DebtPartner, CreateDebtPartnerPayload } from '@/types/debt-partner';
 
 export type ClusterCardMeta =
   | {
@@ -94,9 +97,11 @@ type RowCreditKind = 'disbursement' | 'payment' | 'early_repayment';
 type RowState = {
   categoryId: number | null;
   counterpartyId: number | null;
+  debtPartnerId: number | null;
   included: boolean;
   categoryEdited: boolean;
   counterpartyEdited: boolean;
+  debtPartnerEdited: boolean;
   operationType: RowOperationType;
   operationTypeEdited: boolean;
   targetAccountId: number | null;
@@ -108,11 +113,14 @@ type RowState = {
   creditInterest: string;
 };
 
-// regular, debt, refund rows sum into categorized spending; transfer /
-// investment / credit_operation are internal moves or instrument purchases —
-// no category is needed (or meaningful) for them.
+// regular, refund rows sum into categorized spending; debt rows reference
+// a DebtPartner instead of a Category (см. CLAUDE.md § Counterparty vs
+// DebtPartner и backend TransactionService._validate_payload — для debt
+// counterparty_id запрещён, нужен debt_partner_id). Transfer / investment /
+// credit_operation — внутренние перемещения или инструменты, категория им
+// тоже не нужна.
 function rowNeedsCategory(op: RowOperationType): boolean {
-  return op === 'regular' || op === 'debt' || op === 'refund';
+  return op === 'regular' || op === 'refund';
 }
 
 function formatMoney(value: string | number): string {
@@ -159,6 +167,11 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
     queryFn: getCounterparties,
   });
   const counterparties: Counterparty[] = counterpartiesQuery.data ?? [];
+  const debtPartnersQuery = useQuery({
+    queryKey: ['debt-partners'],
+    queryFn: getDebtPartners,
+  });
+  const debtPartners: DebtPartner[] = debtPartnersQuery.data ?? [];
 
   // Accounts are needed for per-row transfer/credit sub-pickers inside the
   // inline row editor. We fetch once for the whole card — same cache as
@@ -252,10 +265,13 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
   const subtitle = `${count} операц${count === 1 ? 'ия' : count < 5 ? 'ии' : 'ий'} · ${formatMoney(totalAmount)}`;
 
   function defaultRowState(row?: ImportPreviewRow): RowState {
-    // Derive initial operation type from the row's normalized_data when
-    // available. This preserves the cluster's semantic: a refund row inside
-    // a mixed "Кофе Молоко" card keeps its 'refund' op_type on render;
-    // regular expense rows default to 'regular'.
+    // Derive initial values from the row's normalized_data when available —
+    // it's the strongest signal because backend writes user edits there
+    // (after Apply / bulk-apply / commit). Falling back to bulk-default
+    // only when the row has nothing of its own. Without this, F5 or any
+    // unmount/mount cycle re-renders rows with the cluster-level default,
+    // visually rolling back per-row edits — and any subsequent action then
+    // submits stale state back, overwriting the correct DB row.
     const nd = (row?.normalized_data ?? {}) as Record<string, unknown>;
     const rowOp = String(nd.operation_type ?? '').toLowerCase();
     const rowIsRefund = Boolean(nd.is_refund);
@@ -269,21 +285,33 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
     const initialCreditKind: RowCreditKind =
       rowOp === 'credit_payment' ? 'payment' :
       rowOp === 'credit_early_repayment' ? 'early_repayment' : 'disbursement';
+    const persistedCategoryId = nd.category_id != null ? Number(nd.category_id) : null;
+    const persistedCounterpartyId = nd.counterparty_id != null ? Number(nd.counterparty_id) : null;
+    const persistedDebtDirection = (() => {
+      const v = String(nd.debt_direction ?? '').toLowerCase();
+      return v === 'lent' || v === 'borrowed' || v === 'repaid' || v === 'collected'
+        ? (v as RowDebtDirection)
+        : 'borrowed';
+    })();
+    const persistedPrincipal = nd.principal_amount != null ? String(nd.principal_amount) : '';
+    const persistedInterest = nd.interest_amount != null ? String(nd.interest_amount) : '';
     return {
-      categoryId: bulkCategoryId,
-      counterpartyId: bulkCounterpartyId,
+      categoryId: persistedCategoryId ?? bulkCategoryId,
+      counterpartyId: persistedCounterpartyId ?? bulkCounterpartyId,
+      debtPartnerId: nd.debt_partner_id ? Number(nd.debt_partner_id) : null,
       included: true,
       categoryEdited: false,
       counterpartyEdited: false,
+      debtPartnerEdited: false,
       operationType: initialOp,
       operationTypeEdited: false,
       targetAccountId: nd.target_account_id ? Number(nd.target_account_id) : null,
-      debtDirection: 'borrowed',
+      debtDirection: persistedDebtDirection,
       investDir: initialInvestDir,
       creditKind: initialCreditKind,
       creditAccountId: nd.credit_account_id ? Number(nd.credit_account_id) : null,
-      creditPrincipal: '',
-      creditInterest: '',
+      creditPrincipal: persistedPrincipal,
+      creditInterest: persistedInterest,
     };
   }
 
@@ -324,6 +352,10 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
     updateRowState(rowId, { categoryId, categoryEdited: true });
   }
 
+  function setRowDebtPartner(rowId: number, debtPartnerId: number | null) {
+    updateRowState(rowId, { debtPartnerId, debtPartnerEdited: true });
+  }
+
   // rowNeedsCategory is also used in ClusterRowList so it lives at module level.
 
   function applyBulkToAllIncluded() {
@@ -331,27 +363,62 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
       toast.error('Выбери категорию или контрагента для массового применения');
       return;
     }
+    let appliedCount = 0;
+    let typeFlippedCount = 0;
     setRowState((prev) => {
       const next: Record<number, RowState> = { ...prev };
       for (const row of rows) {
         const current = next[row.id] ?? defaultRowState(row);
         if (!current.included) continue;
-        const shouldApplyCategory = rowNeedsCategory(current.operationType);
+
+        // Picking a bulk category means "these rows all belong in this
+        // category" — which only makes sense for category-using types
+        // (regular / refund / debt). If the system pre-classified some
+        // rows as transfer/investment/credit (common false positive: 19
+        // "Внутрибанковский перевод" rows that are actually salary), flip
+        // them to 'regular' so the category can land. Rows the user
+        // manually edited via the pencil icon keep their chosen type.
+        let nextOp = current.operationType;
+        if (
+          bulkCategoryId != null
+          && !rowNeedsCategory(nextOp)
+          && !current.operationTypeEdited
+        ) {
+          nextOp = 'regular';
+          typeFlippedCount += 1;
+        }
+
+        const opChanged = nextOp !== current.operationType;
+        const shouldApplyCategory = rowNeedsCategory(nextOp);
+
         next[row.id] = {
           ...current,
+          operationType: nextOp,
+          // When flipping away from transfer/credit, clear the fields that
+          // belonged to the previous type so stale IDs don't travel with
+          // the commit payload.
+          ...(opChanged
+            ? { targetAccountId: null, creditAccountId: null }
+            : {}),
           // sticky: don't overwrite fields the user already tweaked individually.
-          // Also skip bulk category for rows whose operation type doesn't use
-          // a category (transfer / investment / credit_operation).
-          categoryId: (!shouldApplyCategory || current.categoryEdited)
-            ? current.categoryId
-            : (bulkCategoryId ?? current.categoryId),
+          // Clear category for rows whose (new) type doesn't use one.
+          categoryId: shouldApplyCategory
+            ? (current.categoryEdited ? current.categoryId : (bulkCategoryId ?? current.categoryId))
+            : null,
           counterpartyId: current.counterpartyEdited
             ? current.counterpartyId
             : (bulkCounterpartyId ?? current.counterpartyId),
         };
+        appliedCount += 1;
       }
       return next;
     });
+    const plural = appliedCount === 1 ? 'строке' : appliedCount < 5 ? 'строкам' : 'строкам';
+    if (typeFlippedCount > 0) {
+      toast.success(`Применено к ${appliedCount} ${plural} (${typeFlippedCount} переключено на «Обычная»)`);
+    } else {
+      toast.success(`Применено к ${appliedCount} ${plural}`);
+    }
   }
 
   // Per-row validation: can this row be sent as part of bulk-apply? Same
@@ -363,8 +430,9 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
     switch (s.operationType) {
       case 'regular':
       case 'refund':
-      case 'debt':
         return s.categoryId != null;
+      case 'debt':
+        return s.debtPartnerId != null;
       case 'transfer':
         return s.targetAccountId != null;
       case 'credit_operation':
@@ -419,6 +487,14 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
         }
         if (s.operationType === 'debt') {
           update.debt_direction = s.debtDirection;
+          // Backend invariant (TransactionService._validate_payload):
+          // operation_type='debt' требует debt_partner_id, отвергает counterparty_id.
+          update.debt_partner_id = s.debtPartnerId;
+          update.counterparty_id = null;
+        } else {
+          // Любой не-debt operation_type отвергает debt_partner_id (тот же
+          // инвариант). Отправляем явный null чтобы стереть прежние правки.
+          update.debt_partner_id = null;
         }
         if (s.operationType === 'credit_operation') {
           update.credit_account_id = s.creditAccountId;
@@ -649,12 +725,14 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
               : null
           }
           setRowCategory={setRowCategory}
+          setRowDebtPartner={setRowDebtPartner}
           updateRowState={updateRowState}
           categories={categories}
           filteredCategories={filteredCategories}
           creditAccounts={creditAccounts}
           transferAccounts={transferAccounts}
           counterparties={counterparties}
+          debtPartners={debtPartners}
           sessionId={sessionId}
           bulkClusters={bulkClusters}
           onAfterAction={onApplied}
@@ -686,12 +764,14 @@ function ClusterRowList({
   toggleRowIncluded,
   detachingRowId,
   setRowCategory,
+  setRowDebtPartner,
   updateRowState,
   categories,
   filteredCategories,
   creditAccounts,
   transferAccounts,
   counterparties,
+  debtPartners,
   sessionId,
   bulkClusters,
   onAfterAction,
@@ -702,12 +782,14 @@ function ClusterRowList({
   toggleRowIncluded: (rowId: number) => void;
   detachingRowId: number | null;
   setRowCategory: (rowId: number, categoryId: number | null) => void;
+  setRowDebtPartner: (rowId: number, debtPartnerId: number | null) => void;
   updateRowState: (rowId: number, patch: Partial<RowState>) => void;
   categories: Category[];
   filteredCategories: Category[];
   creditAccounts: Account[];
   transferAccounts: Account[];
   counterparties: Counterparty[];
+  debtPartners: DebtPartner[];
   sessionId: number;
   bulkClusters?: BulkClustersResponse;
   onAfterAction: () => void;
@@ -746,8 +828,13 @@ function ClusterRowList({
                 </div>
                 <p className="text-xs text-slate-400">#{row.row_index} · {dateOf(row)} · {amountOf(row)}</p>
               </div>
-              {/* Category picker — shown for types that use a category.
-                  For transfer/investment/credit we show a dim label. */}
+              {/* Picker по типу операции:
+                  - regular/refund → категория
+                  - debt           → дебитор/кредитор (DebtPartner)
+                  - transfer/investment/credit_operation → приглушённая надпись
+                  Backend инвариант: для operation_type='debt' counterparty_id
+                  отвергается, требуется debt_partner_id (см. CLAUDE.md
+                  § Counterparty vs DebtPartner). */}
               {rowNeedsCategory(s.operationType) ? (
                 <RowCategoryPicker
                   rowId={row.id}
@@ -756,6 +843,14 @@ function ClusterRowList({
                   categories={s.operationType === 'refund' ? categories.filter((c) => c.kind === 'expense') : filteredCategories}
                   kindHint={s.operationType === 'refund' ? 'expense' : (filteredCategories[0]?.kind ?? 'expense')}
                   onChange={(id) => setRowCategory(row.id, id)}
+                />
+              ) : s.operationType === 'debt' ? (
+                <RowDebtPartnerPicker
+                  rowId={row.id}
+                  value={s.debtPartnerId}
+                  disabled={!s.included}
+                  debtPartners={debtPartners}
+                  onChange={(id) => setRowDebtPartner(row.id, id)}
                 />
               ) : (
                 <span className="w-40 shrink-0 truncate text-right text-xs text-slate-400">
@@ -771,6 +866,7 @@ function ClusterRowList({
                 creditAccounts={creditAccounts}
                 transferAccounts={transferAccounts}
                 counterparties={counterparties}
+                debtPartners={debtPartners}
                 filteredCategories={filteredCategories}
                 onChange={(patch) => updateRowState(row.id, patch)}
               />
@@ -906,6 +1002,96 @@ function RowCategoryPicker({
         isSubmitting={createMutation.isPending}
         onClose={() => setDialogOpen(false)}
         onSubmit={(values) => createMutation.mutate(values)}
+      />
+    </>
+  );
+}
+
+// Per-row debt-partner picker — используется когда строка кластера выбрана
+// как operation_type='debt'. Тот же UX, что и у RowCategoryPicker:
+// type-ahead из списка дебиторов/кредиторов + «+ Новый дебитор/кредитор»
+// через DebtPartnerDialog (вложенный разворот) без ухода со страницы.
+function RowDebtPartnerPicker({
+  rowId,
+  value,
+  disabled,
+  debtPartners,
+  onChange,
+}: {
+  rowId: number;
+  value: number | null;
+  disabled: boolean;
+  debtPartners: DebtPartner[];
+  onChange: (id: number | null) => void;
+}) {
+  const queryClient = useQueryClient();
+  const selected = value != null ? debtPartners.find((p) => p.id === value) ?? null : null;
+  const [query, setQuery] = useState<string>(selected?.name ?? '');
+  const [dialogOpen, setDialogOpen] = useState(false);
+  useEffect(() => {
+    setQuery(selected?.name ?? '');
+  }, [selected]);
+  const items: SearchSelectItem[] = debtPartners.map((p) => ({ value: String(p.id), label: p.name }));
+
+  const trimmed = query.trim();
+  const exactMatch = debtPartners.some((p) => p.name.toLowerCase() === trimmed.toLowerCase());
+  const canCreate = trimmed.length > 0 && !exactMatch;
+
+  const createMutation = useMutation({
+    mutationFn: (payload: CreateDebtPartnerPayload) => createDebtPartner(payload),
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: ['debt-partners'] });
+      setDialogOpen(false);
+      onChange(created.id);
+      setQuery(created.name);
+      toast.success(`Дебитор/кредитор «${created.name}» создан`);
+    },
+    onError: (err: Error) => toast.error(err.message || 'Не удалось создать дебитора/кредитора'),
+  });
+
+  const handleBlur = () => {
+    if (value != null) return;
+    const q = query.trim().toLowerCase();
+    if (!q) return;
+    const match = debtPartners.find((p) => p.name.toLowerCase() === q);
+    if (match) {
+      onChange(match.id);
+      setQuery(match.name);
+    }
+  };
+
+  return (
+    <>
+      <SearchSelect
+        id={`cluster-row-debt-partner-${rowId}`}
+        label="Должник / Кредитор"
+        hideLabel
+        placeholder="— должник / кредитор —"
+        widthClassName="w-40 shrink-0"
+        query={query}
+        setQuery={setQuery}
+        items={items}
+        selectedValue={value != null ? String(value) : null}
+        onSelect={(item) => {
+          onChange(item.value ? Number(item.value) : null);
+          setQuery(item.label);
+        }}
+        onBlur={handleBlur}
+        showAllOnFocus
+        inputSize="sm"
+        disabled={disabled}
+        createAction={{
+          visible: canCreate && !disabled,
+          label: trimmed ? `+ Новый «${trimmed}»` : '+ Новый дебитор/кредитор',
+          onClick: () => setDialogOpen(true),
+        }}
+      />
+      <DebtPartnerDialog
+        open={dialogOpen}
+        draft={{ name: trimmed || undefined }}
+        isSubmitting={createMutation.isPending}
+        onClose={() => setDialogOpen(false)}
+        onSubmit={(payload) => createMutation.mutate(payload)}
       />
     </>
   );
@@ -1055,6 +1241,7 @@ function RowEditButton({
   creditAccounts,
   transferAccounts,
   counterparties: _cp,
+  debtPartners,
   onChange,
 }: {
   row: ImportPreviewRow;
@@ -1065,6 +1252,7 @@ function RowEditButton({
   creditAccounts: Account[];
   transferAccounts: Account[];
   counterparties: Counterparty[];
+  debtPartners: DebtPartner[];
   onChange: (patch: Partial<RowState>) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1095,6 +1283,7 @@ function RowEditButton({
         filteredCategories={filteredCategories}
         creditAccounts={creditAccounts}
         transferAccounts={transferAccounts}
+        debtPartners={debtPartners}
         onChange={(patch) => { onChange(patch); }}
       />
     </>
@@ -1111,6 +1300,7 @@ function RowEditModal({
   filteredCategories,
   creditAccounts,
   transferAccounts,
+  debtPartners,
   onChange,
 }: {
   isOpen: boolean;
@@ -1121,6 +1311,7 @@ function RowEditModal({
   filteredCategories: Category[];
   creditAccounts: Account[];
   transferAccounts: Account[];
+  debtPartners: DebtPartner[];
   onChange: (patch: Partial<RowState>) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -1224,6 +1415,7 @@ function RowEditModal({
           filteredCategories={filteredCategories}
           creditAccounts={creditAccounts}
           transferAccounts={transferAccounts}
+          debtPartners={debtPartners}
           onChange={onChange}
           onClose={onClose}
         />
@@ -1241,6 +1433,7 @@ function RowEditorContent({
   filteredCategories,
   creditAccounts,
   transferAccounts,
+  debtPartners,
   onChange,
   onClose,
 }: {
@@ -1250,6 +1443,7 @@ function RowEditorContent({
   filteredCategories: Category[];
   creditAccounts: Account[];
   transferAccounts: Account[];
+  debtPartners: DebtPartner[];
   onChange: (patch: Partial<RowState>) => void;
   onClose: () => void;
 }) {
@@ -1269,7 +1463,7 @@ function RowEditorContent({
   const opHint: Record<RowOperationType, string> = {
     regular: 'Обычная операция — покупка, услуга, зарплата.',
     transfer: 'Перевод между своими счетами. Категория не нужна.',
-    debt: 'Долг между людьми. Укажи направление и категорию.',
+    debt: 'Долг между людьми. Укажи направление и должника/кредитора.',
     refund: 'Возврат от продавца. Компенсирует расход в той же категории.',
     investment: 'Покупка или продажа инвестиционного инструмента.',
     credit_operation:
@@ -1313,9 +1507,17 @@ function RowEditorContent({
                 type="button"
                 onClick={() => {
                   const patch: Partial<RowState> = { operationType: op, operationTypeEdited: true };
-                  if (op === 'transfer' || op === 'investment' || op === 'credit_operation') {
+                  // Долг не использует категорию — debt_partner_id вместо неё.
+                  // Все остальные не-категорийные типы тоже сбрасывают категорию.
+                  if (op === 'transfer' || op === 'investment' || op === 'credit_operation' || op === 'debt') {
                     patch.categoryId = null;
                     patch.categoryEdited = true;
+                  }
+                  // Любой не-debt тип отбрасывает выбранного должника
+                  // (backend инвариант: debt_partner_id ⇔ operation_type='debt').
+                  if (op !== 'debt') {
+                    patch.debtPartnerId = null;
+                    patch.debtPartnerEdited = true;
                   }
                   onChange(patch);
                 }}
@@ -1402,8 +1604,10 @@ function RowEditorContent({
           </div>
         )}
 
-        {/* Категория — для regular / refund / debt */}
-        {(state.operationType === 'regular' || state.operationType === 'refund' || state.operationType === 'debt') && (
+        {/* Категория — только для regular / refund.
+            Долг использует не категорию, а ссылку на DebtPartner
+            (см. CLAUDE.md § Counterparty vs DebtPartner). */}
+        {(state.operationType === 'regular' || state.operationType === 'refund') && (
           <div className="flex flex-col gap-1.5">
             <label className="text-xs font-medium text-slate-500">Категория</label>
             <RowCategoryPicker
@@ -1413,6 +1617,20 @@ function RowEditorContent({
               categories={availableCategories}
               kindHint={categoryKind}
               onChange={(id) => onChange({ categoryId: id, categoryEdited: true })}
+            />
+          </div>
+        )}
+
+        {/* Должник/Кредитор — только для debt. */}
+        {state.operationType === 'debt' && (
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium text-slate-500">Должник / Кредитор</label>
+            <RowDebtPartnerPicker
+              rowId={row.id}
+              value={state.debtPartnerId}
+              disabled={false}
+              debtPartners={debtPartners}
+              onChange={(id) => onChange({ debtPartnerId: id, debtPartnerEdited: true })}
             />
           </div>
         )}
