@@ -574,12 +574,22 @@ class TestCounterpartyRefundMerge:
         # counterparty_fp_service.resolve_many returns the bindings as-is.
         svc.counterparty_fp_service = MagicMock()
         svc.counterparty_fp_service.resolve_many.return_value = bindings
+        # counterparty_id_service is also queried in _group_by_counterparty
+        # for identifier-based bindings (phone/contract/IBAN). These tests
+        # work with fingerprint-only bindings, so an empty resolver suffices.
+        svc.counterparty_id_service = MagicMock()
+        svc.counterparty_id_service.resolve_many.return_value = {}
         return svc
 
     def test_refund_income_folds_into_expense_card(self):
         # 64 expense operations + 1 refund income operation, both bound to
         # the same counterparty. Expected: ONE counterparty group with
         # count=65, direction='expense', total_amount = gross - refund.
+        # NOTE post-rewrite: this still works, but no longer via a refund-
+        # specific path — a counterparty card unconditionally collects all
+        # bindings of any direction (one card per counterparty). Refund-
+        # income just happens to be income whose `direction` is income but
+        # which lands in the same bucket as the matching expense.
         cp_id = 23
         expense_fp = "ee184aa77eb46323"
         refund_fp = "f1782a30fff516de"
@@ -601,14 +611,15 @@ class TestCounterpartyRefundMerge:
         assert len(groups) == 1
         g = groups[0]
         assert g.counterparty_id == cp_id
-        assert g.direction == "expense"
+        assert g.direction == "expense"  # dominant by count
+        assert g.is_mixed_direction is True
         assert g.count == 65
         assert g.total_amount == Decimal("33575")  # 34275 - 700
         assert set(g.fingerprint_cluster_ids) == {expense_fp, refund_fp}
 
     def test_refund_without_matching_expense_stays_standalone(self):
-        # Refund income group but no expense group for the same counterparty —
-        # merging would lose the card, so we keep it standalone.
+        # Refund income group but no expense group for the same counterparty.
+        # Single-direction → not mixed, direction stays income.
         cp_id = 99
         refund_fp = "orphan-refund"
         refund_cluster = self._mk_cluster(
@@ -623,10 +634,14 @@ class TestCounterpartyRefundMerge:
         assert len(groups) == 1
         assert groups[0].direction == "income"
         assert groups[0].count == 1
+        assert groups[0].is_mixed_direction is False
 
-    def test_regular_income_not_merged_with_expense(self):
-        # If the income group is NOT a refund (e.g., payroll from the same
-        # "bank" counterparty), we keep them separate.
+    def test_regular_income_merged_with_expense_into_one_card(self):
+        # Post-rewrite (spec v1.4 §6.3): a counterparty card is direction-
+        # agnostic. Same person sending you money AND receiving money from
+        # you is one «Отец» card with both sides folded in — splitting them
+        # by direction was misleading because there's only one human, one
+        # relationship.
         cp_id = 77
         expense_fp = "e-fp"
         income_fp = "i-fp"
@@ -639,13 +654,73 @@ class TestCounterpartyRefundMerge:
             count=2, amount="50000",
         )
         bindings = {expense_fp: cp_id, income_fp: cp_id}
-        svc = self._mk_service(cp_id=cp_id, cp_name="Сбер", bindings=bindings)
+        svc = self._mk_service(cp_id=cp_id, cp_name="Отец", bindings=bindings)
 
         groups = svc._group_by_counterparty(
             [expense_cluster, income_cluster], user_id=1,
         )
 
-        assert len(groups) == 2
-        by_dir = {g.direction: g for g in groups}
-        assert by_dir["expense"].count == 5
-        assert by_dir["income"].count == 2
+        assert len(groups) == 1
+        g = groups[0]
+        assert g.counterparty_id == cp_id
+        # Dominant by count is expense (5 > 2).
+        assert g.direction == "expense"
+        assert g.is_mixed_direction is True
+        assert g.count == 7
+        # Display total = expense_sum - income_sum = 1000 - 50000 = -49000
+        # Negative net is OK — UI renders signed value with «доход/расход»
+        # context informed by is_mixed_direction.
+        assert g.total_amount == Decimal("-49000")
+        assert set(g.fingerprint_cluster_ids) == {expense_fp, income_fp}
+
+    def test_mixed_direction_dominant_income_uses_income_label(self):
+        # Same merge rule but with income members dominant by count: the
+        # card's display direction follows dominance, not insertion order.
+        cp_id = 88
+        expense_fp = "e-fp-2"
+        income_fp = "i-fp-2"
+        expense_cluster = self._mk_cluster(
+            fp=expense_fp, direction="expense", is_refund=False,
+            count=2, amount="3000",
+        )
+        income_cluster = self._mk_cluster(
+            fp=income_fp, direction="income", is_refund=False,
+            count=8, amount="120000",
+        )
+        bindings = {expense_fp: cp_id, income_fp: cp_id}
+        svc = self._mk_service(cp_id=cp_id, cp_name="Заказчик", bindings=bindings)
+
+        groups = svc._group_by_counterparty(
+            [expense_cluster, income_cluster], user_id=1,
+        )
+
+        assert len(groups) == 1
+        g = groups[0]
+        assert g.direction == "income"  # 8 > 2
+        assert g.is_mixed_direction is True
+        assert g.count == 10
+        assert g.total_amount == Decimal("117000")  # 120000 - 3000
+
+    def test_pure_expense_card_is_not_marked_mixed(self):
+        # No income members → not mixed, direction = expense.
+        cp_id = 55
+        fp1 = "fp1"
+        fp2 = "fp2"
+        c1 = self._mk_cluster(
+            fp=fp1, direction="expense", is_refund=False,
+            count=10, amount="500",
+        )
+        c2 = self._mk_cluster(
+            fp=fp2, direction="expense", is_refund=False,
+            count=4, amount="200",
+        )
+        bindings = {fp1: cp_id, fp2: cp_id}
+        svc = self._mk_service(cp_id=cp_id, cp_name="Магазин", bindings=bindings)
+
+        groups = svc._group_by_counterparty([c1, c2], user_id=1)
+
+        assert len(groups) == 1
+        assert groups[0].direction == "expense"
+        assert groups[0].is_mixed_direction is False
+        assert groups[0].count == 14
+        assert groups[0].total_amount == Decimal("700")

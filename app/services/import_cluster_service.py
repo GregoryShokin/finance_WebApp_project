@@ -276,6 +276,15 @@ class CounterpartyGroup:
     fingerprint card with a counterparty card (clearer label, history). A
     counterparty binding is always authoritative — it overrides brand
     grouping.
+
+    Direction policy. Fingerprint clusters split by direction (one
+    skeleton + income vs same skeleton + expense are different patterns).
+    Counterparty groups do NOT — one counterparty card collects every
+    binding regardless of direction. Sample case: «Отец» as both a sender
+    (income) and a recipient (expense) of personal transfers — same
+    person, one card. `direction` carries the dominant side by row count
+    (used by the UI for badge rendering), `is_mixed_direction=True`
+    signals the card holds both income and expense members.
     """
 
     counterparty_id: int
@@ -284,6 +293,7 @@ class CounterpartyGroup:
     count: int
     total_amount: Decimal
     fingerprint_cluster_ids: tuple[str, ...]
+    is_mixed_direction: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -293,6 +303,7 @@ class CounterpartyGroup:
             "count": self.count,
             "total_amount": str(self.total_amount),
             "fingerprint_cluster_ids": list(self.fingerprint_cluster_ids),
+            "is_mixed_direction": self.is_mixed_direction,
         }
 
 
@@ -862,60 +873,59 @@ class ImportClusterService:
         )
         cp_by_id = {cp.id: cp for cp in cp_rows}
 
-        # Bucket clusters by (counterparty_id, direction). We keep income and
-        # expense separate as a rule — a counterparty might be both a payroll
-        # source (income) and a service you pay (expense), and conflating
-        # those is misleading.
+        # Bucket clusters by counterparty_id ONLY — direction does NOT split.
+        # One counterparty = one card, regardless of direction. Sample case
+        # «Отец» as both a sender and recipient of personal transfers: same
+        # person, one card, mixed direction. The fingerprint clustering layer
+        # below still splits by direction (one skeleton + income vs same
+        # skeleton + expense are separate fingerprints), but at the
+        # counterparty layer we collapse them.
         #
-        # EXCEPTION — refunds. A refund is income by direction but semantically
-        # an expense compensator: "Отмена операции оплаты KOFEMOLOKO" belongs
-        # under the same "Кофе Молоко" card as the purchases it reverses, not
-        # as a separate income card next door. We detect refund-only income
-        # groups (all member clusters have is_refund=True) and fold them into
-        # the counterparty's expense group. The card's display direction stays
-        # "expense" (so the UI shows expense-kind categories); per-row
-        # operation_type stays "refund" so analytics still net them out.
-        buckets: dict[tuple[int, str], list[Cluster]] = {}
+        # Refund handling is no longer a special case — refund-income simply
+        # joins the expense bucket of the same counterparty like any other
+        # income binding would. The display direction (`direction` field) is
+        # the dominant side by row count; if both income and expense members
+        # exist, `is_mixed_direction=True` so the UI can render a mixed-mode
+        # badge instead of a single-direction one.
+        buckets: dict[int, list[Cluster]] = {}
         for cluster in clusters:
             cp_id = cluster_cp.get(cluster.fingerprint)
             if cp_id is None:
                 continue
             if cp_id not in cp_by_id:
                 continue  # counterparty deleted; ignore binding
-            key = (cp_id, cluster.direction)
-            buckets.setdefault(key, []).append(cluster)
-
-        # Fold refund-only income groups into the matching expense group.
-        for key in list(buckets.keys()):
-            cp_id, direction = key
-            if direction != "income":
-                continue
-            members = buckets[key]
-            if not members or not all(getattr(m, "is_refund", False) for m in members):
-                continue
-            expense_key = (cp_id, "expense")
-            if expense_key not in buckets:
-                # No matching expense group — keep the refund income card
-                # standalone rather than hiding it entirely.
-                continue
-            buckets[expense_key].extend(members)
-            del buckets[key]
+            buckets.setdefault(cp_id, []).append(cluster)
 
         groups: list[CounterpartyGroup] = []
-        for (cp_id, direction), members in buckets.items():
+        for cp_id, members in buckets.items():
             total_count = sum(m.count for m in members)
-            # Net spend for mixed cards: subtract refund member amounts so the
-            # subtitle ("64 операций · 34 275 ₽") reflects what the user
-            # effectively paid, not the gross sum of purchases + refund.
-            refund_amount = sum(
-                (m.total_amount for m in members if getattr(m, "is_refund", False)),
-                Decimal("0"),
+            expense_members = [m for m in members if m.direction == "expense"]
+            income_members = [m for m in members if m.direction == "income"]
+            expense_count = sum(m.count for m in expense_members)
+            income_count = sum(m.count for m in income_members)
+            expense_sum = sum(
+                (m.total_amount for m in expense_members), Decimal("0")
             )
-            gross_amount = sum(
-                (m.total_amount for m in members if not getattr(m, "is_refund", False)),
-                Decimal("0"),
+            income_sum = sum(
+                (m.total_amount for m in income_members), Decimal("0")
             )
-            total_amount = gross_amount - refund_amount
+
+            # Display direction = dominant by row count. Ties go to expense
+            # (cards with as many incomes as expenses are rare; default to
+            # expense so the UI shows expense-kind categories — refund cards
+            # behaved this way before the rewrite).
+            is_mixed = bool(expense_members) and bool(income_members)
+            if expense_count >= income_count:
+                direction = "expense"
+                # Net spend: gross expense minus any income (refunds, partial
+                # repayments). Subtitle shows what the user effectively paid.
+                total_amount = expense_sum - income_sum
+            else:
+                direction = "income"
+                # Net inflow: gross income minus any outflow back to the same
+                # counterparty.
+                total_amount = income_sum - expense_sum
+
             groups.append(CounterpartyGroup(
                 counterparty_id=cp_id,
                 counterparty_name=cp_by_id[cp_id].name,
@@ -923,6 +933,7 @@ class ImportClusterService:
                 count=total_count,
                 total_amount=total_amount,
                 fingerprint_cluster_ids=tuple(m.fingerprint for m in members),
+                is_mixed_direction=is_mixed,
             ))
         groups.sort(key=lambda g: (-g.count, g.counterparty_name))
         return groups
