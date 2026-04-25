@@ -276,12 +276,23 @@ class TestSimpleKeywordFilter:
         self, db, user, regular_account, second_account, matcher,
     ):
         """One side at 23:50 МСК, other at 02:10 МСК next day. Same logical
-        transfer, but in different calendar days. Window must accept it."""
+        transfer, but in different calendar days. Window must accept it.
+
+        Post-v1.10 guard: rows with different skeletons that are hours apart
+        also need a shared identifier (contract_number) — otherwise they
+        could be unrelated coincident events. We add a shared contract via
+        the session's parse_settings to satisfy the guard."""
         from datetime import timedelta
         when_a = datetime(2026, 4, 1, 23, 50, tzinfo=ZoneInfo("Europe/Moscow"))
         when_b = when_a + timedelta(hours=4, minutes=20)  # 02.04 04:10 МСК
         sess_a = _session(db, user, regular_account)
         sess_b = _session(db, user, second_account)
+        # Shared contract — a real cross-bank transfer pair almost always
+        # mentions the same contract / IBAN somewhere; the matcher reads it
+        # from the session's parse_settings as well as per-row tokens.
+        sess_a.parse_settings = {"contract_number": "5452737298"}
+        sess_b.parse_settings = {"contract_number": "5452737298"}
+        db.add(sess_a); db.add(sess_b); db.commit()
         expense = _row(
             db, sess_a, direction="expense", amount="3000.00", when=when_a,
             description="Перевод между своими",
@@ -297,6 +308,36 @@ class TestSimpleKeywordFilter:
         assert expense.status == "ready"
         assert income.status == "duplicate"
         assert (expense.normalized_data_json or {}).get("target_account_id") == second_account.id
+
+    def test_unrelated_skeletons_hours_apart_no_identifier_rejected(
+        self, db, user, regular_account, second_account, matcher,
+    ):
+        """Real-world false positive (sessions 267/270 on 2025-12-21):
+        T-Bank +600 ₽ «Пополнение. Система быстрых платежей» at 19:43,
+        Ozon −600 ₽ «Перевод b53552138318280b…» at 22:38. Same day, same
+        amount, both contain a transfer-keyword, but skeletons are
+        unrelated and no shared identifier — must NOT pair (otherwise the
+        income side gets stuck as duplicate forever and never commits)."""
+        from datetime import timedelta
+        when_a = datetime(2025, 12, 21, 19, 43, tzinfo=ZoneInfo("Europe/Moscow"))
+        when_b = when_a + timedelta(hours=2, minutes=55)
+        sess_a = _session(db, user, regular_account)
+        sess_b = _session(db, user, second_account)
+        income = _row(
+            db, sess_a, direction="income", amount="600.00", when=when_a,
+            description="Пополнение. Система быстрых платежей",
+        )
+        expense = _row(
+            db, sess_b, direction="expense", amount="600.00", when=when_b,
+            description="Перевод b53552138318280b0000110011661101 через",
+        )
+
+        matcher.match_transfers_for_user(user_id=user.id)
+
+        db.refresh(expense); db.refresh(income)
+        # Neither side should have been paired.
+        assert (expense.normalized_data_json or {}).get("target_account_id") in (None, "", 0)
+        assert (income.normalized_data_json or {}).get("target_account_id") in (None, "", 0)
 
     def test_pair_two_calendar_days_apart_is_rejected(
         self, db, user, regular_account, second_account, matcher,

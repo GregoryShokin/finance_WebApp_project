@@ -518,6 +518,44 @@ class TransferMatcherService:
         ):
             return 0.0
 
+        # v1.10 — skeleton/identifier guard analogous to §8.6 duplicate-
+        # detection. Two rows with completely unrelated skeletons that
+        # only share a transfer keyword and a coincident amount are NOT
+        # a pair when they're hours apart: e.g. «пополнение система
+        # быстрых платежей» +600₽ on T-Bank at 19:43 and «перевод
+        # b53552138318280b0000110011661101 через…» −600₽ on Ozon at 22:38
+        # — same day, same amount, both contain a transfer keyword, but
+        # they're independent events. Without this guard the matcher
+        # silently glued them together and the income side stayed
+        # `duplicate` forever.
+        #
+        # Real cross-bank mirror pairs share at least one of:
+        #   (a) identical skeleton (banks rarely phrase mirrors identically);
+        #   (b) a shared identifier (contract / phone / IBAN);
+        #   (c) effectively the same timestamp — banks book both legs of a
+        #       single internal transfer with the SAME timestamp (delta
+        #       under one minute), which is the strongest signal we have
+        #       in the absence of (a) or (b).
+        #
+        # If none of (a)/(b)/(c) holds — reject. This keeps legit exact-
+        # twin pairs (KION / Ya-Bank case from v1.2: diff_seconds == 0,
+        # different skeletons, no contract) untouched.
+        skel_a = (a.row_skeleton or "").strip().lower()
+        skel_b = (b.row_skeleton or "").strip().lower()
+        same_skeleton = bool(skel_a) and skel_a == skel_b
+        shared_contract = bool(
+            a.contract_number
+            and b.contract_number
+            and a.contract_number == b.contract_number
+        )
+        nearly_simultaneous = diff_seconds <= 60
+        if (
+            skel_a and skel_b and not same_skeleton
+            and not shared_contract
+            and not nearly_simultaneous
+        ):
+            return 0.0
+
         # Часы остаются в скоринге как тай-брейкер: чем ближе по времени, тем
         # выше уверенность. Для пар в один календарный день — старая шкала.
         # Для пар в соседних днях (diff_days == 1) — отдельная ступень 0.80,
