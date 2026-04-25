@@ -31,7 +31,8 @@ import { ExpandableCard } from '@/components/dashboard-new/expandable-card';
 import { AttachToCounterpartyButton } from '@/components/import/attach-counterparty';
 import { CategoryDialog } from '@/components/categories/category-dialog';
 import { DebtPartnerDialog } from '@/components/debt-partners/debt-partner-dialog';
-import { attachRowToCounterparty, bulkApplyCluster, detachImportRowFromCluster, excludeImportRow, parkImportRow } from '@/lib/api/imports';
+import { attachRowToCounterparty, bulkApplyCluster, detachImportRowFromCluster, excludeImportRow, parkImportRow, updateImportRow } from '@/lib/api/imports';
+import { SplitModal, SplitEditor, makeEmptySplitPart, type SplitPart } from '@/components/import/import-moderation-panel';
 import { createCategory } from '@/lib/api/categories';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
 import { createDebtPartner, getDebtPartners } from '@/lib/api/debt-partners';
@@ -842,6 +843,9 @@ function ClusterRowList({
     >
       {rows.map((row) => {
         const s = getRowState(row.id);
+        const nd = (row.normalized_data || {}) as Record<string, any>;
+        const persistedSplit: any[] = Array.isArray(nd.split_items) ? nd.split_items : [];
+        const hasSplit = persistedSplit.length >= 2;
         return (
           <div
             key={row.id}
@@ -860,18 +864,32 @@ function ClusterRowList({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <p className="truncate text-slate-800">{descriptionOf(row)}</p>
-                  <RowOpTypeBadge op={s.operationType} isRefundRowFallback={isRefundRow(row)} />
+                  {hasSplit ? (
+                    <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+                      🔀 Разбито на {persistedSplit.length}
+                    </span>
+                  ) : (
+                    <RowOpTypeBadge op={s.operationType} isRefundRowFallback={isRefundRow(row)} />
+                  )}
                 </div>
                 <p className="text-xs text-slate-400">#{row.row_index} · {dateOf(row)} · {amountOf(row)}</p>
               </div>
               {/* Picker по типу операции:
+                  - split-row    → плитки частей вместо category/debt picker
                   - regular/refund → категория
                   - debt           → дебитор/кредитор (DebtPartner)
                   - transfer/investment/credit_operation → приглушённая надпись
                   Backend инвариант: для operation_type='debt' counterparty_id
                   отвергается, требуется debt_partner_id (см. CLAUDE.md
                   § Counterparty vs DebtPartner). */}
-              {rowNeedsCategory(s.operationType) ? (
+              {hasSplit ? (
+                <SplitSummaryChips
+                  parts={persistedSplit}
+                  categories={categories}
+                  transferAccounts={transferAccounts}
+                  debtPartners={debtPartners}
+                />
+              ) : rowNeedsCategory(s.operationType) ? (
                 <RowCategoryPicker
                   rowId={row.id}
                   value={s.categoryId}
@@ -893,18 +911,27 @@ function ClusterRowList({
                   категория не нужна
                 </span>
               )}
-              {/* Edit-type button — opens FLIP modal exactly like "add to counterparty" */}
-              <RowEditButton
+              {/* Edit-type button — hidden when split is active (per-part type/category lives in the split parts themselves) */}
+              {!hasSplit && (
+                <RowEditButton
+                  row={row}
+                  state={s}
+                  disabled={!s.included}
+                  categories={categories}
+                  creditAccounts={creditAccounts}
+                  transferAccounts={transferAccounts}
+                  counterparties={counterparties}
+                  debtPartners={debtPartners}
+                  filteredCategories={filteredCategories}
+                  onChange={(patch) => updateRowState(row.id, patch)}
+                />
+              )}
+              <RowSplitButton
                 row={row}
-                state={s}
                 disabled={!s.included}
                 categories={categories}
-                creditAccounts={creditAccounts}
-                transferAccounts={transferAccounts}
-                counterparties={counterparties}
-                debtPartners={debtPartners}
-                filteredCategories={filteredCategories}
-                onChange={(patch) => updateRowState(row.id, patch)}
+                accounts={transferAccounts}
+                onAfterAction={onAfterAction}
               />
               <RowAttachToCounterpartyButton
                 row={row}
@@ -991,6 +1018,205 @@ function RowExcludeParkButtons({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Per-row split button + modal inside a cluster card (Этап 2 · spec §6.3). */
+function RowSplitButton({
+  row,
+  disabled,
+  categories,
+  accounts,
+  onAfterAction,
+}: {
+  row: ImportPreviewRow;
+  disabled: boolean;
+  categories: Category[];
+  accounts: Account[];
+  onAfterAction: () => void;
+}) {
+  const nd = (row.normalized_data || {}) as Record<string, any>;
+  const sourceAmount = Math.abs(parseFloat(String(nd.amount ?? 0)) || 0);
+  const direction: 'income' | 'expense' = (() => {
+    const d = String(nd.direction ?? nd.type ?? 'expense');
+    return d === 'income' ? 'income' : 'expense';
+  })();
+  const description = String(nd.description ?? nd.normalized_description ?? '');
+  const excludeAccountId = nd.account_id != null ? Number(nd.account_id) : null;
+
+  // Hydrate parts from persisted split_items if present, otherwise start
+  // with two empty halves the user can fill in.
+  const persisted: any[] = Array.isArray(nd.split_items) ? nd.split_items : [];
+  const initialParts: SplitPart[] = persisted.length >= 2
+    ? persisted.map((p) => ({
+        operation_type: (p.operation_type === 'transfer' || p.operation_type === 'refund' || p.operation_type === 'debt') ? p.operation_type : 'regular',
+        amount: p.amount != null ? String(p.amount) : '',
+        category_id: p.category_id != null ? Number(p.category_id) : null,
+        target_account_id: p.target_account_id != null ? Number(p.target_account_id) : null,
+        debt_direction: (p.debt_direction === 'lent' || p.debt_direction === 'repaid' || p.debt_direction === 'collected') ? p.debt_direction : 'borrowed',
+        debt_partner_id: p.debt_partner_id != null ? Number(p.debt_partner_id) : null,
+        description: String(p.description ?? ''),
+      }))
+    : [makeEmptySplitPart(), makeEmptySplitPart()];
+
+  const [open, setOpen] = useState(false);
+  const [parts, setParts] = useState<SplitPart[]>(initialParts);
+
+  const splitSum = parts.reduce((acc, p) => acc + (parseFloat(p.amount.replace(',', '.')) || 0), 0);
+  const remaining = +(sourceAmount - splitSum).toFixed(2);
+  const valid = parts.length >= 2 && Math.abs(remaining) < 0.01 && parts.every((p) => {
+    const amt = parseFloat(p.amount.replace(',', '.')) || 0;
+    if (amt <= 0) return false;
+    if ((p.operation_type === 'regular' || p.operation_type === 'refund') && !p.category_id) return false;
+    if (p.operation_type === 'transfer' && !p.target_account_id) return false;
+    if (p.operation_type === 'debt' && !p.debt_partner_id) return false;
+    return true;
+  });
+
+  const categoryById = useMemo(() => {
+    const m = new Map<number, Category>();
+    for (const c of categories) m.set(c.id, c);
+    return m;
+  }, [categories]);
+  const accountById = useMemo(() => {
+    const m = new Map<number, Account>();
+    for (const a of accounts) m.set(a.id, a);
+    return m;
+  }, [accounts]);
+
+  const saveMutation = useMutation({
+    mutationFn: () => {
+      // The frontend's narrow ImportSplitItem type doesn't model all the
+      // per-part fields the backend accepts (operation_type, target_account_id,
+      // debt_direction, debt_partner_id). Use the Record-shaped payload —
+      // backend ImportSplitItemRequest validates the rich shape. Same trick
+      // is used by AttentionCardImpl's apply mutation.
+      const payload: Record<string, unknown> = {
+        type: direction,
+        operation_type: 'regular',
+        action: 'confirm',
+        split_items: parts.map((p) => ({
+          operation_type: p.operation_type,
+          amount: parseFloat(p.amount.replace(',', '.')) || 0,
+          category_id: p.operation_type === 'debt' ? null : p.category_id,
+          target_account_id: p.target_account_id,
+          debt_direction: p.operation_type === 'debt' ? p.debt_direction : null,
+          debt_partner_id: p.operation_type === 'debt' ? p.debt_partner_id : null,
+          description: p.description || null,
+        })),
+      };
+      return updateImportRow(row.id, payload as any);
+    },
+    onSuccess: () => { toast.success(`Разбивка сохранена для #${row.row_index}`); setOpen(false); onAfterAction(); },
+    onError: (e: Error) => toast.error(`Не удалось сохранить разбивку: ${e.message}`),
+  });
+
+  const hasDraft = parts.some((p) => p.amount && parseFloat(p.amount.replace(',', '.')) > 0);
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={(e) => {
+          (window as any).__lastSplitClick = { x: e.clientX, y: e.clientY };
+          setOpen(true);
+        }}
+        className={`flex size-7 shrink-0 items-center justify-center rounded-md transition-colors disabled:opacity-30 ${
+          hasDraft
+            ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'
+            : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+        }`}
+        title={hasDraft ? 'Изменить разбивку' : 'Разделить операцию на части'}
+      >
+        <span className="text-xs">🔀</span>
+      </button>
+
+      <SplitModal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        sourceRow={{ amount: sourceAmount, direction, description }}
+      >
+        <SplitEditor
+          parts={parts}
+          setParts={setParts}
+          totalAmount={sourceAmount}
+          remaining={remaining}
+          direction={direction}
+          categoryById={categoryById}
+          accountById={accountById}
+          excludeAccountId={excludeAccountId}
+        />
+        <div className="mt-4 flex items-center justify-end gap-2 border-t border-slate-100 pt-4">
+          <Button variant="secondary" size="sm" onClick={() => setOpen(false)}>
+            Отмена
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={!valid || saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+            title={valid ? 'Сохранить разбивку' : 'Сначала распредели всю сумму'}
+          >
+            {saveMutation.isPending ? 'Сохранение…' : 'Сохранить разбивку'}
+          </Button>
+        </div>
+      </SplitModal>
+    </>
+  );
+}
+
+/** Compact summary chips for a persisted split inside a cluster row. */
+function SplitSummaryChips({
+  parts,
+  categories,
+  transferAccounts,
+  debtPartners,
+}: {
+  parts: any[];
+  categories: Category[];
+  transferAccounts: Account[];
+  debtPartners: DebtPartner[];
+}) {
+  const catById = useMemo(() => {
+    const m = new Map<number, Category>();
+    for (const c of categories) m.set(c.id, c);
+    return m;
+  }, [categories]);
+  const accById = useMemo(() => {
+    const m = new Map<number, Account>();
+    for (const a of transferAccounts) m.set(a.id, a);
+    return m;
+  }, [transferAccounts]);
+  const dpById = useMemo(() => {
+    const m = new Map<number, DebtPartner>();
+    for (const d of debtPartners) m.set(d.id, d);
+    return m;
+  }, [debtPartners]);
+
+  return (
+    <div className="flex w-72 shrink-0 flex-wrap items-center justify-end gap-1 text-[11px]">
+      {parts.map((p, i) => {
+        const opType = String(p.operation_type ?? 'regular');
+        const amt = p.amount != null ? Number(p.amount) : 0;
+        let label = '—';
+        if (opType === 'transfer') {
+          const tgt = p.target_account_id != null ? accById.get(Number(p.target_account_id)) : null;
+          label = tgt ? `→ ${tgt.name}` : '→ счёт';
+        } else if (opType === 'debt') {
+          const dp = p.debt_partner_id != null ? dpById.get(Number(p.debt_partner_id)) : null;
+          label = dp ? `Долг · ${dp.name}` : 'Долг';
+        } else {
+          const cat = p.category_id != null ? catById.get(Number(p.category_id)) : null;
+          label = cat?.name ?? '—';
+        }
+        return (
+          <span key={i} className="rounded bg-indigo-50 px-1.5 py-0.5 text-indigo-900">
+            {amt.toFixed(0)} ₽ · {label}
+          </span>
+        );
+      })}
     </div>
   );
 }

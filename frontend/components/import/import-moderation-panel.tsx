@@ -91,6 +91,31 @@ type FeedRow = {
   isDetachedFromCluster: boolean;  // normalized_data.detached_from_cluster — user kicked it out of a bulk cluster
 };
 
+// Module-level split-part type so cluster-card.tsx can reuse the same shape
+// when offering per-row split inside a bulk cluster. Kept identical to the
+// original local definition in AttentionCardImpl.
+export type SplitPart = {
+  operation_type: 'regular' | 'transfer' | 'refund' | 'debt';
+  amount: string;
+  category_id: number | null;
+  target_account_id: number | null;
+  debt_direction: 'borrowed' | 'lent' | 'repaid' | 'collected';
+  debt_partner_id: number | null;
+  description: string;
+};
+
+export function makeEmptySplitPart(): SplitPart {
+  return {
+    operation_type: 'regular',
+    amount: '',
+    category_id: null,
+    target_account_id: null,
+    debt_direction: 'borrowed',
+    debt_partner_id: null,
+    description: '',
+  };
+}
+
 export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
   const queryClient = useQueryClient();
 
@@ -1168,28 +1193,11 @@ function AttentionCardImpl({
   );
 
   // ── Разбивка на части (split) ──────────────────────────────────────────────
-  // Каждая часть — мини-транзакция со своим типом, суммой и нужными полями.
-  // Сумма частей должна точно совпадать с суммой исходной строки.
-  type SplitPart = {
-    operation_type: 'regular' | 'transfer' | 'refund' | 'debt';
-    amount: string;
-    category_id: number | null;
-    target_account_id: number | null;
-    debt_direction: 'borrowed' | 'lent' | 'repaid' | 'collected';
-    debt_partner_id: number | null;
-    description: string;
-  };
-  const emptyPart = (): SplitPart => ({
-    operation_type: 'regular',
-    amount: '',
-    category_id: null,
-    target_account_id: null,
-    debt_direction: 'borrowed',
-    debt_partner_id: null,
-    description: '',
-  });
+  // SplitPart / makeEmptySplitPart живут на module level (см. вверху файла) и
+  // экспортируются — cluster-card.tsx переиспользует ту же модель для
+  // per-row split внутри bulk-карточки.
   const [splitOpen, setSplitOpen] = useState<boolean>(false);
-  const [splitParts, setSplitParts] = useState<SplitPart[]>(() => [emptyPart(), emptyPart()]);
+  const [splitParts, setSplitParts] = useState<SplitPart[]>(() => [makeEmptySplitPart(), makeEmptySplitPart()]);
   const totalAmount = Math.abs(parseFloat(amount.replace(',', '.')) || 0);
   const splitSum = splitParts.reduce((acc, p) => acc + (parseFloat(p.amount.replace(',', '.')) || 0), 0);
   const splitRemaining = +(totalAmount - splitSum).toFixed(2);
@@ -1760,7 +1768,7 @@ function SplitButton({ active, onClick }: { active: boolean; onClick: () => void
 // Split modal — FLIP-анимация из точки клика, как у дашборда expandable-card
 // ───────────────────────────────────────────────────────────────────────────
 
-function SplitModal({
+export function SplitModal({
   isOpen,
   onClose,
   sourceRow,
@@ -1904,7 +1912,7 @@ function SplitModal({
 // Split editor — несколько частей, каждая со своим типом
 // ───────────────────────────────────────────────────────────────────────────
 
-function SplitEditor({
+export function SplitEditor({
   parts,
   setParts,
   totalAmount,
