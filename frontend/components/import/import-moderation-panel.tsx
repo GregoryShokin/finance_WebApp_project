@@ -255,8 +255,21 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
   // cluster «Нужен ответ» is the «ложная уверенность» the spec warns against.
   // auto_trust always wins (it's a stricter gate that already requires
   // identifier match + ≥5 confirms + 0 rejections + confidence ≥ 0.99).
+  //
+  // EXCEPTION (spec §5.4): explicit individual confirm beats trust_zone.
+  // When the user opens a warning row and clicks «Применить», backend stamps
+  // `normalized_data.user_confirmed_at` — that's a full-touch signal which
+  // must survive any subsequent cluster recomputation. Without this, the
+  // user keeps re-confirming the same row after every refresh because the
+  // honesty gate keeps shoving it back into attention even though the user
+  // has already answered for it.
+  const wasUserConfirmed = (f: FeedRow): boolean => {
+    const v = (f.row.normalized_data as Record<string, unknown> | undefined)?.user_confirmed_at;
+    return typeof v === 'string' && v.length > 0;
+  };
   const isConfirmedOrAuto = (f: FeedRow) =>
     f.cluster?.auto_trust === true ||
+    wasUserConfirmed(f) ||
     (f.row.status === 'ready' && f.cluster?.trust_zone !== 'red');
   // Confirmed rows go into their own tile (ExpandableCard), attention rows stay in the inline list.
   const confirmedFeed = remainingFeed.filter((f) => isConfirmedOrAuto(f))
@@ -971,7 +984,16 @@ function AttentionCardImpl({
   // §1.2: same honesty gate as the bucket filter above. A row in the
   // attention bucket because its cluster went red must not still wear the
   // «✓ Проверено» badge inside the card.
-  const isConfirmed = row.status === 'ready' && cluster?.trust_zone !== 'red';
+  // EXCEPTION (spec §5.4): explicit individual confirm beats trust_zone —
+  // see `isConfirmedOrAuto` above for the full rationale. user_confirmed_at
+  // is set by the backend on Apply and persists across refreshes.
+  const wasUserConfirmedRow = (() => {
+    const v = (row.normalized_data as Record<string, unknown> | undefined)?.user_confirmed_at;
+    return typeof v === 'string' && v.length > 0;
+  })();
+  const isConfirmed =
+    wasUserConfirmedRow ||
+    (row.status === 'ready' && cluster?.trust_zone !== 'red');
   // Auto-trust rows start collapsed; confirmed rows also collapse after apply.
   const [collapsed, setCollapsed] = useState(isAutoTrust);
   const zone = cluster?.trust_zone ?? 'yellow';
