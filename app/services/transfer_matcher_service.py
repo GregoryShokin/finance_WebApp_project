@@ -174,6 +174,79 @@ class TransferMatcherService:
         assignments = self._greedy_assign(pairs)
         self._apply_assignments(assignments, user_id)
 
+        # Second pass: mark import rows as duplicates when a committed transaction
+        # already covers the same account/direction/amount (e.g. phantom income
+        # created when the other side of a transfer was committed earlier).
+        already_assigned = {
+            row_id
+            for a, b, _ in assignments
+            for row_id in [a.row_id, b.row_id]
+            if row_id is not None
+        }
+        if date_range:
+            self._detect_committed_duplicates(
+                user_id=user_id,
+                active_candidates=active_candidates,
+                date_from=date_range[0],
+                date_to=date_range[1],
+                skip_row_ids=already_assigned,
+            )
+
+        # Post-matcher §12.1 cleanup: any remaining row that is
+        # operation_type='transfer' AND target_account_id IS None has had
+        # its last automated chance to find a pair. Escalate to `error` via
+        # the same gate the moderator UI uses (final=True). This restores
+        # §5.2 trigger 6 — orphan transfer is a data-integrity error — but
+        # only AFTER the matcher had a fair chance to fill in target.
+        self._escalate_orphan_transfers(user_id=user_id)
+
+    def _escalate_orphan_transfers(self, *, user_id: int) -> None:
+        """Promote post-matcher orphan transfers to `error`.
+
+        A row qualifies if:
+          * status IN ('ready', 'warning')  (not committed/duplicate/excluded)
+          * operation_type == 'transfer'
+          * target_account_id is None (or empty)
+        Uses `ImportService._gate_transfer_integrity` with final=True so the
+        same human-readable issue text is produced as elsewhere.
+        """
+        # Local import to avoid circular dependency (ImportService imports
+        # TransferMatcherService).
+        from app.services.import_service import ImportService
+
+        rows = (
+            self.db.query(ImportRow)
+            .join(ImportSession, ImportRow.session_id == ImportSession.id)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.status != "committed",
+                ImportRow.status.in_(("ready", "warning")),
+            )
+            .all()
+        )
+        touched = 0
+        for row in rows:
+            nd: dict = dict(row.normalized_data_json or {})
+            if str(nd.get("operation_type") or "") != "transfer":
+                continue
+            if nd.get("target_account_id") not in (None, "", 0):
+                continue
+            new_status, new_issues = ImportService._gate_transfer_integrity(
+                normalized=nd,
+                current_status=str(row.status or ""),
+                issues=list(row.error_message.split(" | ") if row.error_message else []),
+                final=True,
+            )
+            if new_status == row.status:
+                continue
+            row.status = new_status
+            joined = " | ".join(m for m in new_issues if m)
+            row.error_message = joined or None
+            self.db.add(row)
+            touched += 1
+        if touched:
+            self.db.flush()
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
@@ -516,6 +589,97 @@ class TransferMatcherService:
             # committing the expense side auto-creates this side as the transfer pair.
             row.status = "duplicate" if is_secondary else "ready"
 
+            self.db.add(row)
+
+        self.db.flush()
+
+    # ------------------------------------------------------------------
+    # Same-account duplicate detection
+    # ------------------------------------------------------------------
+
+    def _detect_committed_duplicates(
+        self,
+        *,
+        user_id: int,
+        active_candidates: list[_Candidate],
+        date_from: datetime,
+        date_to: datetime,
+        skip_row_ids: set[int],
+    ) -> None:
+        """Mark import rows as 'duplicate' when a committed transaction on the
+        SAME account covers the same amount + direction within ±2 days.
+
+        This handles the common case where the other side of a cross-account
+        transfer was already committed (e.g. account A sent money to account B;
+        when account B's statement is imported, those income rows are duplicates
+        of the phantom income transaction created during account A's import).
+        """
+        from datetime import timezone as _tz
+        buffer = timedelta(days=2)
+        df_aware = date_from.replace(tzinfo=_tz.utc) if date_from.tzinfo is None else date_from
+        dt_aware = (date_to + buffer).replace(tzinfo=_tz.utc) if (date_to + buffer).tzinfo is None else (date_to + buffer)
+
+        # Load ALL committed transactions in the date range, including already-paired ones.
+        all_txs = (
+            self.db.query(TransactionModel)
+            .filter(
+                TransactionModel.user_id == user_id,
+                TransactionModel.transaction_date >= df_aware - buffer,
+                TransactionModel.transaction_date <= dt_aware,
+            )
+            .all()
+        )
+
+        # Build a lookup: (account_id, direction, amount) → list of (tx, parsed_date)
+        committed_index: dict[tuple, list[tuple[TransactionModel, datetime]]] = {}
+        for tx in all_txs:
+            parsed = self._parse_datetime(tx.transaction_date)
+            if parsed is None:
+                continue
+            direction = "income" if tx.type == "income" else "expense"
+            key = (tx.account_id, direction, tx.amount)
+            committed_index.setdefault(key, []).append((tx, parsed))
+
+        # Match each active candidate against same-account committed txs.
+        rows_to_mark: dict[int, TransactionModel] = {}
+        for cand in active_candidates:
+            if cand.row_id is None or cand.row_id in skip_row_ids:
+                continue
+            key = (cand.account_id, cand.direction, cand.amount)
+            committed_matches = committed_index.get(key, [])
+            for tx, tx_date in committed_matches:
+                diff_seconds = abs((cand.date - tx_date).total_seconds())
+                if diff_seconds <= buffer.total_seconds():
+                    rows_to_mark[cand.row_id] = tx
+                    break
+
+        if not rows_to_mark:
+            return
+
+        rows = (
+            self.db.query(ImportRow)
+            .filter(ImportRow.id.in_(rows_to_mark.keys()))
+            .all()
+        )
+        accounts = {acc.id: acc for acc in self.account_repo.list_by_user(user_id)}
+
+        for row in rows:
+            if str(row.status or "") in ("committed", "skipped", "parked"):
+                continue
+            tx = rows_to_mark[row.id]
+            nd: dict = dict(row.normalized_data_json or {})
+            other_account = accounts.get(tx.target_account_id or tx.account_id)
+            nd["transfer_match"] = {
+                "matched_row_id": None,
+                "matched_tx_id": tx.id,
+                "matched_account_id": tx.account_id,
+                "matched_account_name": other_account.name if other_account else None,
+                "match_confidence": 0.95,
+                "match_source": "committed_tx_duplicate",
+                "is_secondary": True,
+            }
+            row.normalized_data_json = nd
+            row.status = "duplicate"
             self.db.add(row)
 
         self.db.flush()

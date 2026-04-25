@@ -1355,16 +1355,25 @@ class ImportService:
         normalized: dict[str, Any],
         current_status: str,
         issues: list[str],
+        final: bool = False,
     ) -> tuple[str, list[str]]:
         """§12.1 / §5.2 v1.1 trigger 6 — transfer with only one known account
-        is forbidden.
+        is forbidden in a final state.
 
-        Called after the preview loop has resolved `account_id` and
-        `target_account_id` for an `operation_type='transfer'` row. If either
-        side is missing, promote the row to `error` with a human-readable
-        issue. Do NOT silently demote `operation_type` to `regular` — that
-        hides the problem from the moderator UI and lets a half-transfer
-        slip into a regular-expense commit, breaking balances.
+        Two-stage:
+          * `final=False` (preview, before the async transfer-matcher runs):
+            escalate to `warning`. The cross-session matcher
+            (`schedule_transfer_match`, debounced ~3s) only sees rows in
+            ready/warning, so we MUST stay out of `error` long enough for it
+            to attempt pairing. Premature `error` blocked the matcher and
+            broke Tinkoff intra-bank transfers (orphan + missed-pair regression).
+          * `final=True` (post-matcher cleanup, individual edits, commit
+            guard): escalate to `error`. After the matcher's last attempt,
+            a still-orphan transfer is a real §12.1 violation.
+
+        Either way, do NOT silently demote `operation_type` to `regular` —
+        that hid the problem in the silent-demotion era and let half-transfers
+        commit as regular expenses.
 
         Pure function: no DB access, no side effects beyond the returned
         `(status, issues)` tuple. Unit-tested directly.
@@ -1393,11 +1402,18 @@ class ImportService:
         next_issues = list(issues)
         if msg not in next_issues:
             next_issues.append(msg)
-        # §5.2 v1.1: error is sticky — never downgrade. `current_status`
-        # might already be `duplicate` (terminal), leave it.
-        if current_status == "duplicate":
+
+        # §5.2 / §8.3: terminal states stick. `duplicate` is terminal-ish;
+        # `error` only deepens (never softens to warning).
+        if current_status in ("duplicate", "error"):
             return current_status, next_issues
-        return "error", next_issues
+
+        target_status = "error" if final else "warning"
+        # Status priority: ready < warning < error. Don't downgrade.
+        priority = {"ready": 0, "skipped": 0, "warning": 1, "error": 2}
+        if priority.get(target_status, 0) <= priority.get(current_status, 0):
+            return current_status, next_issues
+        return target_status, next_issues
 
     def _validate_manual_row(self, *, normalized: dict[str, Any], current_status: str, issues: list[str], allow_ready_status: bool = True) -> tuple[str, list[str]]:
         status = current_status
@@ -2051,10 +2067,15 @@ class ImportService:
                 _raw_account_id = normalized.get("account_id")
                 if _raw_account_id in (None, "", 0):
                     if current_operation_type == "transfer":
-                        # §12.1 / §5.2 (v1.1): transfer needs BOTH accounts; a
-                        # missing side is a data-integrity error, not a warning.
+                        # §12.1 + matcher window (PR2): keep at warning during
+                        # the preview pass so the debounced cross-session
+                        # matcher can still see this row (it filters by
+                        # status IN (ready, warning)). Post-matcher cleanup
+                        # promotes truly orphan transfers to error via the
+                        # `final=True` call to `_gate_transfer_integrity`.
                         issues.append("РќРµ СѓРґР°Р»РѕСЃСЊ РѕРїСЂРµРґРµР»РёС‚СЊ СЃС‡С‘С‚ РёР· РІС‹РїРёСЃРєРё вЂ” СѓРєР°Р¶Рё РІСЂСѓС‡РЅСѓСЋ.")
-                        status = "error"
+                        if status not in ("error", "duplicate"):
+                            status = "warning"
                     current_account_id = 0
                 else:
                     current_account_id = int(_raw_account_id)
@@ -2343,6 +2364,31 @@ class ImportService:
                 continue
 
             normalized = row.normalized_data or {}
+
+            # §12.1 commit-time guard: a transfer without both accounts must
+            # not commit, regardless of how the row got here (warning with a
+            # touch flag, ready from a stale cache, manual edit). Run the
+            # gate with final=True — same humane reason text as preview &
+            # post-matcher paths.
+            gate_status, gate_issues = self._gate_transfer_integrity(
+                normalized=normalized,
+                current_status=row_status,
+                issues=list(row.errors or []),
+                final=True,
+            )
+            if gate_status != row_status:
+                row.status = gate_status
+                row.errors = gate_issues
+                self.import_repo.update_row(
+                    row,
+                    status=row.status,
+                    errors=row.errors,
+                    review_required=row.status in {"warning", "error"},
+                )
+                if gate_status == "error":
+                    error_count += 1
+                    skipped_count += 1
+                    continue
 
             try:
                 payloads = self._prepare_transaction_payloads(normalized)

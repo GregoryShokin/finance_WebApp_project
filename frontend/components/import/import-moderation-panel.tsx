@@ -44,6 +44,7 @@ import { AttachToCounterpartyButton } from '@/components/import/attach-counterpa
 import { getAccounts } from '@/lib/api/accounts';
 import { createCategory, getCategories } from '@/lib/api/categories';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
+import { createDebtPartner, getDebtPartners } from '@/lib/api/debt-partners';
 import type { Account } from '@/types/account';
 import type { Counterparty } from '@/types/counterparty';
 import type {
@@ -87,6 +88,7 @@ type FeedRow = {
   refundMatch: RefundMatchMeta | null;  // normalized_data.refund_match (от RefundMatcher)
   isDuplicateSide: boolean;        // row.status === 'duplicate'
   isExcluded: boolean;             // row.status === 'skipped' (manually excluded)
+  isDetachedFromCluster: boolean;  // normalized_data.detached_from_cluster — user kicked it out of a bulk cluster
 };
 
 export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
@@ -193,6 +195,7 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
           refundMatch: (n.refund_match as RefundMatchMeta | null | undefined) ?? null,
           isDuplicateSide: row.status === 'duplicate',
           isExcluded: row.status === 'skipped',
+          isDetachedFromCluster: Boolean(n.detached_from_cluster),
         };
       })
       .sort((a, b) => b.date.localeCompare(a.date));
@@ -212,13 +215,29 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
     return ids;
   }, [bulkClustersQuery.data]);
 
+  // A row detached from a bulk cluster must ALWAYS land in the attention
+  // feed — that's the contract of the "Исключить" action. Without this guard
+  // a detached transfer row would get swallowed by the TransfersBucket and
+  // disappear from view (the user's complaint, 2026-04-24). Detaching wins
+  // over operation_type='transfer'.
+  //
+  // §12.1: a transfer without a known counter-account is NOT a real transfer
+  // pair — it must not appear in the "Переводы и дубли" group (the matcher
+  // failed to find its other side). It belongs in the attention feed so the
+  // user sees the integrity error and decides: set the counter-account
+  // manually, park, or exclude. Duplicate-side rows still pass through
+  // because their own pair was already committed.
+  const isCompleteTransfer = (f: FeedRow) =>
+    f.operationType === 'transfer' && f.targetAccountId != null;
   const transferFeed = activeFeed.filter(
-    (f) => f.operationType === 'transfer' || f.isDuplicateSide,
+    (f) =>
+      !f.isDetachedFromCluster &&
+      !bulkClusterRowIds.has(f.row.id) &&
+      (isCompleteTransfer(f) || f.isDuplicateSide),
   );
   const remainingFeed = activeFeed.filter(
     (f) =>
-      f.operationType !== 'transfer' &&
-      !f.isDuplicateSide &&
+      (f.isDetachedFromCluster || (!isCompleteTransfer(f) && !f.isDuplicateSide)) &&
       !bulkClusterRowIds.has(f.row.id),
   );
   const isConfirmedOrAuto = (f: FeedRow) => f.cluster?.auto_trust === true || f.row.status === 'ready';
@@ -780,17 +799,27 @@ function AttentionBucket({
       </div>
       {rows.length <= VIRTUAL_LIST_THRESHOLD ? (
         <div className="space-y-2">
-          {rows.map((feedRow) => (
-            <AttentionCard
-              key={feedRow.row.id}
-              feedRow={feedRow}
-              categoryById={categoryById}
-              accountById={accountById}
-              sessionId={sessionId}
-              bulkClusters={bulkClusters}
-              onAfterAction={onAfterAction}
-            />
-          ))}
+          <AnimatePresence initial={false}>
+            {rows.map((feedRow) => (
+              <motion.div
+                key={feedRow.row.id}
+                layout
+                initial={false}
+                exit={{ opacity: 0, x: 24, height: 0, marginTop: 0, transition: { duration: 0.18 } }}
+                transition={{ layout: { duration: 0.22, ease: 'easeOut' } }}
+                style={{ overflow: 'hidden' }}
+              >
+                <AttentionCard
+                  feedRow={feedRow}
+                  categoryById={categoryById}
+                  accountById={accountById}
+                  sessionId={sessionId}
+                  bulkClusters={bulkClusters}
+                  onAfterAction={onAfterAction}
+                />
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </div>
       ) : (
         <VirtualAttentionList
@@ -808,8 +837,14 @@ function AttentionBucket({
 
 // Below this threshold we render the plain list — virtualization has its own
 // overhead (scroll-margin math, measureElement ResizeObservers) that is not
-// worth paying for short sessions.
-const VIRTUAL_LIST_THRESHOLD = 30;
+// worth paying for short sessions. Raised to 120 because the plain list is
+// the only path with a proper AnimatePresence+layout animation on confirm;
+// the virtualized path can only fall back to a CSS transform transition,
+// which measureElement re-measures clobber after each confirm. Typical
+// statements run 30–100 rows — keeping those on the animated path is the
+// right trade-off, and the virtualized branch is left for edge-case
+// mega-imports (several hundred rows) where animation quality matters less.
+const VIRTUAL_LIST_THRESHOLD = 120;
 
 function VirtualAttentionList({
   rows,
@@ -871,6 +906,7 @@ function VirtualAttentionList({
               left: 0,
               width: '100%',
               transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+              transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
               paddingBottom: 8,
             }}
           >
@@ -1004,6 +1040,31 @@ function AttentionCardImpl({
   })();
   const [pickedCreditAccountId, setPickedCreditAccountId] = useState<number | null>(initialCreditAccountId);
   const [pickedTargetAccountId, setPickedTargetAccountId] = useState<number | null>(initialTargetAccountId);
+  const initialDebtPartnerId = (() => {
+    const v = (row.normalized_data as Record<string, any> | undefined)?.debt_partner_id;
+    return v ? Number(v) : null;
+  })();
+  const [pickedDebtPartnerId, setPickedDebtPartnerId] = useState<number | null>(initialDebtPartnerId);
+  const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
+  const debtPartners = debtPartnersQuery.data ?? [];
+  const debtPartnerQueryClient = useQueryClient();
+  const createDebtPartnerMutation = useMutation({
+    mutationFn: (name: string) =>
+      createDebtPartner({
+        name,
+        // Pick the opening-balance kind from the debt direction — a new
+        // partner created while logging "я одолжил" should start as
+        // receivable (they owe me); "мне заняли" → payable.
+        opening_balance_kind:
+          debtDir === 'borrowed' || debtDir === 'repaid' ? 'payable' : 'receivable',
+      }),
+    onSuccess: (created) => {
+      debtPartnerQueryClient.invalidateQueries({ queryKey: ['debt-partners'] });
+      setPickedDebtPartnerId(created.id);
+      toast.success(`Создан: ${created.name}`);
+    },
+    onError: (err: Error) => toast.error(err.message || 'Не удалось создать'),
+  });
 
   const creditAccounts = useMemo(
     () => Array.from(accountById.values()).filter((a) => a.is_credit || a.account_type === 'credit' || a.account_type === 'credit_card' || a.account_type === 'installment_card'),
@@ -1023,6 +1084,7 @@ function AttentionCardImpl({
     category_id: number | null;
     target_account_id: number | null;
     debt_direction: 'borrowed' | 'lent' | 'repaid' | 'collected';
+    debt_partner_id: number | null;
     description: string;
   };
   const emptyPart = (): SplitPart => ({
@@ -1031,6 +1093,7 @@ function AttentionCardImpl({
     category_id: null,
     target_account_id: null,
     debt_direction: 'borrowed',
+    debt_partner_id: null,
     description: '',
   });
   const [splitOpen, setSplitOpen] = useState<boolean>(false);
@@ -1043,7 +1106,7 @@ function AttentionCardImpl({
     if (amt <= 0) return false;
     if ((p.operation_type === 'regular' || p.operation_type === 'refund') && !p.category_id) return false;
     if (p.operation_type === 'transfer' && !p.target_account_id) return false;
-    if (p.operation_type === 'debt' && !p.category_id) return false;
+    if (p.operation_type === 'debt' && !p.debt_partner_id) return false;
     return true;
   });
 
@@ -1081,8 +1144,10 @@ function AttentionCardImpl({
     }
   })();
 
-  // Нужна ли выборка категории?
-  const needsCategory = mainOp === 'regular' || mainOp === 'debt' || mainOp === 'refund';
+  // Нужна ли выборка категории? Для долга — нет: вместо категории там
+  // дебитор / кредитор (DebtPartner), а не бюджетная статья.
+  const needsCategory = mainOp === 'regular' || mainOp === 'refund';
+  const needsDebtPartner = mainOp === 'debt';
   // Для возврата категория — всегда доходная.
   const kindFilter: 'income' | 'expense' =
     mainOp === 'refund' ? 'expense' : direction === 'income' ? 'income' : 'expense';
@@ -1133,7 +1198,7 @@ function AttentionCardImpl({
     // Split-режим: если разбивка введена — обязательно валидной должна быть.
     if (hasSplitDraft) return splitValid;
     if (mainOp === 'regular' || mainOp === 'refund') return Boolean(pickedCatId);
-    if (mainOp === 'debt') return Boolean(pickedCatId);
+    if (mainOp === 'debt') return Boolean(pickedDebtPartnerId);
     if (mainOp === 'transfer') return Boolean(pickedTargetAccountId);
     if (mainOp === 'credit_operation') {
       if (!pickedCreditAccountId) return false;
@@ -1160,9 +1225,10 @@ function AttentionCardImpl({
           split_items: splitParts.map((p) => ({
             operation_type: p.operation_type,
             amount: parseFloat(p.amount.replace(',', '.')) || 0,
-            category_id: p.category_id,
+            category_id: p.operation_type === 'debt' ? null : p.category_id,
             target_account_id: p.target_account_id,
             debt_direction: p.operation_type === 'debt' ? p.debt_direction : null,
+            debt_partner_id: p.operation_type === 'debt' ? p.debt_partner_id : null,
             description: p.description || null,
           })),
         };
@@ -1175,7 +1241,10 @@ function AttentionCardImpl({
         action: 'confirm',
       };
       if (needsCategory) payload.category_id = pickedCatId;
-      if (mainOp === 'debt') payload.debt_direction = debtDir;
+      if (mainOp === 'debt') {
+        payload.debt_direction = debtDir;
+        payload.debt_partner_id = pickedDebtPartnerId;
+      }
       if (mainOp === 'transfer') payload.target_account_id = pickedTargetAccountId;
       if (mainOp === 'credit_operation') {
         payload.credit_account_id = pickedCreditAccountId;
@@ -1329,6 +1398,25 @@ function AttentionCardImpl({
               { value: 'repaid', label: 'Я вернул долг' },
               { value: 'collected', label: 'Мне вернули' },
             ]}
+          />
+        )}
+
+        {/* Дебитор / Кредитор — вместо категории для долга */}
+        {needsDebtPartner && (
+          <CompactSelect
+            value={pickedDebtPartnerId != null ? String(pickedDebtPartnerId) : ''}
+            onChange={(v) => setPickedDebtPartnerId(v ? Number(v) : null)}
+            options={debtPartners.map((p) => ({ value: String(p.id), label: p.name }))}
+            placeholder="— дебитор / кредитор —"
+            widthClassName="w-52"
+            ariaLabel="Дебитор или кредитор"
+            createAction={{
+              visible: !createDebtPartnerMutation.isPending,
+              label: '',
+              onClick: (name) => {
+                if (name) createDebtPartnerMutation.mutate(name);
+              },
+            }}
           />
         )}
 
@@ -1713,6 +1801,7 @@ function SplitEditor({
     category_id: number | null;
     target_account_id: number | null;
     debt_direction: 'borrowed' | 'lent' | 'repaid' | 'collected';
+    debt_partner_id: number | null;
     description: string;
   }>;
   setParts: React.Dispatch<React.SetStateAction<typeof parts>>;
@@ -1723,6 +1812,56 @@ function SplitEditor({
   accountById: Map<number, Account>;
   excludeAccountId: number | null;
 }) {
+  // Debt parts need their own selector (debtor / creditor) — fetched once,
+  // cached via React Query. Keeps the editor self-contained: no extra plumbing
+  // through the AttentionCard parent.
+  const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
+  const debtPartners = debtPartnersQuery.data ?? [];
+  const splitQueryClient = useQueryClient();
+  // Which part is awaiting a newly-created partner / category so we can
+  // auto-select it (mutation responses don't carry back the part index by
+  // themselves).
+  const [pendingCreateForPart, setPendingCreateForPart] = useState<number | null>(null);
+  const [pendingCategoryForPart, setPendingCategoryForPart] = useState<number | null>(null);
+  const createDebtPartnerMutation = useMutation({
+    mutationFn: (name: string) =>
+      createDebtPartner({ name, opening_balance_kind: 'receivable' }),
+    onSuccess: (created) => {
+      splitQueryClient.invalidateQueries({ queryKey: ['debt-partners'] });
+      if (pendingCreateForPart != null) {
+        setParts((prev) => prev.map((p, i) =>
+          i === pendingCreateForPart ? { ...p, debt_partner_id: created.id } : p,
+        ));
+        setPendingCreateForPart(null);
+      }
+      toast.success(`Создан: ${created.name}`);
+    },
+    onError: (err: Error) => toast.error(err.message || 'Не удалось создать'),
+  });
+  const createCategoryMutation = useMutation({
+    // Kind must match the part kind (income vs expense) — a refund part lives
+    // under expense categories even though its direction is income; regular
+    // parts follow the source operation's direction. Priority gets a sensible
+    // default so the user doesn't have to leave the modal; they can refine
+    // it later in the Категории section.
+    mutationFn: ({ name, kind }: { name: string; kind: 'income' | 'expense' }) =>
+      createCategory({
+        name,
+        kind,
+        priority: kind === 'income' ? 'income_active' : 'expense_secondary',
+      }),
+    onSuccess: (created) => {
+      splitQueryClient.invalidateQueries({ queryKey: ['categories'] });
+      if (pendingCategoryForPart != null) {
+        setParts((prev) => prev.map((p, i) =>
+          i === pendingCategoryForPart ? { ...p, category_id: created.id } : p,
+        ));
+        setPendingCategoryForPart(null);
+      }
+      toast.success(`Категория создана: ${created.name}`);
+    },
+    onError: (err: Error) => toast.error(err.message || 'Не удалось создать категорию'),
+  });
   const updatePart = (idx: number, patch: Partial<typeof parts[number]>) => {
     setParts((prev) => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
   };
@@ -1736,6 +1875,7 @@ function SplitEditor({
       category_id: null,
       target_account_id: null,
       debt_direction: 'borrowed',
+      debt_partner_id: null,
       description: '',
     }]);
   };
@@ -1777,11 +1917,18 @@ function SplitEditor({
       </div>
 
       {parts.map((part, idx) => {
-        const partKind: 'income' | 'expense' = part.operation_type === 'refund' ? 'income' : direction;
+        // Refund is semantically an expense compensator — its category should
+        // match the original purchase being reversed, not an income category.
+        // For all other types, follow the source operation's direction.
+        const partKind: 'income' | 'expense' = part.operation_type === 'refund' ? 'expense' : direction;
         const partCategories = categoriesByKind[partKind] ?? [];
-        const needsCategory = part.operation_type === 'regular' || part.operation_type === 'refund' || part.operation_type === 'debt';
+        // Debt parts don't take a category — they carry a debtor / creditor
+        // instead. That's the whole reason we split the entity: a debt is a
+        // relationship with a person, not a budget line.
+        const needsCategory = part.operation_type === 'regular' || part.operation_type === 'refund';
         const needsTarget = part.operation_type === 'transfer';
         const needsDebtDir = part.operation_type === 'debt';
+        const needsDebtPartner = part.operation_type === 'debt';
         return (
           <div key={idx} className="rounded-xl border border-indigo-100 bg-white p-2 flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-slate-500 w-6">#{idx + 1}</span>
@@ -1818,6 +1965,36 @@ function SplitEditor({
                 placeholder="— категория —"
                 widthClassName="w-44"
                 ariaLabel="Категория части"
+                createAction={{
+                  visible: !createCategoryMutation.isPending,
+                  label: '',
+                  onClick: (name) => {
+                    if (name) {
+                      setPendingCategoryForPart(idx);
+                      createCategoryMutation.mutate({ name, kind: partKind });
+                    }
+                  },
+                }}
+              />
+            ) : null}
+            {needsDebtPartner ? (
+              <CompactSelect
+                value={part.debt_partner_id != null ? String(part.debt_partner_id) : ''}
+                onChange={(v) => updatePart(idx, { debt_partner_id: v ? Number(v) : null })}
+                options={debtPartners.map((p) => ({ value: String(p.id), label: p.name }))}
+                placeholder="— дебитор / кредитор —"
+                widthClassName="w-52"
+                ariaLabel="Дебитор или кредитор"
+                createAction={{
+                  visible: !createDebtPartnerMutation.isPending,
+                  label: '',
+                  onClick: (name) => {
+                    if (name) {
+                      setPendingCreateForPart(idx);
+                      createDebtPartnerMutation.mutate(name);
+                    }
+                  },
+                }}
               />
             ) : null}
             {needsDebtDir ? (
@@ -2062,6 +2239,7 @@ function CompactSelect({
   widthClassName,
   tone = 'slate',
   ariaLabel,
+  createAction,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -2070,6 +2248,16 @@ function CompactSelect({
   widthClassName: string;
   tone?: 'slate' | 'indigo';
   ariaLabel: string;
+  // Optional "create new" button that shows when the query doesn't match any
+  // option. onClick receives the current trimmed query so callers can create
+  // a new entity (e.g. a DebtPartner) inline. The same callback is responsible
+  // for eventually flipping `value` to the new id — typically via onChange
+  // from within the create mutation's onSuccess handler.
+  createAction?: {
+    visible: boolean;
+    label: string;
+    onClick: (query: string) => void;
+  };
 }) {
   const reactId = useId();
   const selected = options.find((o) => o.value === value) ?? null;
@@ -2081,6 +2269,7 @@ function CompactSelect({
   const toneClass = tone === 'indigo'
     ? 'bg-indigo-50 text-indigo-900 border-indigo-200 focus:border-indigo-400'
     : 'bg-white text-slate-900 border-slate-200 focus:border-slate-400';
+  const trimmed = query.trim();
   return (
     <SearchSelect
       id={reactId}
@@ -2099,6 +2288,17 @@ function CompactSelect({
       showAllOnFocus
       inputSize="sm"
       inputClassName={`text-xs font-medium shadow-sm ${toneClass}`}
+      createAction={createAction ? {
+        // Show only when the query is non-empty AND doesn't exactly match
+        // any existing option. Matches the "find-or-create" pattern from
+        // the cluster-card counterparty selector.
+        visible:
+          createAction.visible
+          && trimmed.length > 0
+          && !options.some((o) => o.label.trim().toLowerCase() === trimmed.toLowerCase()),
+        label: createAction.label || (trimmed ? `+ Создать «${trimmed}»` : ''),
+        onClick: () => createAction.onClick(trimmed),
+      } : undefined}
     />
   );
 }

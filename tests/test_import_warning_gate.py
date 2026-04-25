@@ -100,7 +100,11 @@ def test_transfer_with_both_accounts_passes(db, regular_account, credit_account)
 
 
 class TestPreviewTransferIntegrityGate:
-    def test_transfer_without_target_escalates_to_error(self):
+    def test_transfer_without_target_escalates_to_warning_in_preview(self):
+        """Preview-stage call (final=False) MUST stay at warning so the
+        debounced cross-session matcher can still pick the row up — its
+        query filters status IN (ready, warning). Premature `error` here
+        broke the Tinkoff intra-bank pair detection."""
         status, issues = ImportService._gate_transfer_integrity(
             normalized={
                 "operation_type": "transfer",
@@ -111,10 +115,58 @@ class TestPreviewTransferIntegrityGate:
             current_status="ready",
             issues=[],
         )
+        assert status == "warning", f"expected 'warning', got {status!r}"
+        assert issues and any("получателя" in i for i in issues)
+
+    def test_transfer_without_target_escalates_to_error_when_final(self):
+        """Post-matcher / commit-time call (final=True) escalates to error
+        — the matcher's last attempt is over, this is a real §12.1 violation."""
+        status, issues = ImportService._gate_transfer_integrity(
+            normalized={
+                "operation_type": "transfer",
+                "account_id": 1,
+                "target_account_id": None,
+                "type": "expense",
+            },
+            current_status="ready",
+            issues=[],
+            final=True,
+        )
         assert status == "error", f"expected 'error', got {status!r}"
         assert issues and any("получателя" in i for i in issues)
 
-    def test_transfer_without_source_escalates_to_error(self):
+    def test_warning_is_not_downgraded_back_to_warning_in_final_pass(self):
+        """A row already at `warning` must escalate to `error` on final pass."""
+        status, _ = ImportService._gate_transfer_integrity(
+            normalized={
+                "operation_type": "transfer",
+                "account_id": 1,
+                "target_account_id": None,
+                "type": "expense",
+            },
+            current_status="warning",
+            issues=[],
+            final=True,
+        )
+        assert status == "error"
+
+    def test_error_is_sticky_even_in_preview_call(self):
+        """If a row is already at `error` (e.g. from another check), the
+        preview-stage call (final=False) must not downgrade it to warning."""
+        status, _ = ImportService._gate_transfer_integrity(
+            normalized={
+                "operation_type": "transfer",
+                "account_id": 1,
+                "target_account_id": None,
+                "type": "expense",
+            },
+            current_status="error",
+            issues=[],
+            final=False,
+        )
+        assert status == "error"
+
+    def test_transfer_without_source_escalates_to_error_final(self):
         status, issues = ImportService._gate_transfer_integrity(
             normalized={
                 "operation_type": "transfer",
@@ -124,11 +176,12 @@ class TestPreviewTransferIntegrityGate:
             },
             current_status="ready",
             issues=[],
+            final=True,
         )
         assert status == "error"
         assert any("из выписки" in i for i in issues)
 
-    def test_transfer_without_both_sides_escalates_to_error(self):
+    def test_transfer_without_both_sides_escalates_to_error_final(self):
         status, issues = ImportService._gate_transfer_integrity(
             normalized={
                 "operation_type": "transfer",
@@ -138,6 +191,7 @@ class TestPreviewTransferIntegrityGate:
             },
             current_status="ready",
             issues=[],
+            final=True,
         )
         assert status == "error"
         assert any("оба счёта" in i for i in issues)
@@ -153,6 +207,7 @@ class TestPreviewTransferIntegrityGate:
             },
             current_status="ready",
             issues=[],
+            final=True,
         )
         assert status == "error"
         assert any("отправителя" in i for i in issues)
@@ -204,8 +259,9 @@ class TestPreviewTransferIntegrityGate:
         # Issue is still recorded for visibility even though status stays.
         assert issues and any("получателя" in i for i in issues)
 
-    def test_idempotent_issue_append(self):
-        """Calling the gate twice with the same issue list mustn't duplicate."""
+    def test_idempotent_issue_append_preview_then_final(self):
+        """Two-stage flow: preview call sets warning, post-matcher final
+        call escalates to error. The shared issue text must NOT duplicate."""
         first_status, first_issues = ImportService._gate_transfer_integrity(
             normalized={
                 "operation_type": "transfer",
@@ -216,6 +272,7 @@ class TestPreviewTransferIntegrityGate:
             current_status="ready",
             issues=[],
         )
+        assert first_status == "warning"
         second_status, second_issues = ImportService._gate_transfer_integrity(
             normalized={
                 "operation_type": "transfer",
@@ -225,6 +282,7 @@ class TestPreviewTransferIntegrityGate:
             },
             current_status=first_status,
             issues=first_issues,
+            final=True,
         )
         assert second_status == "error"
         assert len(second_issues) == 1
