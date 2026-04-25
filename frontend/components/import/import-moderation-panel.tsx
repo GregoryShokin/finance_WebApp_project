@@ -267,10 +267,18 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
     const v = (f.row.normalized_data as Record<string, unknown> | undefined)?.user_confirmed_at;
     return typeof v === 'string' && v.length > 0;
   };
-  const isConfirmedOrAuto = (f: FeedRow) =>
-    f.cluster?.auto_trust === true ||
-    wasUserConfirmed(f) ||
-    (f.row.status === 'ready' && f.cluster?.trust_zone !== 'red');
+  const isConfirmedOrAuto = (f: FeedRow) => {
+    // Error rows always stay in attention regardless of user_confirmed_at —
+    // they have a data-integrity issue the user must fix first (missing
+    // account, missing debt_partner, etc.). Showing them in «Готово» with
+    // a «✓ Проверено» badge while they can't actually commit is misleading.
+    if (f.row.status === 'error') return false;
+    return (
+      f.cluster?.auto_trust === true ||
+      wasUserConfirmed(f) ||
+      (f.row.status === 'ready' && f.cluster?.trust_zone !== 'red')
+    );
+  };
   // Confirmed rows go into their own tile (ExpandableCard), attention rows stay in the inline list.
   const confirmedFeed = remainingFeed.filter((f) => isConfirmedOrAuto(f))
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -991,9 +999,10 @@ function AttentionCardImpl({
     const v = (row.normalized_data as Record<string, unknown> | undefined)?.user_confirmed_at;
     return typeof v === 'string' && v.length > 0;
   })();
+  // Error rows get a regular expanded card regardless of user_confirmed_at.
   const isConfirmed =
-    wasUserConfirmedRow ||
-    (row.status === 'ready' && cluster?.trust_zone !== 'red');
+    row.status !== 'error' &&
+    (wasUserConfirmedRow || (row.status === 'ready' && cluster?.trust_zone !== 'red'));
   // Auto-trust rows start collapsed; confirmed rows also collapse after apply.
   const [collapsed, setCollapsed] = useState(isAutoTrust);
   const zone = cluster?.trust_zone ?? 'yellow';
@@ -1121,6 +1130,15 @@ function AttentionCardImpl({
   const [pickedDebtPartnerId, setPickedDebtPartnerId] = useState<number | null>(initialDebtPartnerId);
   const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
   const debtPartners = debtPartnersQuery.data ?? [];
+  // Reset stale debt_partner_id when the partners list loads and the saved
+  // id no longer exists (e.g. partner was deleted, or id came from the old
+  // counterparty table before the debt_partners migration).
+  useEffect(() => {
+    if (!debtPartnersQuery.isSuccess || pickedDebtPartnerId == null) return;
+    const exists = debtPartners.some((p) => p.id === pickedDebtPartnerId);
+    if (!exists) setPickedDebtPartnerId(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debtPartnersQuery.isSuccess, pickedDebtPartnerId]);
   const debtPartnerQueryClient = useQueryClient();
   const createDebtPartnerMutation = useMutation({
     mutationFn: (name: string) =>
