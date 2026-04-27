@@ -398,16 +398,27 @@ class ImportService:
             # the row's normalized payload — matching the priority used by
             # cluster assembly (contract > phone > iban > card). Skip unknown
             # kinds; they're not cross-account-safe.
+            #
+            # `card` binding is only created for transfer rows. In Russian bank
+            # statements "Операция по карте ****7123" refers to the PAYER'S own
+            # card (the account being imported), NOT the merchant's card. Binding
+            # that card number to a counterparty would pull every purchase made
+            # with the same card under that counterparty. For transfers, the card
+            # token IS the recipient's card and is a valid cross-account key.
             if update.counterparty_id is not None:
+                row_op_type = str(normalized.get("operation_type") or "").lower()
                 tokens = normalized.get("tokens") or {}
                 if isinstance(tokens, dict):
                     for kind in ("contract", "phone", "iban", "card"):
                         value = tokens.get(kind)
-                        if value and kind in SUPPORTED_IDENTIFIER_KINDS:
-                            identifier_bindings_by_cp.setdefault(
-                                int(update.counterparty_id), set()
-                            ).add((kind, str(value)))
-                            break
+                        if not value or kind not in SUPPORTED_IDENTIFIER_KINDS:
+                            continue
+                        if kind == "card" and row_op_type != "transfer":
+                            continue
+                        identifier_bindings_by_cp.setdefault(
+                            int(update.counterparty_id), set()
+                        ).add((kind, str(value)))
+                        break
 
         # §10.2 Case B: cluster-level bulk-ack adds confirms with weight 0.5
         # per row (not 1.0). A 92-row Pyaterochka cluster → +46.0 confirms
@@ -1535,6 +1546,25 @@ class ImportService:
             normalized["credit_interest_amount"] = None
             normalized["category_id"] = None
             normalized["split_items"] = []
+        elif operation_type == "credit_early_repayment":
+            # Досрочное погашение: TransactionService требует target_account_id
+            # = кредитный счёт (см. transaction_service._resolve_target_account).
+            # UI может прислать кредитный счёт либо как target_account_id, либо
+            # как credit_account_id — нормализуем в target_account_id, чтобы
+            # не уронить коммит на else-ветке (которая раньше затирала поле).
+            credit_account_id = normalized.get("target_account_id") or normalized.get("credit_account_id")
+            normalized["target_account_id"] = credit_account_id
+            normalized["credit_account_id"] = credit_account_id
+            normalized["category_id"] = None
+            normalized["split_items"] = []
+            normalized["credit_principal_amount"] = None
+            normalized["credit_interest_amount"] = None
+            if credit_account_id in (None, "", 0):
+                # Mojibake form matches the entry in blocking_messages set above
+                # so the post-validation pass at the end of this function picks
+                # this up as a real blocker (and won't reset status to ready).
+                local_issues.append("РќРµ РІС‹Р±СЂР°РЅ РєСЂРµРґРёС‚РЅС‹Р№ СЃС‡С‘С‚.")
+                _escalate("warning")
         elif operation_type == "transfer" and normalized.get("requires_credit_split"):
             # §9.3 split: transfer to a loan account that must be committed as
             # (interest expense + principal transfer). Validates the split
@@ -2103,33 +2133,10 @@ class ImportService:
                 else:
                     current_account_id = int(_raw_account_id)
 
-                # Transfer-specific deduplication: look for an existing transfer that already
-                # involves the session account on either side (same amount, date В±2 days).
-                # account_id is always the session account, so we always search by it.
-                if current_operation_type == "transfer":
-                    # account_id is always the session account (always known).
-                    # Search for an existing paired transfer whose other side is the session account.
-                    if current_account_id != 0:
-                        transfer_pair_tx = self._find_transfer_pair_duplicate(
-                            user_id=user_id,
-                            account_id=current_account_id,
-                            amount=amount_decimal,
-                            transaction_date=transaction_dt,
-                        )
-                        if transfer_pair_tx is not None:
-                            status = "duplicate"
-                            issues.append("Р’С‚РѕСЂР°СЏ СЃС‚РѕСЂРѕРЅР° СѓР¶Рµ РёРјРїРѕСЂС‚РёСЂРѕРІР°РЅРЅРѕРіРѕ РїРµСЂРµРІРѕРґР°.")
-                            # Determine the other side account for the hint.
-                            # The existing transaction record: account_id = its own account, target_account_id = other side.
-                            if transfer_pair_tx.account_id == current_account_id:
-                                other_account_id = transfer_pair_tx.target_account_id
-                            else:
-                                other_account_id = transfer_pair_tx.account_id
-                            other_account = self.account_repo.get_by_id_and_user(other_account_id, user_id) if other_account_id else None
-                            normalized["transfer_pair_hint"] = {
-                                "date": transfer_pair_tx.transaction_date.date().isoformat(),
-                                "source_account_name": other_account.name if other_account else None,
-                            }
+                # Transfer-side duplicate detection happens in transfer_matcher_service
+                # (`_detect_committed_duplicates`, debounced after preview): it has skeleton
+                # filtering (§8.6), mirror index, and is_secondary marking. Single source
+                # of truth — no parallel dedup paths here.
 
                 duplicate = status != "duplicate" and self._find_duplicate(
                     user_id=user_id,
@@ -2315,11 +2322,12 @@ class ImportService:
         - `warning` rows commit ONLY if the user touched them (individual
           confirm sets `user_confirmed_at`; cluster-level bulk-ack sets
           `cluster_bulk_acked_at`). Untouched warnings stay in the session.
-        - `import_ready_only=True` is the conservative default (API contract):
-          even if a warning row has a touch flag, it's skipped. Tools that
-          want touch-gated warning commits pass `import_ready_only=False`.
-        The "commit all warnings without touch" bypass does not exist —
-        untouched warnings never commit, regardless of this flag.
+        - `import_ready_only` flag: legacy parameter, retained for backward
+          compatibility. When `True`, untouched warnings are skipped (the
+          spec-default behaviour). When `False`, same — touched warnings
+          always pass, untouched always skip. The "commit everything"
+          cross-cluster bypass forbidden by §5.4 does not exist on either
+          path.
         """
         session = self.get_session(user_id=user_id, session_id=session_id)
         # Serialize concurrent commits for the same session — prevents accidental
@@ -2373,14 +2381,17 @@ class ImportService:
             _indiv_confirmed = _norm_for_gate.get("user_confirmed_at")
             if row_status == "warning":
                 review_count += 1
-                if import_ready_only:
-                    skipped_count += 1
-                    continue
                 if not (_bulk_acked or _indiv_confirmed):
-                    # Not acknowledged — skip. Row stays in the session for
-                    # the next moderator pass per §5.4 last paragraph.
+                    # §5.4: untouched warnings stay in the session for the
+                    # next moderator pass. import_ready_only is irrelevant
+                    # here — both modes skip untouched warnings.
                     skipped_count += 1
                     continue
+                # Touch-flagged warning: bulk-acked or individually confirmed.
+                # Spec §5.4 says these are committable; commit them regardless
+                # of `import_ready_only`. The flag's original "skip even
+                # touched" semantics blocked the bulk-ack path entirely,
+                # contradicting §5.4 / §10.2 Case B.
 
             if row_status not in {"ready", "warning"}:
                 skipped_count += 1
@@ -2441,29 +2452,41 @@ class ImportService:
                 target_account_id = normalized.get("target_account_id")
 
                 if operation_type == "transfer" and not normalized.get("requires_credit_split") and target_account_id not in (None, "", 0):
-                    # Если transfer_matcher свёл активную строку с уже
-                    # закоммиченным orphan transfer (см. transfer_match.matched_tx_id),
-                    # не создаём новую зеркальную транзакцию — это привело бы к дублю
-                    # и двойному зачёту по балансу target-счёта (старый orphan уже
-                    # сделал income +amount). Вместо этого создаём только активную
-                    # сторону и линкуемся к существующей committed-транзакции.
-                    matched_tx_id = (normalized.get("transfer_match") or {}).get("matched_tx_id")
-                    if matched_tx_id:
+                    transfer_match_meta = normalized.get("transfer_match") or {}
+                    matched_tx_id = transfer_match_meta.get("matched_tx_id")
+                    matched_row_id = transfer_match_meta.get("matched_row_id")
+
+                    linked_tx = None
+
+                    # Path A: cross-session pair — check if partner import row was already
+                    # committed (first session committed before this one). Find the phantom
+                    # TX created for our account side and link to it instead of creating a
+                    # duplicate pair. Balance was already adjusted by the partner's commit.
+                    if matched_row_id and not matched_tx_id:
+                        linked_tx = self._link_transfer_to_committed_cross_session_pair(
+                            user_id=user_id,
+                            payload=payloads[0],
+                            matched_import_row_id=int(matched_row_id),
+                        )
+
+                    # Path B: matched with a committed orphan TX (§10.6 linking).
+                    if linked_tx is None and matched_tx_id:
                         linked_tx = self._link_transfer_to_committed_pair(
                             user_id=user_id,
                             payload=payloads[0],
                             committed_tx_id=int(matched_tx_id),
                         )
-                    else:
-                        linked_tx = None
+
                     if linked_tx is not None:
                         last_transaction = linked_tx
                     else:
-                        expense_tx, _income_tx = self._create_transfer_pair(
+                        expense_tx, income_tx = self._create_transfer_pair(
                             user_id=user_id,
                             payload=payloads[0],
                         )
-                        last_transaction = expense_tx
+                        # Link the import row to the TX on its own account side.
+                        tx_type = str((payloads[0].get("type") or "expense")).lower()
+                        last_transaction = income_tx if tx_type == "income" else expense_tx
                     imported_count += 1
                 elif normalized.get("requires_credit_split"):
                     # Ref: financeapp-vault/01-Metrics/Поток.md — decision 2026-04-19
@@ -2792,6 +2815,65 @@ class ImportService:
 
         return active_tx
 
+    def _link_transfer_to_committed_cross_session_pair(
+        self,
+        *,
+        user_id: int,
+        payload: dict[str, Any],
+        matched_import_row_id: int,
+    ) -> TransactionModel | None:
+        """Link to the phantom TX created when the cross-session partner row committed first.
+
+        When both sessions are active and the partner session was committed before
+        this one, _create_transfer_pair already created both TXs (one on each account).
+        This method finds the TX on OUR account side and returns it so the caller can
+        mark this import row as committed without creating a second pair.
+
+        Balance is NOT adjusted — it was already applied by the partner's commit.
+        Returns None when the partner row hasn't been committed yet (caller proceeds
+        to _create_transfer_pair as usual).
+        """
+        from app.models.import_row import ImportRow as _ImportRow
+
+        partner_row = (
+            self.db.query(_ImportRow)
+            .filter(_ImportRow.id == matched_import_row_id)
+            .first()
+        )
+        if partner_row is None or partner_row.created_transaction_id is None:
+            return None  # Partner not yet committed — create pair normally
+
+        partner_committed_tx = (
+            self.db.query(TransactionModel)
+            .filter(
+                TransactionModel.id == partner_row.created_transaction_id,
+                TransactionModel.user_id == user_id,
+            )
+            .first()
+        )
+        if partner_committed_tx is None or partner_committed_tx.transfer_pair_id is None:
+            return None
+
+        our_account_id = int(payload["account_id"])
+
+        # One of {partner_committed_tx, its sibling} lives on our account.
+        # Return whichever is ours — that's the phantom created for our side.
+        if partner_committed_tx.account_id == our_account_id:
+            return partner_committed_tx
+
+        sibling_tx = (
+            self.db.query(TransactionModel)
+            .filter(
+                TransactionModel.id == partner_committed_tx.transfer_pair_id,
+                TransactionModel.user_id == user_id,
+            )
+            .first()
+        )
+        if sibling_tx is not None and sibling_tx.account_id == our_account_id:
+            return sibling_tx
+
+        return None
+
     def _create_transfer_pair(
         self, *, user_id: int, payload: dict[str, Any]
     ) -> tuple[TransactionModel, TransactionModel]:
@@ -2920,6 +3002,7 @@ class ImportService:
             "credit_principal_amount": normalized.get("credit_principal_amount"),
             "credit_interest_amount": normalized.get("credit_interest_amount"),
             "counterparty_id": normalized.get("counterparty_id"),
+            "debt_partner_id": normalized.get("debt_partner_id"),
             "debt_direction": normalized.get("debt_direction"),
             "needs_review": bool(
                 normalized.get("needs_review")
@@ -2956,6 +3039,19 @@ class ImportService:
             base_payload["counterparty_id"] = int(base_payload["counterparty_id"])
         else:
             base_payload["counterparty_id"] = None
+
+        if base_payload.get("debt_partner_id") not in (None, "", 0):
+            base_payload["debt_partner_id"] = int(base_payload["debt_partner_id"])
+        else:
+            base_payload["debt_partner_id"] = None
+
+        # §12.2 invariant: debt and counterparty are disjoint. Drop the wrong
+        # field at payload assembly so the validator never sees both populated
+        # from a stale normalized_data carrying both fields.
+        if str(operation_type) == "debt":
+            base_payload["counterparty_id"] = None
+        else:
+            base_payload["debt_partner_id"] = None
 
 
         split_items = normalized.get("split_items") or []
@@ -3215,23 +3311,6 @@ class ImportService:
             item.skeleton is None
             and (item.normalized_description or "").strip().lower() == incoming_norm
             for item in legacy_candidates
-        )
-
-    def _find_transfer_pair_duplicate(
-        self,
-        *,
-        user_id: int,
-        account_id: int,
-        amount: Decimal,
-        transaction_date: datetime,
-    ) -> TransactionModel | None:
-        """Returns the matching Transfer transaction when an existing transfer already covers
-        this account as the receiving side, so the caller can build a UI hint."""
-        return self.transaction_repo.find_transfer_pair_candidate(
-            user_id=user_id,
-            account_id=account_id,
-            amount=amount,
-            transaction_date=transaction_date,
         )
 
     @staticmethod

@@ -162,6 +162,13 @@ class TransferMatcherService:
              even before the user opens them.
           3. Committed transactions within the date range.
         """
+        # Reset rows that were marked duplicate by the old cross-session matcher
+        # logic (income side = secondary). With the new logic both sides are
+        # primary (status='ready'). Old rows still carry status='duplicate' +
+        # match_source='cross_session', so they're invisible to the candidate
+        # loader below. Clear them first so the re-run picks them up.
+        self._reset_cross_session_secondary_duplicates(user_id=user_id)
+
         active_candidates = self._load_active_row_candidates(user_id)
         analyzed_candidates = self._load_analyzed_session_candidates(user_id)
 
@@ -207,6 +214,48 @@ class TransferMatcherService:
         # §5.2 trigger 6 — orphan transfer is a data-integrity error — but
         # only AFTER the matcher had a fair chance to fill in target.
         self._escalate_orphan_transfers(user_id=user_id)
+
+    def _reset_cross_session_secondary_duplicates(self, *, user_id: int) -> None:
+        """Clear stale cross-session-secondary duplicate rows before re-matching.
+
+        Old matcher logic always made the income side of a cross-session pair
+        status='duplicate' (is_secondary=True). The new logic makes both sides
+        status='ready'. Rows from previous matcher runs still carry the old
+        status in the DB and are invisible to _load_active_row_candidates.
+        Reset them to 'warning' (needs re-review) and clear their transfer_match
+        so the fresh matcher pass re-classifies them correctly.
+
+        Only resets rows with match_source='cross_session' — never touches rows
+        from _detect_committed_duplicates (match_source='committed_tx_duplicate')
+        which are real duplicates of already-committed transactions.
+        """
+        rows = (
+            self.db.query(ImportRow)
+            .join(ImportSession, ImportRow.session_id == ImportSession.id)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.status != "committed",
+                ImportRow.status == "duplicate",
+            )
+            .all()
+        )
+        touched = 0
+        for row in rows:
+            nd: dict = dict(row.normalized_data_json or {})
+            match = nd.get("transfer_match") or {}
+            if match.get("match_source") != "cross_session":
+                continue
+            # Strip matcher-assigned fields so the fresh pass starts clean.
+            nd.pop("transfer_match", None)
+            nd.pop("target_account_id", None)
+            nd.pop("operation_type", None)
+            row.normalized_data_json = nd
+            row.status = "warning"
+            row.error_message = None
+            self.db.add(row)
+            touched += 1
+        if touched:
+            self.db.flush()
 
     def _escalate_orphan_transfers(self, *, user_id: int) -> None:
         """Demote post-matcher orphan transfers to `regular`.
@@ -644,20 +693,17 @@ class TransferMatcherService:
         assignments: list[tuple[_Candidate, _Candidate, float]],
         user_id: int,
     ) -> None:
-        # Collect updates AND track which row is the secondary side of a cross-session pair.
-        # When two active ImportRows are paired, committing the EXPENSE side creates the
-        # matching INCOME side automatically via transfer-pair creation. So the INCOME
-        # side must be marked "duplicate" to prevent double-commit.
-        row_updates: dict[int, tuple[_Candidate, float, bool]] = {}  # bool: is_secondary
+        # Both sides of a cross-session pair are primary entries in their respective
+        # statements — neither is a "secondary/duplicate". Both get status='ready' and
+        # show as active transfer arrows in the moderator UI. The second side to commit
+        # uses _link_transfer_to_committed_cross_session_pair (in ImportService) to
+        # avoid creating a redundant pair when the first side has already committed.
+        row_updates: dict[int, tuple[_Candidate, float, bool]] = {}  # bool: is_secondary (always False for cross-session)
         for a, b, score in assignments:
             a_is_row = a.row_id is not None
             b_is_row = b.row_id is not None
-            # Secondary side (the one that will be auto-created by the pair's other side):
-            # - Always the INCOME side, IF both sides are active import rows.
-            # - If only one side is an active row, it's primary (other is committed tx or analyzed session).
-            both_rows = a_is_row and b_is_row
-            a_is_secondary = both_rows and a.direction == "income"
-            b_is_secondary = both_rows and b.direction == "income"
+            a_is_secondary = False
+            b_is_secondary = False
             if a_is_row:
                 row_updates[a.row_id] = (b, score, a_is_secondary)
             if b_is_row:
@@ -696,15 +742,7 @@ class TransferMatcherService:
 
             # Clear stale validation errors.
             row.error_message = None
-            # Secondary side (income in paired cross-session match) is marked duplicate —
-            # committing the expense side auto-creates this side as the transfer pair.
-            # Note: the previously-added `partner_is_committed` branch was removed
-            # because it was marking legitimate cross-session pairs as duplicate
-            # whenever a committed-tx candidate happened to share (date, amount,
-            # opposite direction). The proper place to detect committed-tx
-            # duplicates is `_detect_committed_duplicates` (second pass on rows
-            # that the matcher did NOT pair), not the assignment of paired rows.
-            row.status = "duplicate" if is_secondary else "ready"
+            row.status = "ready"
 
             self.db.add(row)
 
@@ -802,10 +840,46 @@ class TransferMatcherService:
                 if diff_seconds > buffer.total_seconds():
                     continue
                 tx_skel = (tx.skeleton or "").strip()
-                # Если у обеих сторон есть skeleton — требуем строгое
-                # совпадение. Если хотя бы у одной нет — это legacy-данные,
-                # пропускаем сравнение (будет применён старый широкий критерий).
-                if row_skel and tx_skel and row_skel != tx_skel:
+                # Mirror match: committed tx живёт на ЧУЖОМ счёте — попал в
+                # индекс через зеркальную запись (target_account_id).
+                # Его skeleton отражает описание банка-ОТПРАВИТЕЛЯ, а не
+                # банка-ПОЛУЧАТЕЛЯ. Два разных банка никогда не описывают
+                # один СБП/внутренний перевод одинаковыми словами, поэтому
+                # skeleton guard здесь неприменим — он заблокировал бы все
+                # легитимные mirror-дубли (кейс: Тинькоф expense committed,
+                # потом импортируется Яндекс Дебет со своим описанием той же
+                # операции). Оставляем только time-window проверку.
+                #
+                # Для same-account re-import (is_mirror=False) skeleton guard
+                # остаётся: он защищает от ложных склеек двух разных операций
+                # на одном счёте с совпавшими суммой+датой (§8.6).
+                is_mirror = tx.account_id != cand.account_id
+                # Фантомный transfer-income: committed tx живёт на ТОМ ЖЕ
+                # счёте, что и import row (is_mirror=False), но был создан
+                # автоматически через _create_transfer_pair при коммите
+                # противоположной стороны (дебетовый счёт → Ozon кредитка).
+                # Такой phantom наследует skeleton дебетовой стороны, а не
+                # описание получателя, поэтому skeleton'ы всегда различны
+                # даже для одной и той же операции. Признаки phantom income:
+                #   • type=income (это принимающая сторона)
+                #   • operation_type=transfer (создан как пара перевода)
+                # Для таких строк снимаем skeleton guard — time-window + ключ
+                # (account_id, income, amount) достаточно для корректного матча.
+                # Риск false-positive минимален: два несвязанных transfer-income
+                # на одном счёте с одинаковой суммой в пределах ±2 дней — крайне
+                # редкий кейс; при необходимости юзер исправит вручную.
+                is_phantom_transfer_income = (
+                    not is_mirror
+                    and str(tx.type or "") == "income"
+                    and str(tx.operation_type or "") == "transfer"
+                )
+                if (
+                    not is_mirror
+                    and not is_phantom_transfer_income
+                    and row_skel
+                    and tx_skel
+                    and row_skel != tx_skel
+                ):
                     continue
                 rows_to_mark[cand.row_id] = tx
                 break

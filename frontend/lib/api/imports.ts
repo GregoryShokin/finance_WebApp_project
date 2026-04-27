@@ -183,3 +183,7 @@ export function detachImportRowFromCluster(rowId: number) {
 export function getParkedQueue() {
   return apiClient<ParkedQueueResponse>('/imports/parked-queue');
 }
+
+export function rematchTransfers() {
+  return apiClient<{ status: string }>('/imports/rematch-transfers', { method: 'POST' });
+}

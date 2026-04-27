@@ -35,6 +35,7 @@ import {
   getImportPreview,
   getModerationStatus,
   parkImportRow,
+  rematchTransfers,
   startModeration,
   unexcludeImportRow,
   updateImportRow,
@@ -154,6 +155,35 @@ export function ImportModerationPanel({ sessionId, onClustersChanged }: Props) {
       return grace ? 2000 : false;
     },
   });
+
+  // On mount: kick off a rematch run so any rows that were incorrectly marked
+  // status='duplicate' by the old cross-session-secondary logic get reset and
+  // re-matched correctly. This is a cheap DB-only operation (no LLM), idempotent,
+  // and coalesces with any other pending matcher run via the debounce mechanism.
+  useEffect(() => {
+    rematchTransfers().catch(() => {/* ignore — matcher will retry on next upload */});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  // Invalidate bulk-clusters when the transfer matcher completes. The matcher
+  // runs async (Celery) after build_preview; until it finishes, transfer rows
+  // haven't been classified yet and appear in clusters. Once it writes
+  // transfer_match.status='ready', those rows get op_type='transfer' and are
+  // excluded by build_bulk_clusters — but only if we refetch.
+  const prevTmStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const summary = (previewQuery.data?.summary ?? {}) as Record<string, any>;
+    const tmStatus = ((summary.transfer_match ?? {}) as Record<string, any>).status as string | null ?? null;
+    const prev = prevTmStatusRef.current;
+    if (
+      prev !== tmStatus &&
+      (prev === 'pending' || prev === 'running' || prev === null) &&
+      (tmStatus === 'ready' || tmStatus === 'failed')
+    ) {
+      queryClient.invalidateQueries({ queryKey: ['imports', sessionId, 'bulk-clusters'] });
+    }
+    prevTmStatusRef.current = tmStatus;
+  }, [previewQuery.data, queryClient, sessionId]);
 
   const categoriesQuery = useQuery({
     queryKey: ['categories'],
@@ -647,16 +677,23 @@ function TransferRow({ feedRow, accountById }: { feedRow: FeedRow; accountById: 
     ? (accountById.get(targetAccountId)?.name ?? `#${targetAccountId}`)
     : null;
 
-  // A row marked duplicate-by-transfer-match (is_secondary) is NOT a real
-  // duplicate — it's the income leg of an internal transfer whose expense leg
-  // will auto-create it on commit. Show it as a proper transfer (source → target)
-  // with a "учтётся как пара" hint, not as an opaque "Дубль".
+  // Any row with status=duplicate will NOT become a Transaction at commit:
+  //   - is_secondary=true (mirror match): partner row exists either as active-
+  //     row in another session (will create the pair on commit) OR as
+  //     already-committed transaction (pair already exists in DB). Either way,
+  //     this row auto-skips.
+  //   - is_secondary=false (real duplicate): same-account match against an
+  //     already-imported transaction. Auto-skips.
+  // The user must always see this as «дубль» — not as an active transfer line —
+  // so the visual treatment (struck-through, dimmed) signals «не создастся».
   const isPairSecondary = !!transferMatchMeta && transferMatchMeta.is_secondary === true;
+  const isMirrorDuplicate = isDuplicateSide && isPairSecondary;
   const isRealDuplicate = isDuplicateSide && !isPairSecondary;
+  const isAnyDuplicate = isDuplicateSide;
 
-  // Counterparty side: для primary pair это targetName; для secondary это
-  // matched_account_name (счёт уже-committed зеркала). «Наш» счёт строки —
-  // всегда sourceName (account_id из normalized_data).
+  // Counterparty side: for active transfers it's targetName; for mirror
+  // duplicates it's matched_account_name (the account that holds the
+  // already-known partner side). «Наш» счёт строки — всегда sourceName.
   const counterpartyName = isPairSecondary
     ? ((transferMatchMeta?.matched_account_name as string | undefined) ?? null)
     : targetName;
@@ -673,27 +710,32 @@ function TransferRow({ feedRow, accountById }: { feedRow: FeedRow; accountById: 
     return 'перевод между своими';
   })();
 
-  const linkLabel = isRealDuplicate ? 'Дубль · другая сессия' : pairLabel;
-  // Цвет ссылки — по направлению (а не по primary/secondary):
-  //   income  → indigo (синий, как было)
-  //   expense → orange-600 (оранжевый — деньги уходят с нашего счёта)
-  // Real duplicates приглушены серым.
-  const linkClass = isRealDuplicate
+  const linkLabel = isMirrorDuplicate
+    ? `Дубль · зеркало пары${counterpartyName ? ` (${counterpartyName})` : ''}`
+    : isRealDuplicate
+      ? 'Дубль · другая сессия'
+      : pairLabel;
+  // Real and mirror duplicates both grey/struck-through — both terminal
+  // (no Transaction will be created). Active transfer-pairs keep the
+  // direction-coloured arrow (income → indigo, expense → orange).
+  const linkClass = isAnyDuplicate
     ? 'text-slate-400'
     : direction === 'income'
       ? 'text-indigo-700 font-medium'
       : 'text-orange-600 font-medium';
 
-  const rowClass = isRealDuplicate ? 'text-slate-400 italic' : 'text-slate-800';
+  const rowClass = isAnyDuplicate ? 'text-slate-400 italic' : 'text-slate-800';
   const amountClass = [
     'px-2 py-2 text-right tabular-nums',
     direction === 'income' ? 'text-emerald-600' : 'text-slate-900',
-    isRealDuplicate ? 'line-through' : '',
+    isAnyDuplicate ? 'line-through' : '',
   ].join(' ');
 
-  const titleHint = isPairSecondary
-    ? `${description}\n\nПеревод учтётся как пара — эта строка не создаст отдельную транзакцию.`
-    : description;
+  const titleHint = isMirrorDuplicate
+    ? `${description}\n\nЗеркало уже-учтённого перевода — эта строка не создаст транзакцию.`
+    : isRealDuplicate
+      ? `${description}\n\nДубль уже импортированной транзакции — пропускается.`
+      : description;
 
   return (
     <tr className={rowClass}>
@@ -1028,8 +1070,12 @@ function AttentionCardImpl({
   const isConfirmed =
     row.status !== 'error' &&
     (wasUserConfirmedRow || (row.status === 'ready' && cluster?.trust_zone !== 'red'));
-  // Auto-trust rows start collapsed; confirmed rows also collapse after apply.
-  const [collapsed, setCollapsed] = useState(isAutoTrust);
+  // Auto-trust rows start collapsed; user-confirmed rows too — so that after
+  // F5 they open in the compact «Изменить» view, not in the full editing form.
+  // Without wasUserConfirmedRow here, collapsed=false on every remount because
+  // isAutoTrust is false for most rows, and the user would see expanded cards
+  // with a contradictory «Нужен ответ» + «✓ Проверено» pair of badges.
+  const [collapsed, setCollapsed] = useState(isAutoTrust || wasUserConfirmedRow);
   const zone = cluster?.trust_zone ?? 'yellow';
   const zoneClass: Record<string, string> = {
     yellow: 'border-slate-200 bg-white',
@@ -1223,6 +1269,15 @@ function AttentionCardImpl({
   const appliedSuggestionRef = useRef(false);
   useEffect(() => {
     if (appliedSuggestionRef.current) return;
+    // Если у строки есть persistedOp (пользователь применил и бэкенд сохранил),
+    // подсказки кластера/LLM не нужны — useState уже инициализирован из
+    // persistedOp корректно (строка ~1143). Без этой проверки useRef сбрасывается
+    // при каждом remount (F5, unmount/mount), и contextOp перетирает
+    // правильный mainOp обратно на 'transfer' или другую авто-гипотезу.
+    if (persistedOp) {
+      appliedSuggestionRef.current = true;
+      return;
+    }
     const nextOp = llmOp ?? contextOp;
     if (!nextOp && suggestedCatId == null) return;
     if (nextOp) {
@@ -1232,7 +1287,7 @@ function AttentionCardImpl({
     }
     if (suggestedCatId != null) setPickedCatId(suggestedCatId);
     appliedSuggestionRef.current = true;
-  }, [llmOp, contextOp, suggestedCatId]);
+  }, [llmOp, contextOp, suggestedCatId, persistedOp]);
 
   // Итоговый operation_type, который уйдёт на backend.
   const actualOpType: string = (() => {
@@ -2272,6 +2327,7 @@ function ConfirmedBucket({
         expandedWidth="860px"
         collapsed={collapsedNode}
         expanded={expandedNode}
+        keepMounted
       />
     </div>
   );
