@@ -40,11 +40,12 @@ def _make_tx(db, **kwargs):
 
 
 @pytest.fixture
-def deposit_account(db, user):
+def deposit_account(db, user, bank):
     acc = Account(
         user_id=user.id,
+        bank_id=bank.id,
         name="Вклад",
-        account_type="deposit",
+        account_type="savings",
         balance=Decimal("0"),
         currency="RUB",
         is_active=True,
@@ -57,9 +58,10 @@ def deposit_account(db, user):
 
 
 @pytest.fixture
-def cc_account(db, user):
+def cc_account(db, user, bank):
     acc = Account(
         user_id=user.id,
+        bank_id=bank.id,
         name="Кредитка",
         account_type="credit_card",
         balance=Decimal("0"),

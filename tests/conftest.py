@@ -60,12 +60,29 @@ def user(db):
 
 
 @pytest.fixture
-def regular_account(db, user):
+def bank(db):
+    """Test bank used as `bank_id` for any account created in tests.
+
+    bank_id is NOT NULL (migration 0055), so every account fixture must
+    reference a real bank row. Reusing a single placeholder bank keeps
+    fixtures decoupled from real bank data.
+    """
+    from app.models.bank import Bank
+    b = Bank(name="Test Bank", code="test_bank", is_popular=False)
+    db.add(b)
+    db.commit()
+    db.refresh(b)
+    return b
+
+
+@pytest.fixture
+def regular_account(db, user, bank):
     from app.models.account import Account
     acc = Account(
         user_id=user.id,
+        bank_id=bank.id,
         name="Основной",
-        account_type="regular",
+        account_type="main",
         balance=Decimal("100000"),
         currency="RUB",
         is_active=True,
@@ -78,12 +95,13 @@ def regular_account(db, user):
 
 
 @pytest.fixture
-def credit_account(db, user):
+def credit_account(db, user, bank):
     from app.models.account import Account
     acc = Account(
         user_id=user.id,
+        bank_id=bank.id,
         name="Кредит",
-        account_type="credit",
+        account_type="loan",
         balance=Decimal("-200000"),
         credit_current_amount=Decimal("200000"),
         monthly_payment=Decimal("15000"),

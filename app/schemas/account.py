@@ -3,10 +3,19 @@ from decimal import Decimal
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-AccountType = Literal['regular', 'credit', 'credit_card', 'cash', 'broker', 'deposit', 'installment_card']
+AccountType = Literal[
+    'main',             # обычный дебетовый / наличные
+    'marketplace',      # маркетплейсовый кошелёк (Ozon, WB, …)
+    'loan',             # потребительский кредит
+    'credit_card',      # кредитная карта
+    'installment_card', # карта рассрочки (Халва, Сплит)
+    'broker',           # брокерский счёт
+    'savings',          # сберегательный / накопительный вклад
+    'currency',         # валютный счёт
+]
 
 
 class BankRef(BaseModel):
@@ -23,9 +32,11 @@ class AccountCreateRequest(BaseModel):
     currency: str = Field(default="RUB", min_length=3, max_length=3)
     balance: Decimal = Field(default=0)
     is_active: bool = True
-    account_type: AccountType = "regular"
+    account_type: AccountType = "main"
     is_credit: bool = False
-    bank_id: int | None = None
+    # Bank is mandatory: every account must be tied to a concrete bank so
+    # statement extractors and counterparty-binding logic can resolve correctly.
+    bank_id: int = Field(ge=1)
 
     credit_limit_original: Decimal | None = None
     credit_current_amount: Decimal | None = None
@@ -38,6 +49,24 @@ class AccountCreateRequest(BaseModel):
     deposit_capitalization_period: str | None = None
     contract_number: str | None = None
     statement_account_number: str | None = None
+
+    @model_validator(mode='after')
+    def validate_loan_requires_params(self) -> 'AccountCreateRequest':
+        if self.account_type == 'loan':
+            missing = [
+                f for f, v in [
+                    ('credit_limit_original', self.credit_limit_original),
+                    ('credit_current_amount', self.credit_current_amount),
+                    ('credit_interest_rate', self.credit_interest_rate),
+                    ('credit_term_remaining', self.credit_term_remaining),
+                ]
+                if v is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"Для кредитного счёта обязательны поля: {', '.join(missing)}"
+                )
+        return self
 
 
 class AccountUpdateRequest(BaseModel):
@@ -72,7 +101,7 @@ class AccountResponse(BaseModel):
 
     id: int
     user_id: int
-    bank_id: int | None = None
+    bank_id: int
     bank: BankRef | None = None
     name: str
     currency: str

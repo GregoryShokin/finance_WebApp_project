@@ -19,7 +19,7 @@ const defaultValues: AccountFormValues = {
   currency: 'RUB',
   balance: 0,
   is_active: true,
-  account_type: 'regular',
+  account_type: 'main',
   is_credit: false,
   credit_limit_original: null,
   credit_current_amount: null,
@@ -53,17 +53,21 @@ export function AccountForm({
     formState: { errors },
   } = useForm<AccountFormValues>({ defaultValues });
 
-  const [accountType, setAccountType] = useState<AccountTypeValue>('regular');
-  const [accountTypeQuery, setAccountTypeQuery] = useState('Обычный');
+  const [accountType, setAccountType] = useState<AccountTypeValue>('main');
+  const [accountTypeQuery, setAccountTypeQuery] = useState('Основной счёт');
   const [selectedBank, setSelectedBank] = useState<Bank | null>(null);
+  const [bankError, setBankError] = useState<string | null>(null);
 
   const accountTypeItems = useMemo<SearchSelectItem[]>(
     () => [
-      { value: 'regular', label: 'Обычный счёт', searchText: 'обычный счет карта наличные regular' },
+      { value: 'main', label: 'Основной счёт', searchText: 'основной дебетовый наличные карта main regular' },
+      { value: 'marketplace', label: 'Маркетплейс', searchText: 'маркетплейс ozon wildberries wb кошелёк marketplace' },
+      { value: 'savings', label: 'Вклад / накопительный', searchText: 'вклад депозит накопительный savings deposit проценты' },
+      { value: 'broker', label: 'Брокерский счёт', searchText: 'брокерский инвестиции broker' },
+      { value: 'currency', label: 'Валютный счёт', searchText: 'currency usd eur' },
       { value: 'credit_card', label: 'Кредитная карта', searchText: 'кредитная карта credit card лимит' },
-      { value: 'credit', label: 'Кредит', searchText: 'кредит кредитный счет loan credit' },
-      { value: 'deposit', label: 'Вклад', searchText: 'вклад депозит deposit проценты' },
       { value: 'installment_card', label: 'Карта рассрочки', searchText: 'рассрочка халва сплит installment карта' },
+      { value: 'loan', label: 'Кредит / ипотека', searchText: 'кредит ипотека заём loan credit потребительский' },
     ],
     [],
   );
@@ -72,7 +76,7 @@ export function AccountForm({
     const resolvedAccountType =
       initialData?.account_type ??
       initialValues?.account_type ??
-      (initialData?.is_credit ?? initialValues?.is_credit ? 'credit' : 'regular');
+      (initialData?.is_credit ?? initialValues?.is_credit ? 'loan' : 'main');
     setAccountType(resolvedAccountType);
     setAccountTypeQuery(
       accountTypeItems.find((item) => item.value === resolvedAccountType)?.label ?? 'Обычный счёт',
@@ -85,7 +89,7 @@ export function AccountForm({
         currency: initialData.currency,
         balance: Number(initialData.balance),
         is_active: initialData.is_active,
-        account_type: initialData.account_type ?? (initialData.is_credit ? 'credit' : 'regular'),
+        account_type: initialData.account_type ?? (initialData.is_credit ? 'loan' : 'main'),
         is_credit: initialData.is_credit,
         credit_limit_original:
           initialData.credit_limit_original != null ? Number(initialData.credit_limit_original) : null,
@@ -111,7 +115,7 @@ export function AccountForm({
       currency: initialValues?.currency ?? 'RUB',
       balance: initialValues?.balance ?? 0,
       is_active: initialValues?.is_active ?? true,
-      account_type: initialValues?.account_type ?? (initialValues?.is_credit ? 'credit' : 'regular'),
+      account_type: initialValues?.account_type ?? (initialValues?.is_credit ? 'loan' : 'main'),
       is_credit: initialValues?.is_credit ?? false,
       credit_limit_original: initialValues?.credit_limit_original ?? null,
       credit_current_amount: initialValues?.credit_current_amount ?? null,
@@ -125,9 +129,9 @@ export function AccountForm({
     });
   }, [accountTypeItems, initialData, initialValues, reset]);
 
-  const isCredit = accountType === 'credit';
+  const isLoan = accountType === 'loan';
   const isCreditCard = accountType === 'credit_card';
-  const isDeposit = accountType === 'deposit';
+  const isSavings = accountType === 'savings';
   const isInstallmentCard = accountType === 'installment_card';
 
   return (
@@ -135,21 +139,26 @@ export function AccountForm({
       className="space-y-4"
       autoComplete="off"
       onSubmit={handleSubmit((values) => {
+        if (!selectedBank) {
+          setBankError('Выбери банк — без него выписки не распознаются');
+          return;
+        }
+        setBankError(null);
         const payload: AccountFormValues = {
           ...values,
           account_type: accountType,
-          is_credit: isCredit,
-          bank_id: selectedBank?.id ?? null,
-          balance: isCredit ? 0 : Number(values.balance),
-          credit_limit_original: isCredit || isCreditCard || isInstallmentCard ? Number(values.credit_limit_original) : null,
-          credit_current_amount: isCredit || isInstallmentCard ? Number(values.credit_current_amount) : null,
-          credit_interest_rate: isCredit || isInstallmentCard ? Number(values.credit_interest_rate) : null,
-          credit_term_remaining: isCredit ? Number(values.credit_term_remaining) : null,
-          monthly_payment: isCredit || isCreditCard || isInstallmentCard ? (values.monthly_payment || null) : null,
-          deposit_interest_rate: isDeposit ? (values.deposit_interest_rate || null) : null,
-          deposit_open_date: isDeposit ? (values.deposit_open_date || null) : null,
-          deposit_close_date: isDeposit ? (values.deposit_close_date || null) : null,
-          deposit_capitalization_period: isDeposit ? (values.deposit_capitalization_period || null) : null,
+          is_credit: isLoan,
+          bank_id: selectedBank.id,
+          balance: isLoan ? 0 : Number(values.balance),
+          credit_limit_original: isLoan || isCreditCard || isInstallmentCard ? Number(values.credit_limit_original) : null,
+          credit_current_amount: isLoan || isInstallmentCard ? Number(values.credit_current_amount) : null,
+          credit_interest_rate: isLoan || isInstallmentCard ? Number(values.credit_interest_rate) : null,
+          credit_term_remaining: isLoan ? Number(values.credit_term_remaining) : null,
+          monthly_payment: isLoan || isCreditCard || isInstallmentCard ? (values.monthly_payment || null) : null,
+          deposit_interest_rate: isSavings ? (values.deposit_interest_rate || null) : null,
+          deposit_open_date: isSavings ? (values.deposit_open_date || null) : null,
+          deposit_close_date: isSavings ? (values.deposit_close_date || null) : null,
+          deposit_capitalization_period: isSavings ? (values.deposit_capitalization_period || null) : null,
         };
         onSubmit(payload);
       })}
@@ -172,9 +181,21 @@ export function AccountForm({
       </div>
 
       <div>
-        <label className="mb-1.5 block text-sm font-medium text-slate-700">Банк</label>
-        <BankPicker value={selectedBank?.id ?? null} onChange={setSelectedBank} />
-        <p className="mt-1 text-xs text-slate-400">Помогает правильно распознавать выписки и связывать счета</p>
+        <label className="mb-1.5 block text-sm font-medium text-slate-700">
+          Банк <span className="text-danger">*</span>
+        </label>
+        <BankPicker
+          value={selectedBank?.id ?? null}
+          onChange={(bank) => {
+            setSelectedBank(bank);
+            if (bank) setBankError(null);
+          }}
+        />
+        {bankError ? (
+          <p className="mt-1 text-sm text-danger">{bankError}</p>
+        ) : (
+          <p className="mt-1 text-xs text-slate-400">Помогает правильно распознавать выписки и связывать счета</p>
+        )}
       </div>
 
       <input type="hidden" {...register('account_type')} />
@@ -195,7 +216,7 @@ export function AccountForm({
             setAccountType(nextType);
             setAccountTypeQuery(item.label);
             setValue('account_type', nextType);
-            setValue('is_credit', nextType === 'credit');
+            setValue('is_credit', nextType === 'loan');
           }}
         />
       </div>
@@ -216,7 +237,7 @@ export function AccountForm({
           {errors.currency ? <p className="mt-1 text-sm text-danger">{errors.currency.message}</p> : null}
         </div>
 
-        {!isCredit && !isCreditCard && !isInstallmentCard ? (
+        {!isLoan && !isCreditCard && !isInstallmentCard ? (
           <div>
             <Label htmlFor="account-balance">Баланс</Label>
             <Input
@@ -235,7 +256,7 @@ export function AccountForm({
         ) : null}
       </div>
 
-      {isCredit ? (
+      {isLoan ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <Label htmlFor="credit-limit-original">Изначальная сумма</Label>
@@ -275,7 +296,7 @@ export function AccountForm({
         </div>
       ) : null}
 
-      {isDeposit ? (
+      {isSavings ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <Label htmlFor="deposit-interest-rate">Процентная ставка, % годовых</Label>
@@ -324,7 +345,7 @@ export function AccountForm({
         </div>
       ) : null}
 
-      {isCredit || isCreditCard || isInstallmentCard ? (
+      {isLoan || isCreditCard || isInstallmentCard ? (
         <div>
           <Label htmlFor="monthly-payment">Ежемесячный платёж</Label>
           <Input

@@ -1,3 +1,22 @@
+"""Facts parser for the import pipeline (spec §3, §4.1 — facts group).
+
+Despite the legacy name `ImportNormalizer`, this module's only responsibility
+is **parsing immutable facts** from a raw CSV/XLSX/PDF row — date, amount,
+currency, direction, raw description. It does NOT touch decision-tier output
+(skeleton, fingerprint, tokens) — that lives in `import_normalizer_v2.py`.
+
+Why two modules? Historically `import_normalizer_v2.py` was added to introduce
+the v2 contract (skeleton + tokens + fingerprint) without rewriting v1's
+field-extraction logic. The two coexist by design:
+
+  • `import_normalizer.py`     → parses ParsedRow (facts; spec §4.1 facts)
+  • `import_normalizer_v2.py`  → derives DerivedRow (decisions; spec §4.1 decisions)
+
+Both are orchestrated by `import_normalization.normalize()` which guarantees
+one atomic call per row (spec §3.1, §3.2).
+
+Spec backlog §14.3 tracks the eventual unification into one module.
+"""
 from __future__ import annotations
 
 from decimal import Decimal

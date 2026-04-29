@@ -837,11 +837,12 @@ class FinancialHealthService:
         own_capital = ZERO
         for account in active_accounts:
             balance = self._to_decimal(account.balance)
-            is_credit = bool(account.is_credit) or account.account_type in {"credit", "credit_card"}
+            # Migration 0054: credit→loan, deposit→savings. Both tokens kept for compat.
+            is_credit = bool(account.is_credit) or account.account_type in {"loan", "credit", "credit_card"}
             if is_credit:
                 if balance < 0:
                     total_debt += abs(balance)
-            elif account.account_type == "deposit":
+            elif account.account_type in ("deposit", "savings"):
                 own_capital += balance
             else:
                 if balance > 0:

@@ -159,15 +159,18 @@ class TestCommitSkipsParked:
     and expose parked_count in the response so the UI can surface it."""
 
     def test_parked_row_does_not_create_transaction(self):
-        """Verified by tracing the commit loop's dispatch logic with a parked status."""
-        # This is a structural test: the status check is the first in the loop,
-        # so if the loop reaches a parked row, it hits the counter and continues.
-        # We prove this by reading the source.
+        """Verified by tracing CommitOrchestrator's per-row dispatch.
+
+        After the §1 god-object decomposition (2026-04-29) the per-row commit
+        decision tree lives in `CommitOrchestrator._commit_one`. This test
+        reads its source and asserts the parked branch short-circuits before
+        any transaction-creation path.
+        """
         import inspect
-        from app.services import import_service
-        src = inspect.getsource(import_service.ImportService.commit_import)
-        # The commit loop must branch on "parked" before any transaction-creating logic.
+        from app.services.commit_orchestrator import CommitOrchestrator
+        src = inspect.getsource(CommitOrchestrator._commit_one)
+        # The decision tree must branch on "parked" before transaction-creating logic.
         parked_idx = src.find('row_status == "parked"')
-        create_idx = src.find("create_transaction")
-        assert parked_idx != -1, "commit_import must handle parked status"
-        assert parked_idx < create_idx, "parked branch must short-circuit before transaction creation"
+        dispatch_idx = src.find("_dispatch_create")
+        assert parked_idx != -1, "_commit_one must handle parked status"
+        assert parked_idx < dispatch_idx, "parked branch must short-circuit before transaction dispatch"

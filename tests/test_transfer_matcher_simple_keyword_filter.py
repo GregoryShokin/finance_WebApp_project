@@ -23,11 +23,12 @@ from app.services.transfer_matcher_service import TransferMatcherService
 
 
 @pytest.fixture
-def second_account(db, user):
+def second_account(db, user, bank):
     acc = Account(
         user_id=user.id,
+        bank_id=bank.id,
         name="Тинькоф Дебет",
-        account_type="regular",
+        account_type="main",
         balance=Decimal("50000"),
         currency="RUB",
         is_active=True,
@@ -100,11 +101,14 @@ class TestSimpleKeywordFilter:
         db.refresh(expense); db.refresh(income)
         assert (expense.normalized_data_json or {}).get("operation_type") == "transfer"
         assert (income.normalized_data_json or {}).get("operation_type") == "transfer"
-        # Income is the secondary side of an active-active pair → duplicate.
-        assert income.status == "duplicate"
-        # Expense is the primary side → ready, with target pointing at income's account.
+        # Spec v1.11 (§8.8, §12.10): both sides of a cross-session pair are
+        # primary (status='ready'). `duplicate` is assigned ONLY when the row
+        # collides with an already-committed transaction. Two active rows
+        # from different sessions are a legitimate transfer pair — not a dup.
+        assert income.status == "ready"
         assert expense.status == "ready"
         assert (expense.normalized_data_json or {}).get("target_account_id") == second_account.id
+        assert (income.normalized_data_json or {}).get("target_account_id") == regular_account.id
 
     def test_pair_with_keyword_on_one_side_is_matched(
         self, db, user, regular_account, second_account, matcher,
@@ -128,8 +132,9 @@ class TestSimpleKeywordFilter:
         matcher.match_transfers_for_user(user_id=user.id)
 
         db.refresh(expense); db.refresh(income)
+        # Spec v1.11 (§8.8): both sides of a cross-session pair = ready.
         assert expense.status == "ready"
-        assert income.status == "duplicate"
+        assert income.status == "ready"
 
     def test_pair_without_keyword_anywhere_is_not_matched(
         self, db, user, regular_account, second_account, matcher,
@@ -269,8 +274,9 @@ class TestSimpleKeywordFilter:
         assert expense.status == "ready"
         assert expense.error_message is None
         assert (expense.normalized_data_json or {}).get("target_account_id") == second_account.id
-        # Income side becomes the secondary half of the pair.
-        assert income.status == "duplicate"
+        # Spec v1.11 (§8.8): both sides of cross-session pair = ready.
+        assert income.status == "ready"
+        assert (income.normalized_data_json or {}).get("target_account_id") == regular_account.id
 
     def test_pair_across_adjacent_calendar_days_is_matched(
         self, db, user, regular_account, second_account, matcher,
@@ -305,9 +311,11 @@ class TestSimpleKeywordFilter:
         matcher.match_transfers_for_user(user_id=user.id)
 
         db.refresh(expense); db.refresh(income)
+        # Spec v1.11 (§8.8): both sides of cross-session pair = ready.
         assert expense.status == "ready"
-        assert income.status == "duplicate"
+        assert income.status == "ready"
         assert (expense.normalized_data_json or {}).get("target_account_id") == second_account.id
+        assert (income.normalized_data_json or {}).get("target_account_id") == regular_account.id
 
     def test_unrelated_skeletons_hours_apart_no_identifier_rejected(
         self, db, user, regular_account, second_account, matcher,

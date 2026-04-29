@@ -34,9 +34,9 @@ def import_snapshot_model():
 
 
 @pytest.fixture
-def deposit_account(db, user):
+def deposit_account(db, user, bank):
     acc = Account(
-        user_id=user.id, name="Вклад", account_type="deposit",
+        user_id=user.id, bank_id=bank.id, name="Вклад", account_type="savings",
         balance=Decimal("150000"), currency="RUB", is_active=True, is_credit=False,
     )
     db.add(acc)
@@ -46,9 +46,9 @@ def deposit_account(db, user):
 
 
 @pytest.fixture
-def credit_account2(db, user):
+def credit_account2(db, user, bank):
     acc = Account(
-        user_id=user.id, name="Кредит2", account_type="credit",
+        user_id=user.id, bank_id=bank.id, name="Кредит2", account_type="loan",
         balance=Decimal("-50000"), credit_current_amount=Decimal("50000"),
         currency="RUB", is_active=True, is_credit=True,
     )
@@ -132,6 +132,7 @@ def test_trend_calculation(db, user, regular_account):
             user_id=user.id, snapshot_month=sm,
             liquid_amount=cap, deposit_amount=Decimal("0"),
             credit_debt=Decimal("0"), capital=cap,
+            net_capital=cap,
         ))
     db.commit()
 
@@ -232,11 +233,11 @@ def test_dti_first_shag_scenario(db, user, regular_account, interest_category):
     prev_month = date(today.year, today.month, 1) - timedelta(days=1)
     prev_date = datetime(prev_month.year, prev_month.month, 15)
 
-    # Two credit accounts
-    mortgage = Account(user_id=user.id, name="Ипотека", account_type="credit",
+    # Two credit accounts — share the test bank from regular_account.
+    mortgage = Account(user_id=user.id, bank_id=regular_account.bank_id, name="Ипотека", account_type="loan",
                        balance=Decimal("-2000000"), credit_current_amount=Decimal("2000000"),
                        currency="RUB", is_active=True, is_credit=True)
-    loan = Account(user_id=user.id, name="Потребкредит", account_type="credit",
+    loan = Account(user_id=user.id, bank_id=regular_account.bank_id, name="Потребкредит", account_type="loan",
                    balance=Decimal("-500000"), credit_current_amount=Decimal("500000"),
                    currency="RUB", is_active=True, is_credit=True)
     db.add_all([mortgage, loan])

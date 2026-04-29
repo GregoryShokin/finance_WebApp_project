@@ -1,6 +1,20 @@
-"""Token extraction, skeleton normalization, and fingerprinting for import rows.
+"""Decisions deriver for the import pipeline (spec §3, §4.1 — decisions group).
 
-Pure functions — no DB, no ORM. Consumed by ImportService in Phase 1.3.
+Despite the legacy name `_v2`, this is NOT a "version 2" of the facts parser.
+It's a separate, complementary module that derives **decision-tier output**
+from facts produced by `import_normalizer.py`:
+
+  • tokens         — extracted identifiers (phone, contract, IBAN, card, …)
+  • skeleton       — placeholder-anchored description for fingerprinting
+  • fingerprint    — deterministic cluster key
+  • is_transfer_like / is_refund_like — operation-type signals (spec §7.7)
+  • transfer_signal(…) — STRONG/WEAK confidence (spec §7.7, this module)
+
+Pure functions — no DB, no ORM. Orchestrated by `import_normalization.normalize()`
+which guarantees a single atomic call per row (spec §3.1, §3.2).
+
+Companion module: `import_normalizer.py` parses immutable ParsedRow facts.
+Spec backlog §14.3 tracks the eventual unification.
 
 The three public functions form the Phase 1 pipeline:
 
@@ -89,20 +103,101 @@ STOPWORDS: frozenset[str] = frozenset({
 # the identifier (phone/contract/card) should participate in the fingerprint in
 # its raw form instead of being swallowed by a placeholder.
 #
-# Kept narrow on purpose: anything matching here pulls the row into the
-# identifier-aware branch, which splits one broad cluster ("Внешний перевод по
-# номеру телефона") into per-recipient sub-clusters. False positives are
-# cheap (over-splitting into smaller clusters), false negatives are
-# expensive (all recipients merged into one undistinguishable group).
-_TRANSFER_KEYWORDS: tuple[str, ...] = (
+# Two-tier classification (spec §7.7):
+#   STRONG (signal=0.95) — explicit banking phrases that unambiguously denote
+#     an internal transfer between the user's own accounts. Either side of a
+#     transfer pair carrying any of these is enough to classify both sides as
+#     transfer regardless of upstream enrichment.
+#   WEAK (signal=0.7) — generic "перевод" / "transfer" tokens. Could be a
+#     transfer to a friend, a payment, or a refund. Below the silent-apply
+#     threshold (0.88) so the row falls through to enrichment / user.
+#
+# ANTI-TRANSFER (multiplier ×0.3) — phrases that strongly indicate a
+# payment/purchase, NOT a transfer. Even when "перевод" appears in the
+# description ("регулярный платёж: перевод за услугу"), an anti-keyword pulls
+# the score back below the threshold. Single source of truth — the cross-
+# session transfer matcher imports the same set so symmetric classification
+# of both sides of a transfer pair stays consistent (spec §12.8).
+_STRONG_TRANSFER_KEYWORDS: tuple[str, ...] = (
+    "внутрибанковский перевод",
+    "внутрибанковский",
+    "внутренний перевод",
+    "межбанковский перевод",
+    "внешний перевод",
+    "перевод между счетами",
+    "перевод между своими",
+    "перевод на свой счёт",
+    "перевод на свой счет",
+    "перевод со своего счёта",
+    "перевод со своего счета",
+    "пополнение своего счёта",
+    "пополнение своего счета",
+    "между своими счетами",
+    "с карты на карту",
+    "card to card",
+    "card-to-card",
+    "own transfer",
+    "own account",
+)
+_WEAK_TRANSFER_KEYWORDS: tuple[str, ...] = (
     "перевод",
     "transfer",
-    "с карты на карту",
     "c2c",
-    "внутрибанковский",
-    "внешний перевод",
-    "внутренний перевод",
 )
+ANTI_TRANSFER_KEYWORDS: frozenset[str] = frozenset({
+    # Кредитные / регулярные платежи
+    "регулярный платёж",
+    "регулярный платеж",
+    "оплата кредита",
+    "погашение кредита",
+    "ежемесячный платёж",
+    "ежемесячный платеж",
+    "оплата задолженности",
+    "оплата покупки",
+    "минимальный платёж",
+    "минимальный платеж",
+    # Оплата услуг и товаров — общий маркер платёжки
+    "оплата услуг",
+    "оплата товаров",
+    # Мобильные операторы
+    "mbank",
+    "м.банк",
+    "megafon",
+    "мегафон",
+    "mts",
+    "мтс",
+    "beeline",
+    "билайн",
+    "tele2",
+    "теле2",
+    "yota",
+    "йота",
+    # Маркетплейсы (только когда явно платёж — НЕ добавлять «яндекс»/«ozon»,
+    # это банки, переводы между ними легитимны)
+    "wildberries",
+    "вайлдберриз",
+    "spbu",
+    # Подписки и сервисы
+    "подписк",
+    "subscription",
+    "spotify",
+    "youtube",
+    "netflix",
+    "apple",
+    "google",
+})
+
+# Backward-compat alias — kept while clusterer / import_service migrate to
+# `transfer_signal()`. Defined as the union so `is_transfer_like` stays
+# truthy for any row that would have matched before.
+_TRANSFER_KEYWORDS: tuple[str, ...] = _STRONG_TRANSFER_KEYWORDS + _WEAK_TRANSFER_KEYWORDS
+
+# Confidence thresholds — `transfer_signal()` produces a float that downstream
+# code interprets:
+#   ≥ TRANSFER_SIGNAL_STRONG → silently classify as transfer (spec §7.7 STRONG)
+#   ≥ TRANSFER_SIGNAL_WEAK   → enough to set is_transfer_like=True for routing
+TRANSFER_SIGNAL_STRONG: float = 0.88
+TRANSFER_SIGNAL_WEAK: float = 0.5
 
 
 # Refund / reversal markers. A row matching any of these is considered a
@@ -119,28 +214,51 @@ _REFUND_KEYWORDS: tuple[str, ...] = (
 )
 
 
-def is_transfer_like(description: str, operation_type: str | None = None) -> bool:
-    """Return True if the row should use identifier-aware fingerprinting.
+def transfer_signal(description: str, operation_type: str | None = None) -> float:
+    """Return a confidence ∈ [0.0, 1.0] that the row is an internal transfer.
 
-    Two signals:
-      1. `operation_type == "transfer"` — set upstream by the enrichment service
-         when bank mechanics or history classify the row as an internal move.
-      2. Transfer keyword in the description — catches rows that haven't been
-         enriched yet (e.g. cross-session matcher runs before enrichment).
+    Tiers (spec §7.7):
+      • upstream `operation_type == "transfer"` → 1.0 (already classified)
+      • STRONG keyword present                  → 0.95
+      • WEAK keyword present                    → 0.7
+      • no keyword                              → 0.0
 
-    Refund rows are *not* transfers — an "Отмена операции оплаты KOFEMOLOKO"
-    is a reversal of a purchase, not an internal money move. Callers relying
-    on this helper to decide transfer-aware fingerprinting shouldn't pull
-    refund rows into that branch.
+    Anti-transfer keywords ("оплата кредита", "Мегафон", "wildberries", …)
+    multiply the result by 0.3, pulling explicit payments back below the
+    silent-apply threshold even when "перевод" appears in the description.
+
+    Refund keywords zero the signal — a refund is a reversal, not a transfer.
     """
     if (operation_type or "").strip().lower() == "transfer":
-        return True
+        return 1.0
     if not description:
-        return False
+        return 0.0
     lowered = description.lower()
     if any(kw in lowered for kw in _REFUND_KEYWORDS):
-        return False
-    return any(kw in lowered for kw in _TRANSFER_KEYWORDS)
+        return 0.0
+
+    base = 0.0
+    if any(kw in lowered for kw in _STRONG_TRANSFER_KEYWORDS):
+        base = 0.95
+    elif any(kw in lowered for kw in _WEAK_TRANSFER_KEYWORDS):
+        base = 0.7
+
+    if base == 0.0:
+        return 0.0
+    if any(kw in lowered for kw in ANTI_TRANSFER_KEYWORDS):
+        base *= 0.3
+    return base
+
+
+def is_transfer_like(description: str, operation_type: str | None = None) -> bool:
+    """Backward-compat: True iff `transfer_signal` clears the WEAK threshold.
+
+    Existing callers (`apply_decisions`, clusterer, import_service) keep
+    working unchanged. New callers that need finer control should call
+    `transfer_signal()` directly and compare against `TRANSFER_SIGNAL_STRONG`
+    or their own threshold.
+    """
+    return transfer_signal(description, operation_type) >= TRANSFER_SIGNAL_WEAK
 
 
 def is_refund_like(description: str, operation_type: str | None = None) -> bool:

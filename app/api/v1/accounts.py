@@ -5,7 +5,7 @@ from app.api.deps import get_current_user
 from app.core.db import get_db
 from app.models.user import User
 from app.schemas.account import AccountCreateRequest, AccountResponse, AccountUpdateRequest, BalanceAdjustRequest
-from app.services.account_service import AccountNotFoundError, AccountService
+from app.services.account_service import AccountNotFoundError, AccountService, BankRequiredError
 
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
 
@@ -20,7 +20,10 @@ def _prepare_payload(data: dict) -> dict:
 def create_account(payload: AccountCreateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     data = _prepare_payload(payload.model_dump(exclude_unset=True, by_alias=False))
     data["user_id"] = current_user.id
-    return AccountService(db).create(**data)
+    try:
+        return AccountService(db).create(**data)
+    except BankRequiredError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 @router.get("", response_model=list[AccountResponse])
@@ -43,6 +46,8 @@ def update_account(account_id: int, payload: AccountUpdateRequest, db: Session =
         return AccountService(db).update(account_id=account_id, user_id=current_user.id, **data)
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except BankRequiredError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 @router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)

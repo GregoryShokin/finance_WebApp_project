@@ -62,12 +62,13 @@ class TestInternalTransferKeywordsAreStrong:
 
 
 @pytest.fixture
-def split_account(db, user):
+def split_account(db, user, bank):
     """Счёт-target (например, Тинькофф Сплит), на котором уже лежит committed orphan."""
     acc = Account(
         user_id=user.id,
+        bank_id=bank.id,
         name="Сплит",
-        account_type="regular",
+        account_type="main",
         balance=Decimal("86000"),  # уже получил 86 000 при предыдущем коммите orphan'а
         currency="RUB",
         is_active=True,
@@ -78,12 +79,13 @@ def split_account(db, user):
 
 
 @pytest.fixture
-def debit_account(db, user):
+def debit_account(db, user, bank):
     """Активная сторона — счёт, который сейчас коммитится (Тинькофф Дебет)."""
     acc = Account(
         user_id=user.id,
+        bank_id=bank.id,
         name="Дебет",
-        account_type="regular",
+        account_type="main",
         balance=Decimal("100000"),
         currency="RUB",
         is_active=True,
@@ -118,14 +120,23 @@ def orphan_committed_transfer(db, user, split_account):
 
 @pytest.fixture
 def import_service(db):
-    """Минимальный ImportService — нам нужен только метод _link_transfer_to_committed_pair."""
+    """Минимальный ImportService — нам нужен только метод _link_transfer_to_committed_pair.
+
+    Step 2 of the §1 god-object decomposition (2026-04-29) extracted the
+    transfer-linking logic into TransferLinkingService. The wrapper method
+    now delegates through `self.transfer_linker`, so this minimal fixture
+    must wire that service up too.
+    """
     svc = ImportService.__new__(ImportService)
     svc.db = db
-    # Минимальные зависимости, которые использует _link_transfer_to_committed_pair:
     from app.repositories.account_repository import AccountRepository
     from app.services.transaction_enrichment_service import TransactionEnrichmentService
+    from app.services.transfer_linking_service import TransferLinkingService
     svc.account_repo = AccountRepository(db)
     svc.enrichment = TransactionEnrichmentService(db=db)
+    svc.transfer_linker = TransferLinkingService(
+        db, normalize_description=svc.enrichment.normalize_description,
+    )
     return svc
 
 

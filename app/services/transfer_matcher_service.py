@@ -49,53 +49,11 @@ MIN_SCORE = 0.60
 MAX_DATE_DIFF_DAYS = 1
 _BANK_TZ = ZoneInfo("Europe/Moscow")
 
-# Keywords that strongly indicate a payment/purchase — NOT an internal transfer.
-# If either candidate contains one of these, the pair score is penalized.
-_ANTI_TRANSFER_KEYWORDS = frozenset({
-    # Кредитные/регулярные платежи
-    "регулярный платёж",
-    "регулярный платеж",
-    "оплата кредита",
-    "погашение кредита",
-    "ежемесячный платёж",
-    "ежемесячный платеж",
-    "оплата задолженности",
-    "оплата покупки",
-    "минимальный платёж",
-    "минимальный платеж",
-    # Оплата услуг — общий маркер платёжки. Без него Megafon/MTS/Beeline и
-    # любые «Оплата услуг X» легко спариваются как «перевод» по совпадению
-    # суммы — они ведь такие же expense, просто другая сессия имеет income
-    # 500 ₽ той же датой, и matcher делает ложно-положительную пару.
-    "оплата услуг",
-    "оплата товаров",
-    # Мобильные операторы и популярные сервисы
-    "mbank",
-    "м.банк",
-    "megafon",
-    "мегафон",
-    "mts",
-    "мтс",
-    "beeline",
-    "билайн",
-    "tele2",
-    "теле2",
-    "yota",
-    "йота",
-    # Магазины / маркетплейсы — только если явно платёж, не перевод
-    # НЕ добавляй сюда "яндекс"/"ozon" — это банки, переводы между ними легитимны.
-    "wildberries",
-    "вайлдберриз",
-    "spbu",
-    # Подписки и сервисы
-    "подписк",
-    "subscription",
-    "spotify",
-    "youtube",
-    "netflix",
-    "apple",
-    "google",
-})
+# Single source of truth — anti-transfer keywords live in the normalizer
+# (spec §7.7) so symmetric classification of both sides of a transfer pair
+# stays consistent regardless of whether the matcher runs before or after
+# user-side enrichment.
+from app.services.import_normalizer_v2 import ANTI_TRANSFER_KEYWORDS as _ANTI_TRANSFER_KEYWORDS
 
 # Keywords that strongly indicate an internal transfer between the user's own
 # accounts. If BOTH sides of a candidate pair contain one of these, we add a
@@ -463,16 +421,26 @@ class TransferMatcherService:
     ) -> list[_Candidate]:
         """Committed candidates for transfer-pair matching.
 
-        Loads ALL committed transactions in the date window (not just
-        transfers). Restricting to op=transfer and emitting TWO candidates
-        per transfer (mirror) was experimented with but broke cross-session
-        matching: synthetic mirror candidates competed with real active
-        rows for greedy assignment and starved them of pairs. The
-        committed-tx duplicate detection of the receiving-side input row
-        is handled separately in `_detect_committed_duplicates` (second
-        pass), which uses a mirror INDEX rather than mirror CANDIDATES,
-        so it doesn't compete with active-row matching.
+        Loads committed transactions that are NOT already part of a known
+        pair. Two filters apply:
+          • `transfer_pair_id IS NULL` — never re-pair a tx that has a sibling.
+          • `operation_type != 'transfer' OR target_account_id IS NULL` — a
+            committed transfer that already knows its `target_account_id` is
+            a "fully paired" record (the bank-statement counterpart was either
+            committed earlier OR the orphan was already linked via §10.6). It
+            represents BOTH sides of the operation, so matcher must not glue a
+            new active row to it as a fresh pair — that would create double-
+            credit on the target account. Such records are still findable by
+            `_detect_committed_duplicates` via the mirror index, which is the
+            correct path for "this row is a re-import of an already-known
+            operation" → status='duplicate'.
+
+        Restricting to op=transfer and emitting TWO candidates per transfer
+        (mirror) was experimented with but broke cross-session matching:
+        synthetic mirror candidates competed with real active rows for greedy
+        assignment and starved them of pairs.
         """
+        from sqlalchemy import or_
         buffer = timedelta(days=2)
         from datetime import timezone as _tz
         df_aware = date_from.replace(tzinfo=_tz.utc) if date_from.tzinfo is None else date_from
@@ -484,6 +452,10 @@ class TransferMatcherService:
                 TransactionModel.transaction_date >= df_aware - buffer,
                 TransactionModel.transaction_date <= dt_aware,
                 TransactionModel.transfer_pair_id.is_(None),
+                or_(
+                    TransactionModel.operation_type != "transfer",
+                    TransactionModel.target_account_id.is_(None),
+                ),
             )
             .all()
         )
@@ -809,9 +781,21 @@ class TransferMatcherService:
                 str(tx.operation_type or "") == "transfer"
                 and tx.target_account_id is not None
             ):
-                mirror_direction = "expense" if direction == "income" else "income"
-                mirror_key = (tx.target_account_id, mirror_direction, tx.amount)
-                committed_index.setdefault(mirror_key, []).append((tx, parsed))
+                # Both-direction mirror: a committed transfer between two of
+                # the user's own accounts must be found from the target side
+                # regardless of how the OTHER bank classifies the operation.
+                # Real case: Дебет → Сплит (credit). The debit bank booked
+                # the move as `expense`. When the Сплит statement is later
+                # imported, that bank classifies «Погашение основного долга»
+                # as ALSO `expense` (debt reduction = credit used → returned),
+                # which is the opposite of what the transfer model expects on
+                # the target side (`income` = phantom credit). Indexing both
+                # directions ensures the row is detected as a duplicate of
+                # the already-committed transfer instead of being left as a
+                # fresh row that would double the spend.
+                for mirror_direction in ("income", "expense"):
+                    mirror_key = (tx.target_account_id, mirror_direction, tx.amount)
+                    committed_index.setdefault(mirror_key, []).append((tx, parsed))
 
         # Match each active candidate against same-account committed txs.
         # §8.1: дедуп-ключ обязан включать skeleton — без него matcher

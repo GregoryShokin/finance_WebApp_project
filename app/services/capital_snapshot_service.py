@@ -94,7 +94,7 @@ class CapitalSnapshotService:
                 if op in ("transfer", "credit_early_repayment"):
                     if tgt_acc and tgt_acc.account_type == "credit_card":
                         balances[tgt] -= amount
-                    elif tgt_acc and tgt_acc.account_type in ("credit", "installment_card"):
+                    elif tgt_acc and tgt_acc.account_type in ("loan", "credit", "installment_card"):
                         principal = tx.credit_principal_amount or amount
                         credit_currents[tgt] += Decimal(str(principal))
                         balances[tgt] = -credit_currents[tgt]
@@ -111,16 +111,18 @@ class CapitalSnapshotService:
                 continue
             bal = balances.get(acc.id, Decimal("0"))
             at = acc.account_type
-            if at in ("regular", "cash"):
+            # Migration 0054 enum rename: regular→main, deposit→savings, credit→loan.
+            # Both old and new tokens accepted as backward-compat.
+            if at in ("main", "regular", "cash", "marketplace", "currency"):
                 if bal > 0:
                     liquid += bal
-            elif at == "deposit":
+            elif at in ("deposit", "savings"):
                 if bal > 0:
                     deposit += bal
             elif at == "broker":
                 if bal > 0:
                     broker += bal
-            elif at == "credit":
+            elif at in ("loan", "credit"):
                 if bal < 0:
                     credit_debt += abs(bal)
             elif at in ("credit_card", "installment_card"):
@@ -287,11 +289,13 @@ class CapitalSnapshotService:
         debt = Decimal("0")
         for acc in accounts:
             bal = Decimal(str(acc.balance or 0))
-            if acc.account_type in ("regular", "cash"):
+            # Migration 0054 renamed: regular→main, deposit→savings, credit→loan.
+            # Both old and new tokens are accepted as backward-compat.
+            if acc.account_type in ("main", "regular", "cash", "marketplace", "currency", "broker"):
                 liquid += bal
-            elif acc.account_type == "deposit":
+            elif acc.account_type in ("deposit", "savings"):
                 deposit += bal
-            elif acc.account_type in ("credit", "credit_card", "installment_card"):
+            elif acc.account_type in ("loan", "credit", "credit_card", "installment_card"):
                 if acc.credit_current_amount is not None:
                     debt += Decimal(str(acc.credit_current_amount))
                 elif acc.account_type == "credit_card" and bal < 0:

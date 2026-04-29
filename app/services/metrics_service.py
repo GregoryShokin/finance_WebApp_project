@@ -53,9 +53,18 @@ def _aware(dt):
 # Constants
 AVG_WINDOW_MONTHS = 12  # Phase 2: unified averaging window (was 3)
 INTEREST_CATEGORY_NAME = "Проценты по кредитам"
-LIQUID_ACCOUNT_TYPES = {"regular", "cash", "deposit"}
+# Spec §9.2 / migration 0054 enum rename:
+#   regular → main
+#   deposit → savings
+# Backward-compat: both old and new tokens accepted while DBs may carry either.
+LIQUID_ACCOUNT_TYPES = {"main", "regular", "cash", "savings", "deposit", "marketplace", "currency", "broker"}
 CREDIT_CARD_TYPES = {"credit_card", "installment_card"}
-ALL_CREDIT_TYPES = {"credit", "credit_card", "installment_card"}
+# Spec §9.2 / migration 0054: the legacy `credit` value has been renamed to
+# `loan`. Keep the old token in the set as a backstop for any DB that wasn't
+# migrated yet — both refer to the same conceptual subclass (potreb / mortgage
+# / autokredit). `credit_card` and `installment_card` cover the other two
+# credit-account subclasses.
+ALL_CREDIT_TYPES = {"loan", "credit", "credit_card", "installment_card"}
 
 
 # ── Result dataclasses ────────────────────────────────────────────────────────
@@ -286,7 +295,7 @@ class MetricsService:
         for acc in accounts:
             if acc.account_type in LIQUID_ACCOUNT_TYPES:
                 liquid.append(acc)
-            if acc.account_type == "deposit":
+            if acc.account_type in ("deposit", "savings"):
                 deposit.append(acc)
             if acc.account_type in ALL_CREDIT_TYPES:
                 credit.append(acc)
@@ -673,7 +682,7 @@ class MetricsService:
         for acc in accounts:
             if acc.account_type in ("regular", "cash"):
                 liquid_assets += Decimal(str(acc.balance))
-            elif acc.account_type == "deposit":
+            elif acc.account_type in ("deposit", "savings"):
                 deposits += Decimal(str(acc.balance))
             elif acc.account_type in ("credit", "credit_card", "installment_card"):
                 if acc.credit_current_amount is not None:

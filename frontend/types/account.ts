@@ -1,4 +1,12 @@
-export type AccountType = 'regular' | 'credit' | 'credit_card' | 'cash' | 'broker' | 'deposit' | 'installment_card';
+export type AccountType =
+  | 'main'             // обычный дебетовый
+  | 'marketplace'      // маркетплейсовый кошелёк
+  | 'loan'             // потребительский кредит
+  | 'credit_card'      // кредитная карта
+  | 'installment_card' // карта рассрочки
+  | 'broker'           // брокерский счёт
+  | 'savings'          // вклад / накопительный
+  | 'currency';        // валютный счёт
 
 export type Bank = {
   id: number;
@@ -11,7 +19,7 @@ export type Bank = {
 export type Account = {
   id: number;
   user_id: number;
-  bank_id: number | null;
+  bank_id: number;
   bank: Bank | null;
   name: string;
   currency: string;
@@ -43,7 +51,7 @@ export type CreateAccountPayload = {
   is_active: boolean;
   account_type: AccountType;
   is_credit: boolean;
-  bank_id?: number | null;
+  bank_id: number;
   credit_limit_original?: number | null;
   credit_current_amount?: number | null;
   credit_interest_rate?: number | null;
