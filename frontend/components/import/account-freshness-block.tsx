@@ -33,7 +33,7 @@ export function AccountFreshnessBlock() {
   const accounts = useMemo(
     () =>
       (accountsQuery.data ?? []).filter(
-        (account) => account.account_type === 'regular' || account.account_type === 'credit_card',
+        (account) => account.account_type === 'main' || account.account_type === 'credit_card',
       ),
     [accountsQuery.data],
   );

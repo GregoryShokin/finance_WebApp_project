@@ -22,6 +22,7 @@ export type Transaction = {
   goal_id: number | null;
   category_id: number | null;
   counterparty_id: number | null;
+  debt_partner_id: number | null;
   category_priority?: CategoryPriority | null;
   is_regular: boolean;
   converted_to_installment: boolean;
@@ -36,6 +37,7 @@ export type Transaction = {
   type: TransactionKind;
   operation_type: TransactionOperationType;
   counterparty_name?: string | null;
+  debt_partner_name?: string | null;
   description: string | null;
   normalized_description: string | null;
   transaction_date: string;
@@ -52,6 +54,7 @@ export type CreateTransactionPayload = {
   goal_id?: number | null;
   category_id?: number | null;
   counterparty_id?: number | null;
+  debt_partner_id?: number | null;
   amount: number;
   credit_principal_amount?: number | null;
   credit_interest_amount?: number | null;

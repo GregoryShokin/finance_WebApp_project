@@ -40,6 +40,14 @@ class _BankRule:
     category_name: str | None           # name to look up in user's categories
     label: str
     account_type_filter: tuple[str, ...] | None = None  # None = any
+    # When True: row is a phantom-mirror of a transfer from the paired debit
+    # account and should be auto-excluded so the balance isn't double-counted.
+    # Example: Яндекс Сплит income «погашение основного долга» — covered by the
+    # phantom income auto-created when the Дебет transfer pair was committed.
+    suggest_exclude: bool = False
+    # When True: the bank_mechanics layer should attempt to resolve the row's
+    # target_account_id from the contract token in normalized_data.tokens.
+    suggest_target_by_contract: bool = False
 
     def matches(self, skeleton: str, direction: str, account_type: str) -> bool:
         if self.direction and direction != self.direction:
@@ -57,6 +65,10 @@ class BankMechanicsResult:
     label: str | None = None
     cross_session_warning: str | None = None
     confidence_boost: float = 0.0  # added to base confidence when rule fires
+    # True → import pipeline should auto-exclude this row (phantom-mirror).
+    suggest_exclude: bool = False
+    # Non-None → import pipeline should set target_account_id to this value.
+    resolved_target_account_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -65,43 +77,92 @@ class BankMechanicsResult:
 # ---------------------------------------------------------------------------
 
 _YANDEX_RULES: list[tuple[_BankRule, float]] = [
+    # ── Яндекс Сплит (credit/installment) — income direction ────────────────
+    #
+    # P-02 fix: когда с Яндекс Дебета переводится платёж по кредиту,
+    # на Сплит приходит income. Эти строки НЕ создают новые транзакции —
+    # они либо покрыты phantom-income от Дебет-перевода (основной долг),
+    # либо должны быть учтены как расход «Проценты по кредитам» (проценты).
+    #
+    # «Погашение основного долга» income → suggest_exclude=True.
+    # Phantom income уже создан _create_transfer_pair при коммите Дебет-стороны.
+    # Если закоммитить ещё и эту строку — баланс Сплит-счёта будет задвоен.
+    (_BankRule(
+        skeleton_keywords=(
+            "погашение основного долга",
+            "погашение просроченной",
+            "погашение тела",
+            "основного долга",
+        ),
+        direction="income",
+        account_type_filter=("loan", "credit_card", "installment_card"),
+        operation_type=None,
+        category_name=None,
+        label="Яндекс Сплит: поступление в счёт тела кредита — дубль Дебет-перевода",
+        suggest_exclude=True,
+    ), 0.18),
+    # «Погашение процентов» income → regular expense «Проценты по кредитам».
+    # Деньги пришли на Сплит с Дебета специально для оплаты процентов.
+    # Phantom дохода не создаётся, потому что Дебет-сторона — перевод
+    # (affects_analytics=False). Здесь фиксируем сам расход пользователя.
+    (_BankRule(
+        skeleton_keywords=(
+            "погашение процентов",
+            "проценты пользование",
+            "проценты договору",
+            "уплата процентов",
+        ),
+        direction="income",
+        account_type_filter=("loan", "credit_card", "installment_card"),
+        operation_type="regular",
+        category_name="Проценты по кредитам",
+        label="Яндекс Сплит: оплата процентов по договору",
+    ), 0.18),
+
+    # ── Яндекс Сплит (credit/installment) — expense direction ───────────────
     # Credit/Split account: purchases via BNPL
     (_BankRule(
         skeleton_keywords=("оплата товаров", "оплата услуг"),
         direction="expense",
-        account_type_filter=("credit", "credit_card", "installment_card"),
+        account_type_filter=("loan", "credit_card", "installment_card"),
         operation_type="regular",
         category_name=None,
         label="Яндекс Сплит: покупка в кредит",
     ), 0.05),
-    # Credit account: interest payment — highest priority
+    # Credit account: interest charge (bank debits the card for interest accrued)
     (_BankRule(
         skeleton_keywords=("погашение процентов", "проценты пользование", "проценты договору"),
         direction="expense",
-        account_type_filter=("credit", "credit_card", "installment_card"),
+        account_type_filter=("loan", "credit_card", "installment_card"),
         operation_type="regular",
         category_name="Проценты по кредитам",
         label="Яндекс: процентная часть платежа по кредиту",
-    ), 0.08),
+    ), 0.15),
     # Credit account: principal repayment
     (_BankRule(
         skeleton_keywords=("погашение основного долга", "погашение просроченной", "погашение тела", "основного долга"),
         direction="expense",
-        account_type_filter=("credit", "credit_card", "installment_card"),
+        account_type_filter=("loan", "credit_card", "installment_card"),
         operation_type="transfer",
         category_name=None,
         label="Яндекс: погашение тела долга",
-    ), 0.08),
-    # Debit account: outgoing payment that also appears in Split credit statement
+    ), 0.15),
+
+    # ── Яндекс Дебет (regular) — expense direction ──────────────────────────
+    # Debit account: outgoing payment to Яндекс Сплит by contract number.
+    # suggest_target_by_contract=True → pipeline resolves target_account_id
+    # from tokens.contract → the Сплит account with matching contract_number.
     (_BankRule(
         skeleton_keywords=("погашение", "оплата по договору", "перевод по договору"),
         direction="expense",
-        account_type_filter=("regular", "credit_card"),
+        account_type_filter=("main", "savings"),
         operation_type="transfer",
         category_name=None,
-        label="Яндекс: платёж по кредитному договору (проверь дубль в Сплит)",
-    ), 0.05),
-    # Cancellations / returns on credit account
+        label="Яндекс: платёж по кредитному договору → Сплит",
+        suggest_target_by_contract=True,
+    ), 0.12),
+
+    # ── Cancellations / returns (any direction) ───────────────────────────────
     (_BankRule(
         skeleton_keywords=("отмена по операции", "отмена операции", "возврат по операции"),
         direction="income",
@@ -126,7 +187,7 @@ _TBANK_RULES: list[tuple[_BankRule, float]] = [
     (_BankRule(
         skeleton_keywords=("проценты по вкладу", "начисление процентов", "капитализация"),
         direction="income",
-        account_type_filter=("deposit",),
+        account_type_filter=("savings",),
         operation_type="regular",
         category_name="Проценты от вклада",
         label="Т-Банк: проценты по вкладу",
@@ -135,7 +196,7 @@ _TBANK_RULES: list[tuple[_BankRule, float]] = [
     (_BankRule(
         skeleton_keywords=("погашение кредита", "ежемесячный платеж", "оплата по кредиту"),
         direction="expense",
-        account_type_filter=("regular",),
+        account_type_filter=("main",),
         operation_type="transfer",
         category_name=None,
         label="Т-Банк: платёж по кредиту (проверь дубль в кредитной выписке)",
@@ -175,7 +236,7 @@ _SBER_RULES: list[tuple[_BankRule, float]] = [
     (_BankRule(
         skeleton_keywords=("проценты по вкладу", "начисление", "капитализация"),
         direction="income",
-        account_type_filter=("deposit",),
+        account_type_filter=("savings",),
         operation_type="regular",
         category_name="Проценты от вклада",
         label="Сбер: проценты по вкладу",
@@ -222,24 +283,52 @@ class BankMechanicsService:
         account: Account | None,
         session: ImportSession,
         total_amount: Decimal,
+        identifier_key: str | None = None,
+        identifier_value: str | None = None,
     ) -> BankMechanicsResult:
-        """Match bank rules and check cross-session risk."""
+        """Match bank rules and check cross-session risk.
+
+        identifier_key / identifier_value — the strongest token extracted from
+        the row (contract / phone / iban / card). Used to resolve
+        target_account_id when a rule fires with suggest_target_by_contract=True.
+        """
         if not bank_code or not account:
             return BankMechanicsResult()
 
         rules = BANK_RULES.get(bank_code, [])
         account_type = str(getattr(account, "account_type", "") or "")
 
-        result = BankMechanicsResult()
+        matched_rule: _BankRule | None = None
+        matched_boost: float = 0.0
         for rule, boost in rules:
             if rule.matches(skeleton, direction, account_type):
-                result = BankMechanicsResult(
-                    operation_type=rule.operation_type,
-                    category_name=rule.category_name,
-                    label=rule.label,
-                    confidence_boost=boost,
-                )
+                matched_rule = rule
+                matched_boost = boost
                 break  # first matching rule wins
+
+        suggest_exclude = False
+        resolved_target: int | None = None
+
+        if matched_rule is not None:
+            suggest_exclude = matched_rule.suggest_exclude
+            # P-02: resolve target_account_id by contract token so Дебет
+            # transfer rows can be automatically paired with the correct Сплит
+            # account without requiring the user to pick it manually.
+            if (
+                matched_rule.suggest_target_by_contract
+                and identifier_key == "contract"
+                and identifier_value
+            ):
+                target = self._account_repo.find_by_contract_number(
+                    user_id=session.user_id,
+                    contract_number=identifier_value,
+                )
+                if target is not None and target.id != account.id:
+                    resolved_target = target.id
+
+        result_op = matched_rule.operation_type if matched_rule else None
+        result_cat = matched_rule.category_name if matched_rule else None
+        result_label = matched_rule.label if matched_rule else None
 
         # Cross-session risk: does a sibling account from the same bank exist
         # that might have the same transaction in its statement?
@@ -251,14 +340,15 @@ class BankMechanicsService:
             user_id=session.user_id,
             current_session_id=session.id,
         )
-        result = BankMechanicsResult(
-            operation_type=result.operation_type,
-            category_name=result.category_name,
-            label=result.label,
-            confidence_boost=result.confidence_boost,
+        return BankMechanicsResult(
+            operation_type=result_op,
+            category_name=result_cat,
+            label=result_label,
+            confidence_boost=matched_boost,
             cross_session_warning=warning,
+            suggest_exclude=suggest_exclude,
+            resolved_target_account_id=resolved_target,
         )
-        return result
 
     def _cross_session_risk(
         self,
@@ -300,7 +390,7 @@ class BankMechanicsService:
         account_type = str(getattr(account, "account_type", "") or "")
         is_credit = bool(getattr(account, "is_credit", False))
 
-        if is_credit or account_type in ("credit", "credit_card", "installment_card"):
+        if is_credit or account_type in ("loan", "credit_card", "installment_card"):
             # Pattern B: we are on the credit account — look for a sibling
             # DEBIT account of the same bank that may have captured the same
             # outgoing payment.

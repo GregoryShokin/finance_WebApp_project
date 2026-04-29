@@ -181,7 +181,7 @@ export function RepaymentStrategies({ accounts, totalBudget }: Props) {
 
   const credits = useMemo<CreditRepaymentInput[]>(() => {
     return accounts
-      .filter((account) => account.account_type === 'credit' && Math.abs(toNumber(account.balance)) > 0)
+      .filter((account) => account.account_type === 'loan' && Math.abs(toNumber(account.balance)) > 0)
       .map((account) => ({
         id: account.id,
         name: account.name,

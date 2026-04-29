@@ -20,6 +20,8 @@ from app.models.capital_snapshot import CapitalSnapshot
 from app.models.category import Category
 from app.models.counterparty import Counterparty
 from app.models.counterparty_fingerprint import CounterpartyFingerprint
+from app.models.counterparty_identifier import CounterpartyIdentifier
+from app.models.debt_partner import DebtPartner
 from app.models.fingerprint_alias import FingerprintAlias
 from app.models.goal import Goal
 from app.models.import_row import ImportRow
@@ -42,6 +44,8 @@ __all__ = [
     "Category",
     "Counterparty",
     "CounterpartyFingerprint",
+    "CounterpartyIdentifier",
+    "DebtPartner",
     "FingerprintAlias",
     "Goal",
     "ImportRow",

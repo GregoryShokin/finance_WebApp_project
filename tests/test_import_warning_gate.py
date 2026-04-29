@@ -259,6 +259,58 @@ class TestPreviewTransferIntegrityGate:
         # Issue is still recorded for visibility even though status stays.
         assert issues and any("получателя" in i for i in issues)
 
+    def test_self_loop_transfer_escalates_to_error(self):
+        """§12.1 (extended): a transfer where source == target is invalid.
+        Observed in session 229 where the normalizer rewrote acc_id from
+        the session's account to the one named in the description, so both
+        sides ended up on acc=22. Must escalate even though both fields
+        are non-null."""
+        status, issues = ImportService._gate_transfer_integrity(
+            normalized={
+                "operation_type": "transfer",
+                "account_id": 22,
+                "target_account_id": 22,
+                "type": "expense",
+            },
+            current_status="ready",
+            issues=[],
+            final=True,
+        )
+        assert status == "error", f"expected 'error', got {status!r}"
+        assert any("тот же счёт" in i for i in issues)
+
+    def test_self_loop_transfer_escalates_to_warning_in_preview(self):
+        """Preview-stage call still uses the warning level so the cross-
+        session matcher gets a chance to find the real counter-account."""
+        status, issues = ImportService._gate_transfer_integrity(
+            normalized={
+                "operation_type": "transfer",
+                "account_id": 22,
+                "target_account_id": 22,
+                "type": "expense",
+            },
+            current_status="ready",
+            issues=[],
+        )
+        assert status == "warning"
+        assert any("тот же счёт" in i for i in issues)
+
+    def test_distinct_accounts_pass_self_loop_check(self):
+        """Sanity: a real cross-account transfer must not trigger the new check."""
+        status, issues = ImportService._gate_transfer_integrity(
+            normalized={
+                "operation_type": "transfer",
+                "account_id": 22,
+                "target_account_id": 23,
+                "type": "expense",
+            },
+            current_status="ready",
+            issues=[],
+            final=True,
+        )
+        assert status == "ready"
+        assert issues == []
+
     def test_idempotent_issue_append_preview_then_final(self):
         """Two-stage flow: preview call sets warning, post-matcher final
         call escalates to error. The shared issue text must NOT duplicate."""

@@ -10,10 +10,10 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { AccountDialog } from '@/components/accounts/account-dialog';
 import { CategoryDialog } from '@/components/categories/category-dialog';
-import { CounterpartyDialog } from '@/components/counterparties/counterparty-dialog';
+import { DebtPartnerDialog } from '@/components/debt-partners/debt-partner-dialog';
 import { getAccounts, createAccount } from '@/lib/api/accounts';
 import { getCategories, createCategory } from '@/lib/api/categories';
-import { getCounterparties, createCounterparty, deleteCounterparty } from '@/lib/api/counterparties';
+import { getDebtPartners, createDebtPartner, deleteDebtPartner } from '@/lib/api/debt-partners';
 import { createTransaction, deleteTransaction, deleteTransactionsByPeriod, getTransactions, updateTransaction } from '@/lib/api/transactions';
 import { createInstallmentPurchase, updateInstallmentPurchase } from '@/lib/api/installment-purchases';
 import { getGoals } from '@/lib/api/goals';
@@ -21,7 +21,7 @@ import { TransactionsList } from '@/components/transactions/transactions-list';
 import { TransactionFilters } from '@/components/transactions/transaction-filters';
 import { TransactionForm } from '@/components/transactions/transaction-form';
 import type { CreateAccountPayload } from '@/types/account';
-import type { CreateCounterpartyPayload } from '@/types/counterparty';
+import type { CreateDebtPartnerPayload } from '@/types/debt-partner';
 import type { CategoryKind, CategoryPriority, CreateCategoryPayload } from '@/types/category';
 import type { CreateTransactionPayload, Transaction, TransactionKind, TransactionOperationType } from '@/types/transaction';
 import { MoneyAmount } from '@/components/shared/money-amount';
@@ -83,14 +83,14 @@ export default function TransactionsPage() {
 
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
-  const [counterpartyDialogOpen, setCounterpartyDialogOpen] = useState(false);
+  const [debtPartnerDialogOpen, setDebtPartnerDialogOpen] = useState(false);
   const [pendingAccountDraft, setPendingAccountDraft] = useState<Partial<CreateAccountPayload> | null>(null);
   const [pendingCategoryDraft, setPendingCategoryDraft] = useState<Partial<CreateCategoryPayload> | null>(null);
-  const [pendingCounterpartyDraft, setPendingCounterpartyDraft] = useState<Partial<CreateCounterpartyPayload> | null>(null);
+  const [pendingDebtPartnerDraft, setPendingDebtPartnerDraft] = useState<Partial<CreateDebtPartnerPayload> | null>(null);
 
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'all-for-transactions'], queryFn: () => getCategories() });
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: getGoals });
   const transactionsQuery = useQuery({
     queryKey: ['transactions', filters],
@@ -105,7 +105,7 @@ export default function TransactionsPage() {
       min_amount: filters.min_amount ? Number(filters.min_amount) : undefined,
       max_amount: filters.max_amount ? Number(filters.max_amount) : undefined,
     }),
-    enabled: accountsQuery.isSuccess && categoriesQuery.isSuccess && counterpartiesQuery.isSuccess,
+    enabled: accountsQuery.isSuccess && categoriesQuery.isSuccess && debtPartnersQuery.isSuccess,
   });
 
   const invalidateData = async () => {
@@ -113,7 +113,7 @@ export default function TransactionsPage() {
       queryClient.invalidateQueries({ queryKey: ['transactions'] }),
       queryClient.invalidateQueries({ queryKey: ['accounts'] }),
       queryClient.invalidateQueries({ queryKey: ['categories'] }),
-      queryClient.invalidateQueries({ queryKey: ['counterparties'] }),
+      queryClient.invalidateQueries({ queryKey: ['debt-partners'] }),
     ]);
   };
 
@@ -161,8 +161,8 @@ export default function TransactionsPage() {
   const deletePeriodMutation = useMutation({ mutationFn: deleteTransactionsByPeriod, onSuccess: async (result) => { toast.success(result.deleted_count > 0 ? `Удалено транзакций: ${result.deleted_count}` : 'За период транзакции не найдены'); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось удалить транзакции за период') });
   const createAccountMutation = useMutation({ mutationFn: createAccount, onSuccess: async () => { toast.success('Счёт создан'); setAccountDialogOpen(false); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось создать счёт') });
   const createCategoryMutation = useMutation({ mutationFn: createCategory, onSuccess: async () => { toast.success('Категория создана'); setCategoryDialogOpen(false); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось создать категорию') });
-  const createCounterpartyMutation = useMutation({ mutationFn: createCounterparty, onSuccess: async () => { toast.success('Контрагент создан'); setCounterpartyDialogOpen(false); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось создать контрагента') });
-  const deleteCounterpartyMutation = useMutation({ mutationFn: deleteCounterparty, onSuccess: async () => { toast.success('Контрагент удалён'); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось удалить контрагента') });
+  const createDebtPartnerMutation = useMutation({ mutationFn: createDebtPartner, onSuccess: async () => { toast.success('Дебитор / кредитор создан'); setDebtPartnerDialogOpen(false); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось создать') });
+  const deleteDebtPartnerMutation = useMutation({ mutationFn: deleteDebtPartner, onSuccess: async () => { toast.success('Дебитор / кредитор удалён'); await invalidateData(); }, onError: (error: Error) => toast.error(error.message || 'Не удалось удалить') });
 
   const filteredTransactions = useMemo(() => {
     const search = normalizeSearchValue(filters.search);
@@ -182,12 +182,13 @@ export default function TransactionsPage() {
       const account = accountsById.get(item.account_id);
       const targetAccount = item.target_account_id ? accountsById.get(item.target_account_id) : null;
       const category = item.category_id ? categoriesById.get(item.category_id) : null;
-      const title = item.description || item.counterparty_name || (category?.name ?? operationTypeLabels[item.operation_type]);
+      const title = item.description || item.counterparty_name || item.debt_partner_name || (category?.name ?? operationTypeLabels[item.operation_type]);
       const haystack = normalizeSearchValue([
         title,
         item.description,
         item.normalized_description,
         item.counterparty_name,
+        item.debt_partner_name,
         category?.name,
         account?.name,
         targetAccount?.name,
@@ -210,8 +211,8 @@ export default function TransactionsPage() {
     };
   }, [filteredTransactions]);
 
-  const isLoading = accountsQuery.isLoading || categoriesQuery.isLoading || counterpartiesQuery.isLoading || transactionsQuery.isLoading;
-  const isError = accountsQuery.isError || categoriesQuery.isError || counterpartiesQuery.isError || transactionsQuery.isError;
+  const isLoading = accountsQuery.isLoading || categoriesQuery.isLoading || debtPartnersQuery.isLoading || transactionsQuery.isLoading;
+  const isError = accountsQuery.isError || categoriesQuery.isError || debtPartnersQuery.isError || transactionsQuery.isError;
 
   function openCreateForm() { setEditingTransaction(null); setFormOpen(true); }
   function closeCreateForm() { setFormOpen(false); }
@@ -227,7 +228,7 @@ export default function TransactionsPage() {
   function handleDeletePeriod() { if (!filters.date_from || !filters.date_to) return; deletePeriodMutation.mutate({ date_from: toIsoStart(filters.date_from), date_to: toIsoEnd(filters.date_to), account_id: filters.account_id ? Number(filters.account_id) : undefined }); }
   function handleCreateCategoryRequest(payload: { name: string; kind: CategoryKind }) { setPendingCategoryDraft({ name: payload.name, kind: payload.kind, priority: defaultCategoryPriorityByKind[payload.kind] }); setCategoryDialogOpen(true); }
   function handleCreateAccountRequest(payload: { name: string }) { setPendingAccountDraft({ name: payload.name, currency: 'RUB', balance: 0, is_active: true, is_credit: false }); setAccountDialogOpen(true); }
-  function handleCreateCounterpartyRequest(payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) { setPendingCounterpartyDraft({ name: payload.name, opening_balance_kind: payload.opening_balance_kind, opening_balance: 0 }); setCounterpartyDialogOpen(true); }
+  function handleCreateDebtPartnerRequest(payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) { setPendingDebtPartnerDraft({ name: payload.name, opening_balance_kind: payload.opening_balance_kind, opening_balance: 0 }); setDebtPartnerDialogOpen(true); }
 
   return (
     <PageShell title="Транзакции" description="Учитывай обычные операции, переводы, инвестиции, долги и кредиты без искажения аналитики.">
@@ -274,22 +275,22 @@ export default function TransactionsPage() {
             initialData={null}
             accounts={accountsQuery.data ?? []}
             categories={categoriesQuery.data ?? []}
-            counterparties={counterpartiesQuery.data ?? []}
+            debtPartners={debtPartnersQuery.data ?? []}
             goals={goalsQuery.data ?? []}
             isSubmitting={createMutation.isPending || updateMutation.isPending}
             onCancel={closeCreateForm}
             onSubmit={handleCreateSubmit}
             onCreateAccountRequest={handleCreateAccountRequest}
             onCreateCategoryRequest={handleCreateCategoryRequest}
-            onCreateCounterpartyRequest={handleCreateCounterpartyRequest}
-            onDeleteCounterpartyRequest={(counterparty) => deleteCounterpartyMutation.mutate(counterparty.id)}
+            onCreateDebtPartnerRequest={handleCreateDebtPartnerRequest}
+            onDeleteDebtPartnerRequest={(debtPartner) => deleteDebtPartnerMutation.mutate(debtPartner.id)}
           />
         </Card>
       ) : null}
 
       <AccountDialog open={accountDialogOpen} mode="create" initialValues={pendingAccountDraft} isSubmitting={createAccountMutation.isPending} onClose={() => setAccountDialogOpen(false)} onSubmit={(values) => createAccountMutation.mutate(values)} />
       <CategoryDialog open={categoryDialogOpen} mode="create" initialValues={pendingCategoryDraft} isSubmitting={createCategoryMutation.isPending} onClose={() => setCategoryDialogOpen(false)} onSubmit={(values) => createCategoryMutation.mutate(values)} />
-      <CounterpartyDialog open={counterpartyDialogOpen} draft={pendingCounterpartyDraft} isSubmitting={createCounterpartyMutation.isPending} onClose={() => setCounterpartyDialogOpen(false)} onSubmit={(values) => createCounterpartyMutation.mutate(values)} />
+      <DebtPartnerDialog open={debtPartnerDialogOpen} draft={pendingDebtPartnerDraft} isSubmitting={createDebtPartnerMutation.isPending} onClose={() => setDebtPartnerDialogOpen(false)} onSubmit={(values) => createDebtPartnerMutation.mutate(values)} />
 
       {isLoading ? <LoadingState title="Загружаем транзакции..." description="Собираем операции, счета, категории и контрагентов." /> : null}
       {isError ? <ErrorState title="Не удалось загрузить транзакции" description="Проверь backend API и повтори попытку." /> : null}
@@ -299,7 +300,7 @@ export default function TransactionsPage() {
           transactions={filteredTransactions}
           accounts={accountsQuery.data ?? []}
           categories={categoriesQuery.data ?? []}
-          counterparties={counterpartiesQuery.data ?? []}
+          debtPartners={debtPartnersQuery.data ?? []}
           goals={goalsQuery.data ?? []}
           editingTransaction={editingTransaction}
           deletingId={deletingId}
@@ -312,8 +313,8 @@ export default function TransactionsPage() {
           onCancelEdit={cancelEdit}
           onCreateAccountRequest={handleCreateAccountRequest}
           onCreateCategoryRequest={handleCreateCategoryRequest}
-          onCreateCounterpartyRequest={handleCreateCounterpartyRequest}
-          onDeleteCounterpartyRequest={(counterparty) => deleteCounterpartyMutation.mutate(counterparty.id)}
+          onCreateDebtPartnerRequest={handleCreateDebtPartnerRequest}
+          onDeleteDebtPartnerRequest={(debtPartner) => deleteDebtPartnerMutation.mutate(debtPartner.id)}
         />
       ) : null}
     </PageShell>

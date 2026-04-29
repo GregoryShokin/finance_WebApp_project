@@ -325,19 +325,19 @@ export default function AccountsPage() {
   const accounts = accountsQuery.data ?? [];
   const transactions: Transaction[] = transactionsQuery.data ?? [];
   const realAssets = realAssetsQuery.data ?? [];
-  const creditAccounts = accounts.filter((account) => account.account_type === 'credit');
+  const creditAccounts = accounts.filter((account) => account.account_type === 'loan');
 
   const accountItems = useMemo(
-    () => accounts.filter((account) => account.account_type !== 'credit' && account.account_type !== 'deposit'),
+    () => accounts.filter((account) => account.account_type !== 'loan' && account.account_type !== 'savings'),
     [accounts],
   );
 
   const creditItems = useMemo(
-    () => accounts.filter((account) => account.account_type === 'credit'),
+    () => accounts.filter((account) => account.account_type === 'loan'),
     [accounts],
   );
   const depositItems = useMemo(
-    () => accounts.filter((account) => account.account_type === 'deposit'),
+    () => accounts.filter((account) => account.account_type === 'savings'),
     [accounts],
   );
 
@@ -614,7 +614,7 @@ export default function AccountsPage() {
       return (
         <div className="space-y-4">
           <div className="mb-4 flex justify-end">
-            <Button onClick={() => openCreateDialog({ account_type: 'deposit', is_credit: false })}>
+            <Button onClick={() => openCreateDialog({ account_type: 'savings', is_credit: false })}>
               <PlusCircle className="size-4" />
               Добавить вклад
             </Button>
@@ -653,7 +653,7 @@ export default function AccountsPage() {
         <div className="space-y-4">
           <div className="mb-4 flex justify-end">
             <Button
-              onClick={() => openCreateDialog({ account_type: 'credit', is_credit: true })}
+              onClick={() => openCreateDialog({ account_type: 'loan', is_credit: true })}
             >
               <PlusCircle className="size-4" />
               Добавить кредит
@@ -686,7 +686,7 @@ export default function AccountsPage() {
     return (
       <div className="space-y-4">
         <div className="mb-4 flex justify-end">
-          <Button onClick={() => openCreateDialog({ account_type: 'regular' })}>
+          <Button onClick={() => openCreateDialog({ account_type: 'main' })}>
             <PlusCircle className="size-4" />
             Добавить счёт или карту
           </Button>

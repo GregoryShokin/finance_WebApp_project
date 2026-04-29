@@ -219,7 +219,7 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
   });
   const accounts: Account[] = accountsQuery.data ?? [];
   const creditAccounts = useMemo(
-    () => accounts.filter((a) => a.is_credit || a.account_type === 'credit' || a.account_type === 'credit_card' || a.account_type === 'installment_card'),
+    () => accounts.filter((a) => a.is_credit || a.account_type === 'loan' || a.account_type === 'credit_card' || a.account_type === 'installment_card'),
     [accounts],
   );
   const transferAccounts = useMemo(
@@ -966,6 +966,10 @@ function RowExcludeParkButtons({
   onAfterAction: () => void;
 }) {
   const [showActions, setShowActions] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+
   const excludeMutation = useMutation({
     mutationFn: () => excludeImportRow(rowId),
     onSuccess: () => { toast.success(`#${rowIndex} исключено`); onAfterAction(); },
@@ -978,19 +982,48 @@ function RowExcludeParkButtons({
   });
   const isPending = excludeMutation.isPending || parkMutation.isPending;
 
+  const handleToggle = () => {
+    if (!showActions && triggerRef.current) {
+      const rect = triggerRef.current.getBoundingClientRect();
+      const dropdownH = 68;
+      const fitsBelow = rect.bottom + dropdownH + 8 < window.innerHeight;
+      setPos(
+        fitsBelow
+          ? { top: rect.bottom + 4, right: window.innerWidth - rect.right }
+          : { top: rect.top - dropdownH - 4, right: window.innerWidth - rect.right },
+      );
+    }
+    setShowActions((v) => !v);
+  };
+
+  // Закрываем по mousedown вне триггера И вне дропдауна.
+  // Проверяем оба ref'а — иначе document-listener срабатывает раньше
+  // onClick на кнопках внутри портала (портал рендерится в document.body,
+  // поэтому stopPropagation на дочерних кнопках не блокирует native-listener).
+  useEffect(() => {
+    if (!showActions) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (
+        !triggerRef.current?.contains(t) &&
+        !dropdownRef.current?.contains(t)
+      ) {
+        setShowActions(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [showActions]);
+
   return (
-    <div
-      className="relative flex items-center"
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
-    >
-      {/* Trigger: ellipsis dot — always visible so users discover the menu */}
+    <div className="flex items-center">
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled || isPending}
         className="flex size-6 items-center justify-center rounded text-slate-300 hover:bg-slate-100 hover:text-slate-500 disabled:opacity-30"
         title="Действия со строкой"
-        onClick={() => setShowActions((v) => !v)}
+        onClick={handleToggle}
       >
         {isPending ? (
           <Loader2 className="size-3 animate-spin" />
@@ -999,25 +1032,31 @@ function RowExcludeParkButtons({
         )}
       </button>
 
-      {/* Dropdown actions */}
-      {showActions && !disabled && !isPending && (
-        <div className="absolute right-0 top-7 z-20 flex flex-col gap-0.5 rounded-lg border border-slate-200 bg-white p-1 shadow-md">
-          <button
-            type="button"
-            onClick={() => { setShowActions(false); parkMutation.mutate(); }}
-            className="whitespace-nowrap rounded px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+      {/* Portal: вне overflow модала, position:fixed, z выше всего */}
+      {showActions && !disabled && !isPending && pos &&
+        createPortal(
+          <div
+            ref={dropdownRef}
+            style={{ position: 'fixed', top: pos.top, right: pos.right }}
+            className="z-[9999] flex flex-col gap-0.5 rounded-lg border border-slate-200 bg-white p-1 shadow-md"
           >
-            Отложить
-          </button>
-          <button
-            type="button"
-            onClick={() => { setShowActions(false); excludeMutation.mutate(); }}
-            className="whitespace-nowrap rounded px-3 py-1.5 text-left text-xs text-rose-600 hover:bg-rose-50"
-          >
-            Исключить
-          </button>
-        </div>
-      )}
+            <button
+              type="button"
+              onClick={() => { setShowActions(false); parkMutation.mutate(); }}
+              className="whitespace-nowrap rounded px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-50"
+            >
+              Отложить
+            </button>
+            <button
+              type="button"
+              onClick={() => { setShowActions(false); excludeMutation.mutate(); }}
+              className="whitespace-nowrap rounded px-3 py-1.5 text-left text-xs text-rose-600 hover:bg-rose-50"
+            >
+              Исключить
+            </button>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

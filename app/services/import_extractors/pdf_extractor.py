@@ -12,6 +12,24 @@ from pypdf.errors import PdfReadError
 from app.services.import_extractors.base import BaseExtractor, ExtractedTable, ExtractionResult
 
 
+# ── Sberbank PDF statement ────────────────────────────────────────────────────
+# Row 1:  DD.MM.YYYY  HH:MM  <Category>  [+]<Amount>  <Balance>
+# Amount and balance use space as thousands separator: 1 050,00 / 15 482,61
+# Income rows have an explicit '+' prefix; expense rows have no sign.
+_SBER_NUM = r'(?:\d{1,3}(?:[ \u00a0]\d{3})*|\d+),\d{2}'
+SBER_ROW1_RX = re.compile(
+    r'^(\d{2}\.\d{2}\.\d{4})'          # operation date (group 1)
+    r'[ \t]+(\d{2}:\d{2})'             # time            (group 2)
+    r'[ \t]+(.+?)'                      # category        (group 3, non-greedy)
+    r'[ \t]+([+]?' + _SBER_NUM + r')'  # amount          (group 4)
+    r'[ \t]+(' + _SBER_NUM + r')\s*$'  # balance         (group 5)
+)
+# Row 2:  DD.MM.YYYY  NNNNNN  <Description>
+SBER_ROW2_RX = re.compile(
+    r'^(\d{2}\.\d{2}\.\d{4})'   # processing date (group 1)
+    r'[ \t]+(\d{5,7})'          # auth code       (group 2)
+    r'[ \t]+(.+)$'              # description     (group 3)
+)
 DATE_ONLY_RX = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
 TIME_ONLY_RX = re.compile(r"^\d{2}:\d{2}(?::\d{2})?$")
 YANDEX_TIME_RX = re.compile(r"^Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†Р вЂљР’В \s+(?P<time>\d{2}:\d{2})$")
@@ -260,6 +278,16 @@ class PdfExtractor(BaseExtractor):
         contract_number, contract_match_reason, contract_match_confidence = self._extract_contract_number_details(raw_lines)
         statement_account_number, statement_account_match_reason, statement_account_match_confidence = self._extract_statement_account_number_details(raw_lines)
 
+        if self._is_sber_statement(full_text):
+            return self._extract_sber_statement(
+                raw_lines=raw_lines,
+                page_stats=page_stats,
+                page_count=len(reader.pages),
+                statement_account_number=statement_account_number,
+                statement_account_match_reason=statement_account_match_reason,
+                statement_account_match_confidence=statement_account_match_confidence,
+            )
+
         if self._is_yandex_credit_statement(full_text):
             return self._extract_yandex_credit_statement(
                 raw_lines=raw_lines,
@@ -365,6 +393,169 @@ class PdfExtractor(BaseExtractor):
                 },
             },
         )
+
+    # ── Sberbank ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_sber_statement(full_text: str) -> bool:
+        """Detect Sberbank PDF statement (debit or credit card)."""
+        lower = full_text.lower()
+        has_sber = (
+            "sberbank.ru" in lower
+            or "\u043f\u0430\u043e \u0441\u0431\u0435\u0440\u0431\u0430\u043d\u043a" in lower  # пао сбербанк
+            or "\u0441\u0431\u0435\u0440\u0431\u0430\u043d\u043a \u043e\u043d\u043b\u0430\u0439\u043d" in lower  # сбербанк онлайн
+        )
+        has_statement = (
+            "\u0432\u044b\u043f\u0438\u0441\u043a\u0430 \u043f\u043e \u0441\u0447\u0451\u0442\u0443" in lower  # выписка по счёту
+            or "\u0440\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0439" in lower  # расшифровка операций
+        )
+        return has_sber and has_statement
+
+    def _extract_sber_statement(
+        self,
+        *,
+        raw_lines: list[str],
+        page_stats: list[dict[str, Any]],
+        page_count: int,
+        statement_account_number: str | None = None,
+        statement_account_match_reason: str | None = None,
+        statement_account_match_confidence: float | None = None,
+    ) -> "ExtractionResult":
+        rows, rejected = self._parse_sber_rows(raw_lines)
+        tables: list["ExtractedTable"] = []
+        if rows:
+            tables.append(ExtractedTable(
+                name="pdf_transactions",
+                columns=[
+                    "date", "posted_date", "description", "amount",
+                    "currency", "direction", "balance_after",
+                    "account_hint", "counterparty", "raw_type", "source_reference",
+                ],
+                rows=rows,
+                confidence=0.93 if len(rows) >= 3 else 0.80,
+                meta={"schema": "normalized_transactions", "parser": "sber_pdf_v1"},
+            ))
+        if rejected:
+            tables.append(ExtractedTable(
+                name="pdf_diagnostics",
+                columns=["raw_block", "diagnostic_reason"],
+                rows=rejected[:30],
+                confidence=0.25,
+                meta={"schema": "diagnostics", "parser": "sber_pdf_v1"},
+            ))
+        if not tables:
+            tables.append(self._diagnostics_table(reason="sber_parse_error"))
+        from app.services.import_extractors.base import ExtractionResult as _ER
+        return _ER(
+            source_type=self.source_type,
+            tables=tables,
+            meta={
+                "page_count": page_count,
+                "needs_ocr": False,
+                "text_based": True,
+                "line_count": len(raw_lines),
+                "statement_account_number": statement_account_number,
+                "statement_account_match_reason": statement_account_match_reason,
+                "statement_account_match_confidence": statement_account_match_confidence,
+                "parsed_transaction_count": len(rows),
+                "rejected_block_count": len(rejected),
+            },
+        )
+
+    @staticmethod
+    def _parse_sber_rows(
+        raw_lines: list[str],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """Parse Sberbank statement lines into normalized transaction dicts.
+
+        Each transaction occupies two source lines:
+          Row 1 — operation date + time, category, signed amount, running balance.
+          Row 2 — processing date, 6-digit auth code, human-readable description.
+
+        Description may wrap onto additional lines (no date prefix); those are
+        appended to the preceding description.
+
+        Direction: amount prefixed with '+' → income; no sign → expense.
+        """
+        rows: list[dict[str, str]] = []
+        rejected: list[dict[str, str]] = []
+
+        # Pending row-1 fields
+        p_date: str | None = None
+        p_time: str | None = None
+        p_category: str | None = None
+        p_amount: str | None = None
+        p_balance: str | None = None
+        # Pending row-2 fields
+        p_proc_date: str | None = None
+        p_desc: str | None = None
+
+        def _norm_num(s: str) -> str:
+            """Remove thousands separators and convert decimal comma to dot."""
+            return s.replace("\u00a0", "").replace(" ", "").replace(",", ".")
+
+        def _emit() -> None:
+            nonlocal p_date, p_time, p_category, p_amount, p_balance
+            nonlocal p_proc_date, p_desc
+            if p_date is None or p_amount is None:
+                return
+            raw_amt = (p_amount or "").strip()
+            if raw_amt.startswith("+"):
+                direction = "income"
+                amt_clean = raw_amt[1:]
+            else:
+                direction = "expense"
+                amt_clean = raw_amt
+            desc = (p_desc or p_category or "").strip()
+            rows.append({
+                "date": f"{p_date} {p_time or '00:00'}",
+                "posted_date": p_proc_date or p_date,
+                "description": desc,
+                "amount": _norm_num(amt_clean),
+                "currency": "RUB",
+                "direction": direction,
+                "balance_after": _norm_num(p_balance or "0"),
+                "account_hint": "",
+                "counterparty": "",
+                "raw_type": (p_category or "").strip(),
+                "source_reference": p_proc_date or p_date,
+            })
+            p_date = p_time = p_category = p_amount = p_balance = None
+            p_proc_date = p_desc = None
+
+        for line in raw_lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            m1 = SBER_ROW1_RX.match(line)
+            if m1:
+                _emit()  # commit previous transaction if any
+                p_date = m1.group(1)
+                p_time = m1.group(2)
+                p_category = m1.group(3).strip()
+                p_amount = m1.group(4).strip()
+                p_balance = m1.group(5).strip()
+                p_proc_date = p_desc = None
+                continue
+
+            m2 = SBER_ROW2_RX.match(line)
+            if m2 and p_date is not None and p_desc is None:
+                p_proc_date = m2.group(1)
+                p_desc = m2.group(3).strip()
+                continue
+
+            # Continuation of a description (wrapped line with no date prefix)
+            if p_date is not None and p_desc is not None:
+                if not re.match(r'^\d{2}\.\d{2}\.\d{4}', line):
+                    p_desc += " " + line
+                    continue
+
+            # If we have a complete row-1 but no row-2 yet, non-date line is noise
+            # (header / footer / page number) — skip silently.
+
+        _emit()  # flush last transaction
+        return rows, rejected
 
     @staticmethod
     def _is_yandex_credit_statement(full_text: str) -> bool:
@@ -614,6 +805,25 @@ class PdfExtractor(BaseExtractor):
             direction = "expense"
             sign = "-"
         if lower.startswith("\u043e\u0442\u043c\u0435\u043d\u0430 \u043f\u043e \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438") or "\u0432\u043e\u0437\u0432\u0440\u0430\u0442" in lower:
+            direction = "income"
+            sign = "+"
+        # «Погашение основного долга» = тело кредита уменьшается = деньги
+        # пришли на счёт → income в модели системы. Это обеспечивает совпадение
+        # с phantom income, создаваемым _create_transfer_pair при коммите
+        # дебетового счёта, и позволяет _detect_committed_duplicates найти дубль.
+        #
+        # НЕ применяется к процентам и просрочке — они расходы (плата за кредит),
+        # а не возврат тела долга:
+        #   «Погашение процентов за пользование кредитом» → expense (расход)
+        #   «Погашение просроченной задолженности»        → expense (штраф)
+        _is_principal_repayment = (
+            "\u043f\u043e\u0433\u0430\u0448\u0435\u043d\u0438\u0435" in lower          # погашение
+            and "\u043e\u0441\u043d\u043e\u0432\u043d\u043e\u0433\u043e" in lower      # основного
+            and "\u0434\u043e\u043b\u0433" in lower                                     # долга/долгу
+            and "\u043f\u0440\u043e\u0446\u0435\u043d\u0442" not in lower              # НЕ процент
+            and "\u043f\u0440\u043e\u0441\u0440\u043e\u0447" not in lower              # НЕ просроч
+        )
+        if _is_principal_repayment:
             direction = "income"
             sign = "+"
         amount = f"{sign}{amount_norm}"

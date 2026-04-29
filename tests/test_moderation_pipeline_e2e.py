@@ -109,6 +109,24 @@ def _make_cluster_svc(rows):
     svc.rule_repo.get_active_rule_by_identifier.return_value = None
     svc.rule_repo.get_active_rule_by_bank.return_value = None
     svc.rule_repo.get_active_legacy_rule.return_value = None
+    # Additional service mocks required by build_clusters (added in later phases).
+    svc.account_repo = MagicMock()
+    svc.account_repo.get_by_id_and_user.return_value = None
+    svc.category_repo = MagicMock()
+    svc.category_repo.list.return_value = []
+    from types import SimpleNamespace
+    svc.bank_mechanics = MagicMock()
+    svc.bank_mechanics.apply.return_value = SimpleNamespace(
+        operation_type=None, category_name=None, label=None,
+        cross_session_warning=None, confidence_boost=0.0,
+        suggest_exclude=False, resolved_target_account_id=None,
+    )
+    svc.global_patterns = MagicMock()
+    svc.global_patterns.get_matching_pattern.return_value = None
+    svc.counterparty_fp_service = MagicMock()
+    svc.counterparty_fp_service.resolve_many.return_value = {}
+    svc.counterparty_id_service = MagicMock()
+    svc.counterparty_id_service.resolve_many.return_value = {}
     return svc
 
 

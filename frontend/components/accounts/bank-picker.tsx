@@ -103,8 +103,12 @@ function BankModal({
   const list = showPopular ? popular : banks;
 
   return createPortal(
+    // z-[10001] beats the Dialog's z-[10000] backdrop so this nested modal
+    // stays on top when BankPicker is used inside a Dialog (account form
+    // opens as a dialog on /accounts, otherwise the bank list sat below
+    // the backdrop and clicks never reached it).
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/40 p-4"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="flex w-full max-w-md flex-col rounded-2xl bg-white shadow-2xl">

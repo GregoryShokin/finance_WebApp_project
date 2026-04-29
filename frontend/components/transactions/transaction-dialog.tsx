@@ -4,7 +4,7 @@ import { Dialog } from '@/components/ui/dialog';
 import { TransactionForm } from '@/components/transactions/transaction-form';
 import type { Account } from '@/types/account';
 import type { Category } from '@/types/category';
-import type { Counterparty } from '@/types/counterparty';
+import type { DebtPartner } from '@/types/debt-partner';
 import type { GoalWithProgress } from '@/types/goal';
 import type { CreateTransactionPayload, Transaction } from '@/types/transaction';
 
@@ -14,7 +14,7 @@ export function TransactionDialog({
   transaction,
   accounts,
   categories,
-  counterparties = [],
+  debtPartners = [],
   goals = [],
   isSubmitting,
   onClose,
@@ -25,7 +25,7 @@ export function TransactionDialog({
   transaction?: Transaction | null;
   accounts: Account[];
   categories: Category[];
-  counterparties?: Counterparty[];
+  debtPartners?: DebtPartner[];
   goals?: GoalWithProgress[];
   isSubmitting?: boolean;
   onClose: () => void;
@@ -47,7 +47,7 @@ export function TransactionDialog({
         initialData={transaction}
         accounts={accounts}
         categories={categories}
-        counterparties={counterparties}
+        debtPartners={debtPartners}
         goals={goals}
         isSubmitting={isSubmitting}
         onSubmit={onSubmit}

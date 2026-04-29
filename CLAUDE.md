@@ -80,7 +80,22 @@ Four services: `api` (FastAPI, port 8000), `worker` (Celery), `db` (PostgreSQL 1
 
 ### Database
 
-PostgreSQL with Alembic migrations in `alembic/versions/` (sequential numbering `0001_`…). Core models: `User`, `Account`, `Category`, `Transaction`, `Counterparty`, `ImportSession`, `ImportRow`, `TransactionCategoryRule`.
+PostgreSQL with Alembic migrations in `alembic/versions/` (sequential numbering `0001_`…). Core models: `User`, `Account`, `Category`, `Transaction`, `Counterparty`, `DebtPartner`, `ImportSession`, `ImportRow`, `TransactionCategoryRule`.
+
+### Counterparty vs DebtPartner (decision 2026-04-24)
+
+Two disjoint entity tables, never mixed:
+
+- **`Counterparty`** — merchants / services / employers the user interacts with financially: «Пятёрочка», «Яндекс Такси», «Арендодатель» (as landlord receiving rent), «Мегафон». Referenced from `Transaction.counterparty_id`. Used in the import moderator, cluster grouping (via `CounterpartyFingerprint` / `CounterpartyIdentifier`), and non-debt transaction forms.
+- **`DebtPartner`** — debtors / creditors for operation_type='debt' transactions: «Паша», «Отец», «Влад». Referenced from `Transaction.debt_partner_id`. Has `opening_receivable_amount` + `opening_payable_amount` for starting balances; running balances are computed on read by summing debt transactions.
+
+**Invariant** (enforced by `TransactionService._validate_payload`):
+- `operation_type='debt'` ⇒ `debt_partner_id` required, `counterparty_id` rejected.
+- Any other `operation_type` ⇒ `debt_partner_id` rejected; `counterparty_id` accepted for regular / refund only.
+
+`ImportSplitItemRequest` (schemas/imports.py) carries both fields per-part; the split handler routes each part's chosen field to the matching Transaction column.
+
+Historical note: before 2026-04-24, debtors lived in `counterparties` (alongside merchants). Migration `0051_debt_partners.py` + `scripts/split_counterparties_into_debt_partners.py` moved them into the new table, clearing `counterparty_id` on existing debt rows and deleting debt-only Counterparty records. Mixed-role names (same person as both merchant and debtor) live in BOTH tables as independent objects — intentionally, since the two relationships are accounted for separately.
 
 ### Credit Payment Model (decision 2026-04-19)
 

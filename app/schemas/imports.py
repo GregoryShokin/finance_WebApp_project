@@ -117,12 +117,22 @@ class ImportPreviewRowResponse(BaseModel):
 
 
 class ImportPreviewSummary(BaseModel):
-    total_rows: int
-    ready_rows: int
-    warning_rows: int
-    error_rows: int
-    duplicate_rows: int
-    skipped_rows: int
+    # All counters default to 0 because ImportSession.summary_json is reused
+    # as the source for both freshly uploaded sessions (where only async job
+    # status blocks exist: auto_preview, transfer_match) and fully processed
+    # ones (where row counts are populated). Requiring the counters caused
+    # 500 errors on the upload / session-list endpoint whenever a session
+    # was queued but hadn't yet produced a row breakdown. 0 is the correct
+    # neutral value — no rows processed yet means no rows in any bucket.
+    total_rows: int = 0
+    ready_rows: int = 0
+    warning_rows: int = 0
+    error_rows: int = 0
+    duplicate_rows: int = 0
+    skipped_rows: int = 0
+    # Pydantic v2: ignore extra keys (auto_preview / transfer_match /
+    # moderation status blocks) stored alongside counters in summary_json.
+    model_config = {"extra": "ignore"}
 
 
 class ImportPreviewResponse(BaseModel):
@@ -138,9 +148,11 @@ class ImportSplitItemRequest(BaseModel):
     # operation_type defaults to 'regular' for backwards compat with the old
     # split UI (which only knew about regular splits with a category).
     operation_type: str = "regular"
-    category_id: int | None = None       # required for regular / refund / debt
+    category_id: int | None = None       # required for regular / refund; optional for debt
     target_account_id: int | None = None  # required when operation_type='transfer'
     debt_direction: str | None = None    # required when operation_type='debt'
+    counterparty_id: int | None = None   # merchant/service for regular/refund parts
+    debt_partner_id: int | None = None   # debtor/creditor for operation_type='debt'
     amount: Decimal
     description: str | None = None
 
@@ -151,6 +163,7 @@ class ImportRowUpdateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    debt_partner_id: int | None = None
     amount: Decimal | None = None
     type: str | None = None
     operation_type: str | None = None
@@ -331,6 +344,7 @@ class BulkClusterRowUpdate(BaseModel):
     operation_type: str | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    debt_partner_id: int | None = None
     target_account_id: int | None = None
     credit_account_id: int | None = None
     credit_principal_amount: Decimal | None = None

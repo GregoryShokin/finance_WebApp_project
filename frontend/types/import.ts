@@ -332,6 +332,7 @@ export type BulkClusterRowUpdate = {
   operation_type?: string | null;
   category_id?: number | null;
   counterparty_id?: number | null;
+  debt_partner_id?: number | null;
   target_account_id?: number | null;
   credit_account_id?: number | null;
   credit_principal_amount?: string | null;

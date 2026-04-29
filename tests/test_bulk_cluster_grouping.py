@@ -264,11 +264,12 @@ class TestBuildBulkClustersFilters:
 
     def test_duplicate_status_rows_are_excluded(self) -> None:
         """Regression: rows already marked `duplicate` (mirror match against a
-        previously-committed transfer pair, detected in build_preview) must
+        previously-committed transfer pair, detected by
+        `_detect_committed_duplicates` in transfer_matcher_service) must
         NOT show up in bulk-categorize UI. They're already surfaced in the
         «Переводы и дубли» widget and are terminal — bulk-acking them would
-        be no-op noise. Note that `_find_transfer_pair_duplicate` sets
-        status=duplicate WITHOUT writing transfer_match, so the
+        be no-op noise. Note that real-duplicate rows (is_mirror=False) have
+        status=duplicate WITHOUT transfer_match populated, so the
         transfer_match-based exclusion alone misses them."""
         rows = [
             _mk_row(

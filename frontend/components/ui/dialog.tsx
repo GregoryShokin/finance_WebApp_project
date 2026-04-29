@@ -55,8 +55,13 @@ export function Dialog({
   const maxWidthClassName = size === 'xl' ? 'max-w-7xl' : size === 'lg' ? 'max-w-4xl' : 'max-w-lg';
 
   return createPortal(
+    // z-[10000] puts the generic Dialog above all other in-app modals
+    // (Attach FLIP z-[9999], RowEdit FLIP z-[9999]) so nested flows like
+    // "create new category from inside the row editor" actually stack on
+    // top instead of being buried under the outer modal. Keep in sync
+    // with BankPicker (z-[10001]) which must beat its own parent Dialog.
     <div
-      className="fixed inset-0 z-[200] flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 pt-8 sm:items-center sm:pt-4"
+      className="fixed inset-0 z-[10000] flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4 pt-8 sm:items-center sm:pt-4"
       onClick={onClose}
     >
       <Card

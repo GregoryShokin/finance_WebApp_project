@@ -1162,22 +1162,38 @@ function AttentionCardImpl({
     const v = (row.normalized_data as Record<string, any> | undefined)?.operation_type;
     return typeof v === 'string' && v ? v : undefined;
   })();
+  // §9.2 / P-04: backend stores requires_credit_split=true when a transfer row
+  // is a loan payment that must be split into interest + principal at commit.
+  // When this flag is set, the moderation UI must show credit_operation / payment
+  // instead of the plain transfer form — otherwise the user has no way to enter
+  // the split amounts.
+  const requiresCreditSplit = Boolean(
+    (row.normalized_data as Record<string, any> | undefined)?.requires_credit_split
+  );
   const persistedDebtDirection = (() => {
     const v = (row.normalized_data as Record<string, any> | undefined)?.debt_direction;
     return v === 'lent' || v === 'borrowed' || v === 'repaid' || v === 'collected' ? v : undefined;
   })();
+  // Fix: backend field names are credit_principal_amount / credit_interest_amount,
+  // not principal_amount / interest_amount (the old names caused split amounts to
+  // always initialise as empty, forcing the user to re-enter them after every F5).
   const persistedPrincipal = (() => {
-    const v = (row.normalized_data as Record<string, any> | undefined)?.principal_amount;
+    const v = (row.normalized_data as Record<string, any> | undefined)?.credit_principal_amount;
     return v != null ? String(v) : '';
   })();
   const persistedInterest = (() => {
-    const v = (row.normalized_data as Record<string, any> | undefined)?.interest_amount;
+    const v = (row.normalized_data as Record<string, any> | undefined)?.credit_interest_amount;
     return v != null ? String(v) : '';
   })();
-  const [mainOp, setMainOp] = useState<MainOp>(llmToMainOp(persistedOp ?? llmOp ?? contextOp));
+  // When requires_credit_split is set and operation_type is 'transfer', the row
+  // is a loan payment — override the main-op selector to credit_operation/payment
+  // so the split form appears automatically without the user having to switch.
+  const effectivePersistedOp =
+    requiresCreditSplit && persistedOp === 'transfer' ? 'credit_payment' : persistedOp;
+  const [mainOp, setMainOp] = useState<MainOp>(llmToMainOp(effectivePersistedOp ?? llmOp ?? contextOp));
   const [debtDir, setDebtDir] = useState<DebtDir>(persistedDebtDirection ?? 'borrowed');
-  const [investDir, setInvestDir] = useState<InvestDir>(llmToInvestDir(persistedOp ?? llmOp));
-  const [creditKind, setCreditKind] = useState<CreditKind>(llmToCreditKind(persistedOp ?? llmOp));
+  const [investDir, setInvestDir] = useState<InvestDir>(llmToInvestDir(effectivePersistedOp ?? llmOp));
+  const [creditKind, setCreditKind] = useState<CreditKind>(llmToCreditKind(effectivePersistedOp ?? llmOp));
   const [creditPrincipal, setCreditPrincipal] = useState<string>(persistedPrincipal);
   const [creditInterest, setCreditInterest] = useState<string>(persistedInterest);
   const [pickedCatId, setPickedCatId] = useState<number | null>(suggestedCatId);
@@ -1185,7 +1201,13 @@ function AttentionCardImpl({
   // target account (for transfer). Initialized from normalized_data so re-opens
   // of an already-confirmed row preserve the user's prior choice.
   const initialCreditAccountId = (() => {
-    const v = (row.normalized_data as Record<string, any> | undefined)?.credit_account_id;
+    const nd = row.normalized_data as Record<string, any> | undefined;
+    // When the row is flagged requires_credit_split, the loan account lives in
+    // target_account_id (set by transfer_matcher or user). Fall back to
+    // credit_account_id for rows that went through the credit_operation path.
+    const v = requiresCreditSplit
+      ? (nd?.credit_account_id ?? nd?.target_account_id)
+      : nd?.credit_account_id;
     return v ? Number(v) : null;
   })();
   const initialTargetAccountId = (() => {
@@ -1230,7 +1252,7 @@ function AttentionCardImpl({
   });
 
   const creditAccounts = useMemo(
-    () => Array.from(accountById.values()).filter((a) => a.is_credit || a.account_type === 'credit' || a.account_type === 'credit_card' || a.account_type === 'installment_card'),
+    () => Array.from(accountById.values()).filter((a) => a.is_credit || a.account_type === 'loan' || a.account_type === 'credit_card' || a.account_type === 'installment_card'),
     [accountById],
   );
   const transferAccounts = useMemo(

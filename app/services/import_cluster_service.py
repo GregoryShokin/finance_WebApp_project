@@ -187,6 +187,14 @@ class Cluster:
     bank_mechanics_category_id: int | None = None
     bank_mechanics_label: str | None = None
     bank_mechanics_cross_session_warning: str | None = None
+    # P-02: suggest_exclude — True when bank_mechanics determined the row is a
+    # phantom mirror of a transfer already committed from the paired debit account
+    # (Яндекс Сплит income «погашение основного долга»). The import pipeline
+    # should auto-exclude these rows to avoid double-counting the Сплит balance.
+    bank_mechanics_suggest_exclude: bool = False
+    # P-02: target account resolved from contract token in the cluster's identifier.
+    # Non-None → pipeline should set normalized_data.target_account_id to this id.
+    bank_mechanics_resolved_target_account_id: int | None = None
 
     # Global pattern (Layer 3: cross-user collective learning).
     global_pattern_category_id: int | None = None
@@ -251,6 +259,8 @@ class Cluster:
             "bank_mechanics_category_id": self.bank_mechanics_category_id,
             "bank_mechanics_label": self.bank_mechanics_label,
             "bank_mechanics_cross_session_warning": self.bank_mechanics_cross_session_warning,
+            "bank_mechanics_suggest_exclude": self.bank_mechanics_suggest_exclude,
+            "bank_mechanics_resolved_target_account_id": self.bank_mechanics_resolved_target_account_id,
             "global_pattern_category_id": self.global_pattern_category_id,
             "global_pattern_category_name": self.global_pattern_category_name,
             "global_pattern_user_count": self.global_pattern_user_count,
@@ -505,6 +515,8 @@ class ImportClusterService:
                     global_cat_id = category_by_name.get(global_match.suggested_category_name)
 
             # Layer 2: bank-specific mechanics + cross-session risk.
+            # Pass the cluster's identifier so bank_mechanics can resolve
+            # target_account_id by contract number (P-02 fix).
             mech: BankMechanicsResult = self.bank_mechanics.apply(
                 skeleton=bucket.skeleton,
                 direction=bucket.direction,
@@ -512,6 +524,8 @@ class ImportClusterService:
                 account=account,
                 session=session,
                 total_amount=bucket.total_amount,
+                identifier_key=bucket.identifier_key,
+                identifier_value=bucket.identifier_value,
             )
             mech_cat_id = (
                 category_by_name.get(mech.category_name)
@@ -578,6 +592,8 @@ class ImportClusterService:
                     bank_mechanics_category_id=mech_cat_id,
                     bank_mechanics_label=mech.label,
                     bank_mechanics_cross_session_warning=mech.cross_session_warning,
+                    bank_mechanics_suggest_exclude=mech.suggest_exclude,
+                    bank_mechanics_resolved_target_account_id=mech.resolved_target_account_id,
                     global_pattern_category_id=global_cat_id,
                     global_pattern_category_name=global_match.suggested_category_name if global_match else None,
                     global_pattern_user_count=global_match.user_count if global_match else 0,
@@ -620,29 +636,33 @@ class ImportClusterService:
             normalized = getattr(row, "normalized_data", None) or (row.normalized_data_json or {})
             status = str(getattr(row, "status", "") or "").strip().lower()
             created_tx = getattr(row, "created_transaction_id", None)
-            if status == "committed" or created_tx is not None:
+            if status in ("committed", "parked", "skipped", "excluded") or created_tx is not None:
                 excluded_row_ids.add(row.id)
                 continue
             # §8.3: `duplicate` is terminal — the row will be auto-skipped on
             # commit and the user can't override it. It already shows up in
-            # the «Переводы и дубли» widget (via transfer_match or the
-            # build_preview transfer-pair detection), so dragging it into a
-            # bulk-categorize card is pure noise. Note: `transfer_match` is
-            # NOT always written for duplicates — `_find_transfer_pair_duplicate`
-            # in build_preview marks status=duplicate without setting that
-            # field, so the explicit status check below is required in
-            # addition to the `transfer_match` test.
+            # the «Переводы и дубли» widget, so dragging it into a bulk-
+            # categorize card is pure noise. Note: real-duplicate rows
+            # detected by `_detect_committed_duplicates` carry transfer_match
+            # only when is_mirror=True; same-account real duplicates have
+            # no transfer_match, so the explicit status check below is
+            # required in addition to the `transfer_match` test.
             if status == "duplicate":
                 excluded_row_ids.add(row.id)
                 continue
-            # Any row with a transfer_match is already classified as transfer
-            # by the cross-session matcher — both the primary side (this
-            # statement's row) and the secondary side (auto-created partner).
-            # Neither should show up in bulk-categorize UI: the user already
-            # has a proper counterparty-level decision (two-sided transfer),
-            # so pulling the primary into a "one category for all" flow would
-            # override that and break the pair. See project_bulk_clusters.md.
-            if normalized.get("transfer_match"):
+            # Any row classified as a transfer is already represented in the
+            # «Переводы и дубли» widget — it must not also appear in bulk-
+            # categorize cards. Two paths can produce a transfer row:
+            #   (a) cross-session match → `transfer_match` metadata is set;
+            #   (b) in-session detection (e.g. «Погашение основного долга»
+            #       Я.Дебет→Я.Сплит) → `operation_type='transfer'` with
+            #       `target_account_id`, but no `transfer_match` because
+            #       there's no cross-session pair to match against.
+            # Both must be excluded — transfers don't carry a category and
+            # bulk-categorize UI would force them into one, breaking the
+            # invariant that transfer ≠ regular expense (§12.1).
+            op_type = str(normalized.get("operation_type") or "").lower()
+            if normalized.get("transfer_match") or op_type == "transfer":
                 excluded_row_ids.add(row.id)
             # User-requested detach: a row explicitly unchecked in the
             # cluster-card UI should leave the bulk/brand/counterparty

@@ -1,7 +1,7 @@
 import type { Account } from '@/types/account';
 import type { BudgetProgress } from '@/types/budget';
 import type { Category } from '@/types/category';
-import type { Counterparty } from '@/types/counterparty';
+import type { DebtPartner } from '@/types/debt-partner';
 import type { FinancialHealth } from '@/types/financial-health';
 import type { GoalWithProgress } from '@/types/goal';
 import type { RealAsset } from '@/types/real-asset';
@@ -403,17 +403,17 @@ export function computeAvailableFinances(accounts: Account[]): AvailableFinances
   const debitAccounts = accounts
     .filter(
       (a) =>
-        a.account_type !== 'credit' &&
+        a.account_type !== 'loan' &&
         a.account_type !== 'credit_card' &&
         a.account_type !== 'installment_card' &&
         a.account_type !== 'broker' &&
-        a.account_type !== 'deposit',
+        a.account_type !== 'savings',
     )
     .map((a) => ({
       id: a.id,
       name: a.name,
       balance: Math.max(0, toNum(a.balance)),
-      type: a.account_type === 'cash' ? 'Кэш' : 'Дебетовая карта',
+      type: a.account_type === 'main' ? 'Кэш' : 'Дебетовая карта',
     }))
     .filter((a) => a.balance > 0);
 
@@ -1010,13 +1010,13 @@ export function computeCapital(
 ): CapitalData {
   const liquid = accounts.filter(
     (a) =>
-      a.account_type !== 'credit' &&
+      a.account_type !== 'loan' &&
       a.account_type !== 'credit_card' &&
       a.account_type !== 'broker' &&
-      a.account_type !== 'deposit' &&
+      a.account_type !== 'savings' &&
       a.account_type !== 'installment_card',
   );
-  const deposits = accounts.filter((a) => a.account_type === 'deposit');
+  const deposits = accounts.filter((a) => a.account_type === 'savings');
   const brokers = accounts.filter((a) => a.account_type === 'broker');
 
   const liquidTotal = liquid.reduce((s, a) => s + Math.max(0, toNum(a.balance)), 0);
@@ -1027,7 +1027,7 @@ export function computeCapital(
   const counterpartyDebt = toNum(debts?.payableTotal);
   const totalAssets = liquidTotal + depositTotal + brokerTotal + realAssetsTotal + receivableTotal;
   const creditAccounts = accounts
-    .filter((a) => a.account_type === 'credit')
+    .filter((a) => a.account_type === 'loan')
     .map((a) => ({
       name: a.name,
       balance: Math.abs(toNum(a.balance)),
@@ -1083,11 +1083,11 @@ export type DebtsData = {
   payables: Array<{ name: string; amount: number }>;
 };
 
-export function computeDebts(counterparties: Counterparty[]): DebtsData {
-  const receivables = counterparties
+export function computeDebts(debtPartners: DebtPartner[]): DebtsData {
+  const receivables = debtPartners
     .filter((c) => toNum(c.receivable_amount) > 0)
     .map((c) => ({ name: c.name, amount: toNum(c.receivable_amount) }));
-  const payables = counterparties
+  const payables = debtPartners
     .filter((c) => toNum(c.payable_amount) > 0)
     .map((c) => ({ name: c.name, amount: toNum(c.payable_amount) }));
 

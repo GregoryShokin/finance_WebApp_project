@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -30,6 +30,7 @@ class TransactionCreateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    debt_partner_id: int | None = None
     goal_id: int | None = None
     amount: Decimal = Field(gt=0)
     credit_principal_amount: Decimal | None = Field(default=None, ge=0)
@@ -63,6 +64,7 @@ class TransactionUpdateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    debt_partner_id: int | None = None
     goal_id: int | None = None
     amount: Decimal | None = Field(default=None, gt=0)
     credit_principal_amount: Decimal | None = Field(default=None, ge=0)
@@ -114,6 +116,7 @@ class TransactionResponse(BaseModel):
     goal_id: int | None = None
     category_id: int | None
     counterparty_id: int | None
+    debt_partner_id: int | None = None
     category_priority: CategoryPriority | None = None
     amount: Decimal
     credit_principal_amount: Decimal | None
@@ -123,6 +126,7 @@ class TransactionResponse(BaseModel):
     type: TransactionType
     operation_type: TransactionOperationType
     counterparty_name: str | None = None
+    debt_partner_name: str | None = None
     description: str | None
     normalized_description: str | None
     transaction_date: datetime

@@ -10,6 +10,12 @@ type Props = {
   expandedWidth?: string;
   collapsed: ReactNode;
   expanded: ReactNode;
+  /**
+   * When true, the portal content is never unmounted after the first open —
+   * hidden via `display:none` instead. Use when children hold local state
+   * that must survive close/reopen cycles (e.g. unsaved form edits).
+   */
+  keepMounted?: boolean;
 };
 
 type Phase = 'closed' | 'measure' | 'enter' | 'open' | 'exit';
@@ -17,11 +23,13 @@ type Phase = 'closed' | 'measure' | 'enter' | 'open' | 'exit';
 const DURATION = 380;
 const EASING = 'cubic-bezier(0.4, 0, 0.15, 1)';
 
-export function ExpandableCard({ isOpen, onToggle, expandedWidth = '560px', collapsed, expanded }: Props) {
+export function ExpandableCard({ isOpen, onToggle, expandedWidth = '560px', collapsed, expanded, keepMounted = false }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>('closed');
   const originRef = useRef<DOMRect | null>(null);
+  // Once opened for the first time, keep the portal alive for keepMounted mode.
+  const [everOpened, setEverOpened] = useState(false);
 
   const close = useCallback(() => {
     if (isOpen) onToggle();
@@ -31,6 +39,7 @@ export function ExpandableCard({ isOpen, onToggle, expandedWidth = '560px', coll
   useEffect(() => {
     if (isOpen && phase === 'closed') {
       originRef.current = cardRef.current?.getBoundingClientRect() ?? null;
+      setEverOpened(true);
       setPhase('measure');
     }
   }, [isOpen, phase]);
@@ -153,7 +162,10 @@ export function ExpandableCard({ isOpen, onToggle, expandedWidth = '560px', coll
     };
   }, [phase, close]);
 
-  const showPortal = phase !== 'closed';
+  const showPortal = keepMounted ? everOpened : phase !== 'closed';
+  // keepMounted: скрываем через display:none вместо unmount. Контент mounted,
+  // state дочерних компонентов сохраняется между закрытием и открытием.
+  const hidePortal = keepMounted && phase === 'closed';
   const backdropVisible = phase === 'enter' || phase === 'open';
 
   return (
@@ -177,7 +189,7 @@ export function ExpandableCard({ isOpen, onToggle, expandedWidth = '560px', coll
       {/* Expanded overlay via portal */}
       {showPortal && typeof document !== 'undefined'
         ? createPortal(
-            <>
+            <div style={hidePortal ? { display: 'none' } : undefined}>
               {/* Backdrop */}
               <div
                 onClick={close}
@@ -209,7 +221,7 @@ export function ExpandableCard({ isOpen, onToggle, expandedWidth = '560px', coll
                   {expanded}
                 </div>
               </div>
-            </>,
+            </div>,
             document.body,
           )
         : null}

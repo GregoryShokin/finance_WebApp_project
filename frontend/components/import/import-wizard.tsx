@@ -165,11 +165,11 @@ function normalize(value: string) {
 }
 
 function isCreditPaymentAccount(account: Account) {
-  return account.account_type === 'credit' || account.account_type === 'credit_card' || account.account_type === 'installment_card' || account.is_credit;
+  return account.account_type === 'loan' || account.account_type === 'credit_card' || account.account_type === 'installment_card' || account.is_credit;
 }
 
 function isSelectableTransactionAccount(account: Account) {
-  return account.account_type !== 'credit';
+  return account.account_type !== 'loan';
 }
 
 function isImportAccount(account: Account) {
@@ -1369,7 +1369,7 @@ export function ImportWizard({ initialSessionId, onSessionCreated, sidebar }: Pr
                   label: 'Создать счёт',
                   onClick: () => {
                     setPendingFieldTarget({ rowId: null, field: 'import_account' });
-                    setPendingAccountDraft({ name: (rowQueries[0]?.import_account ?? '').trim(), currency: mappingForm.currency || 'RUB', balance: 0, is_active: true, account_type: 'regular', is_credit: false });
+                    setPendingAccountDraft({ name: (rowQueries[0]?.import_account ?? '').trim(), currency: mappingForm.currency || 'RUB', balance: 0, is_active: true, account_type: 'main', is_credit: false });
                     setAccountDialogOpen(true);
                   },
                 }}

@@ -11,7 +11,7 @@ import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
 import type { CreateTransactionPayload, Transaction, TransactionKind, TransactionOperationType } from '@/types/transaction';
 import type { CreateInstallmentPurchasePayload } from '@/types/installment-purchase';
-import type { Counterparty } from '@/types/counterparty';
+import type { DebtPartner } from '@/types/debt-partner';
 import type { GoalWithProgress } from '@/types/goal';
 import { getInstallmentPurchases, createInstallmentPurchase, updateInstallmentPurchase } from '@/lib/api/installment-purchases';
 import { operationTypeLabels, transactionTypeLabels } from '@/components/transactions/constants';
@@ -20,7 +20,7 @@ type TransactionFormValues = {
   account_id: string;
   target_account_id: string;
   category_id: string;
-  counterparty_id: string;
+  debt_partner_id: string;
   credit_account_id: string;
   goal_id: string;
   amount: string;
@@ -41,7 +41,7 @@ const defaultValues: TransactionFormValues = {
   target_account_id: '',
   category_id: '',
   credit_account_id: '',
-  counterparty_id: '',
+  debt_partner_id: '',
   goal_id: '',
   amount: '',
   credit_principal_amount: '',
@@ -70,7 +70,7 @@ function normalize(value: string) {
 
 
 function isLoanAccount(account: Account) {
-  return account.account_type === 'credit' || account.account_type === 'installment_card' || (account.is_credit && account.account_type !== 'credit_card');
+  return account.account_type === 'loan' || account.account_type === 'installment_card' || (account.is_credit && account.account_type !== 'credit_card');
 }
 
 function isSelectableTransactionAccount(account: Account) {
@@ -207,28 +207,28 @@ export function TransactionForm({
   initialData,
   accounts,
   categories,
-  counterparties = [],
+  debtPartners = [],
   goals = [],
   isSubmitting,
   onSubmit,
   onCancel,
   onCreateCategoryRequest,
   onCreateAccountRequest,
-  onCreateCounterpartyRequest,
-  onDeleteCounterpartyRequest,
+  onCreateDebtPartnerRequest,
+  onDeleteDebtPartnerRequest,
 }: {
   initialData?: Transaction | null;
   accounts: Account[];
   categories: Category[];
-  counterparties?: Counterparty[];
+  debtPartners?: DebtPartner[];
   goals?: GoalWithProgress[];
   isSubmitting?: boolean;
   onSubmit: (values: CreateTransactionPayload, installment?: { description: string; term_months: number; monthly_payment: number; original_amount: number; start_date: string; existingPurchaseId?: number | null } | null) => void;
   onCancel: () => void;
   onCreateCategoryRequest?: (payload: { name: string; kind: CategoryKind }) => void;
   onCreateAccountRequest?: (payload: { name: string }) => void;
-  onCreateCounterpartyRequest?: (payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) => void;
-  onDeleteCounterpartyRequest?: (counterparty: Counterparty) => void;
+  onCreateDebtPartnerRequest?: (payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) => void;
+  onDeleteDebtPartnerRequest?: (debtPartner: DebtPartner) => void;
 }) {
   const {
     register,
@@ -243,7 +243,7 @@ export function TransactionForm({
   const selectedTargetAccountId = watch('target_account_id');
   const selectedCategoryId = watch('category_id');
   const selectedCreditAccountId = watch('credit_account_id');
-  const selectedCounterpartyId = watch('counterparty_id');
+  const selectedDebtPartnerId = watch('debt_partner_id');
 
   const [mainType, setMainType] = useState<MainTypeValue>('regular');
   const [mainTypeQuery, setMainTypeQuery] = useState('Обычный');
@@ -257,7 +257,7 @@ export function TransactionForm({
   const [targetAccountQuery, setTargetAccountQuery] = useState('');
   const [categoryQuery, setCategoryQuery] = useState('');
   const [creditAccountQuery, setCreditAccountQuery] = useState('');
-  const [counterpartyQuery, setCounterpartyQuery] = useState('');
+  const [debtPartnerQuery, setDebtPartnerQuery] = useState('');
 
   const [isInstallmentPurchase, setIsInstallmentPurchase] = useState(false);
   const [installmentTermMonths, setInstallmentTermMonths] = useState('');
@@ -331,9 +331,9 @@ export function TransactionForm({
   );
 
 
-  const counterpartyItems = useMemo<SearchSelectItem[]>(
+  const debtPartnerItems = useMemo<SearchSelectItem[]>(
     () =>
-      [...counterparties]
+      [...debtPartners]
         .sort((a, b) => a.name.localeCompare(b.name, 'ru'))
         .map((item) => ({
           value: String(item.id),
@@ -342,7 +342,7 @@ export function TransactionForm({
           badge: Number(item.receivable_amount) > 0 ? 'Мне должны' : Number(item.payable_amount) > 0 ? 'Я должен' : undefined,
           badgeClassName: Number(item.receivable_amount) > 0 ? 'text-emerald-600' : Number(item.payable_amount) > 0 ? 'text-amber-600' : undefined,
         })),
-    [counterparties],
+    [debtPartners],
   );
 
   const goalItems = useMemo<SearchSelectItem[]>(
@@ -383,9 +383,9 @@ export function TransactionForm({
   const selectedGoalId = watch('goal_id');
   const [goalQuery, setGoalQuery] = useState('');
 
-  const selectedCounterparty = useMemo(
-    () => counterparties.find((item) => String(item.id) === selectedCounterpartyId) ?? null,
-    [counterparties, selectedCounterpartyId],
+  const selectedDebtPartner = useMemo(
+    () => debtPartners.find((item) => String(item.id) === selectedDebtPartnerId) ?? null,
+    [debtPartners, selectedDebtPartnerId],
   );
 
   const exactMatchedAccount = useMemo(() => {
@@ -406,11 +406,11 @@ export function TransactionForm({
     return accounts.find((account) => isLoanAccount(account) && normalize(account.name) === normalized) ?? null;
   }, [accounts, creditAccountQuery]);
 
-  const exactMatchedCounterparty = useMemo(() => {
-    const normalized = normalize(counterpartyQuery);
+  const exactMatchedDebtPartner = useMemo(() => {
+    const normalized = normalize(debtPartnerQuery);
     if (!normalized) return null;
-    return counterparties.find((item) => normalize(item.name) === normalized) ?? null;
-  }, [counterparties, counterpartyQuery]);
+    return debtPartners.find((item) => normalize(item.name) === normalized) ?? null;
+  }, [debtPartners, debtPartnerQuery]);
 
   const exactMatchedCategory = useMemo(() => {
     const normalized = normalize(categoryQuery);
@@ -443,9 +443,9 @@ export function TransactionForm({
     [accountItems, selectedTargetAccountId],
   );
 
-  const selectedCounterpartyItem = useMemo(
-    () => counterpartyItems.find((item) => item.value === selectedCounterpartyId) ?? null,
-    [counterpartyItems, selectedCounterpartyId],
+  const selectedDebtPartnerItem = useMemo(
+    () => debtPartnerItems.find((item) => item.value === selectedDebtPartnerId) ?? null,
+    [debtPartnerItems, selectedDebtPartnerId],
   );
 
   const showTransferTarget = mainType === 'transfer';
@@ -456,7 +456,7 @@ export function TransactionForm({
   const showCreditRepaymentFields = showCreditPaymentFields || showCreditEarlyRepaymentFields;
   const showCreditDisbursementInfo = mainType === 'credit_operation' && creditOperationKind === 'disbursement';
   const showDebtDirection = mainType === 'debt';
-  const showCounterparty = mainType === 'debt';
+  const showDebtPartner = mainType === 'debt';
   const showCategory = mainType === 'regular' || mainType === 'refund';
   const showGoalField =
     goals.length > 0 &&
@@ -467,7 +467,7 @@ export function TransactionForm({
   const hasValidInvestmentDirection = mainType !== 'investment' || Boolean(investmentDirection);
   const hasValidCreditOperationKind = mainType !== 'credit_operation' || Boolean(creditOperationKind);
   const hasValidDebtDirection = mainType !== 'debt' || Boolean(debtDirection);
-  const hasValidCounterparty = mainType !== 'debt' || Boolean(selectedCounterpartyId);
+  const hasValidDebtPartner = mainType !== 'debt' || Boolean(selectedDebtPartnerId);
   const hasValidTargetAccount = !showTransferTarget || (Boolean(selectedTargetAccountId) && selectedTargetAccountId !== selectedAccountId);
   const hasValidCreditAccount = !showCreditRepaymentFields || (Boolean(selectedCreditAccountId) && selectedCreditAccountId !== selectedAccountId);
   const hasValidCreditBreakdown =
@@ -475,7 +475,7 @@ export function TransactionForm({
     (showCreditPaymentFields
       ? Number(watch('credit_principal_amount')) >= 0 && Number(watch('credit_interest_amount')) >= 0 && Number(watch('amount')) === Number(watch('credit_principal_amount')) + Number(watch('credit_interest_amount'))
       : Number(watch('credit_principal_amount')) >= 0 && Number(watch('amount')) === Number(watch('credit_principal_amount')));
-  const hasValidDirection = hasValidInvestmentDirection && hasValidCreditOperationKind && hasValidDebtDirection && hasValidTargetAccount && hasValidCreditAccount && hasValidCreditBreakdown && hasValidCounterparty;
+  const hasValidDirection = hasValidInvestmentDirection && hasValidCreditOperationKind && hasValidDebtDirection && hasValidTargetAccount && hasValidCreditAccount && hasValidCreditBreakdown && hasValidDebtPartner;
   const resolvedOperationType = mapUiToOperation(mainType, investmentDirection || 'buy', creditOperationKind);
   const derivedType = useMemo(
     () => getDerivedType(resolvedOperationType, showCategory ? selectedCategory : null, debtDirection),
@@ -485,7 +485,7 @@ export function TransactionForm({
   const showCreateAccountAction = Boolean(accountQuery.trim()) && !exactMatchedAccount;
   const showCreateCategoryAction = showCategory && Boolean(categoryQuery.trim()) && !exactMatchedCategory;
   const showCreateCreditAccountAction = showCreditRepaymentFields && Boolean(creditAccountQuery.trim()) && !exactMatchedCreditAccount;
-  const showCreateCounterpartyAction = showCounterparty && Boolean(counterpartyQuery.trim()) && !exactMatchedCounterparty;
+  const showCreateDebtPartnerAction = showDebtPartner && Boolean(debtPartnerQuery.trim()) && !exactMatchedDebtPartner;
   const categoryKindForCreate = derivedType === 'income' ? 'income' : 'expense';
 
   useEffect(() => {
@@ -521,15 +521,15 @@ export function TransactionForm({
   }, [targetAccountQuery, exactMatchedTargetAccount, setValue, showTransferTarget]);
 
   useEffect(() => {
-    if (!showCounterparty) {
-      setValue('counterparty_id', '', { shouldValidate: true, shouldDirty: true });
-      setCounterpartyQuery('');
-    } else if (exactMatchedCounterparty) {
-      setValue('counterparty_id', String(exactMatchedCounterparty.id), { shouldValidate: true, shouldDirty: true });
-    } else if (counterpartyQuery.trim()) {
-      setValue('counterparty_id', '', { shouldValidate: true, shouldDirty: true });
+    if (!showDebtPartner) {
+      setValue('debt_partner_id', '', { shouldValidate: true, shouldDirty: true });
+      setDebtPartnerQuery('');
+    } else if (exactMatchedDebtPartner) {
+      setValue('debt_partner_id', String(exactMatchedDebtPartner.id), { shouldValidate: true, shouldDirty: true });
+    } else if (debtPartnerQuery.trim()) {
+      setValue('debt_partner_id', '', { shouldValidate: true, shouldDirty: true });
     }
-  }, [counterpartyQuery, exactMatchedCounterparty, setValue, showCounterparty]);
+  }, [debtPartnerQuery, exactMatchedDebtPartner, setValue, showDebtPartner]);
 
   useEffect(() => {
     if (!showCategory) {
@@ -586,7 +586,7 @@ export function TransactionForm({
         target_account_id: initialData.target_account_id ? String(initialData.target_account_id) : '',
         category_id: initialData.category_id ? String(initialData.category_id) : '',
         credit_account_id: initialData.credit_account_id ? String(initialData.credit_account_id) : '',
-        counterparty_id: initialData.counterparty_id ? String(initialData.counterparty_id) : '',
+        debt_partner_id: initialData.debt_partner_id ? String(initialData.debt_partner_id) : '',
         goal_id: initialData.goal_id ? String(initialData.goal_id) : '',
         amount: String(initialData.amount),
         credit_principal_amount: initialData.credit_principal_amount != null ? String(initialData.credit_principal_amount) : '',
@@ -607,7 +607,7 @@ export function TransactionForm({
       setAccountQuery(initialAccount?.name ?? '');
       setTargetAccountQuery(initialTargetAccount?.name ?? '');
       setCategoryQuery(initialCategory?.name ?? '');
-      setCounterpartyQuery(initialData.counterparty_name ?? '');
+      setDebtPartnerQuery(initialData.debt_partner_name ?? '');
       return;
     }
 
@@ -618,7 +618,7 @@ export function TransactionForm({
     setInvestmentDirectionQuery('');
     setCreditOperationKind('');
     setCreditOperationKindQuery('');
-    setCounterpartyQuery('');
+    setDebtPartnerQuery('');
     setDebtDirection('');
     setDebtDirectionQuery('');
     setAccountQuery('');
@@ -666,10 +666,10 @@ export function TransactionForm({
     onCreateAccountRequest?.({ name });
   }
 
-  function handleCreateCounterpartyClick() {
-    const name = counterpartyQuery.trim() || 'Новый контрагент';
+  function handleCreateDebtPartnerClick() {
+    const name = debtPartnerQuery.trim() || 'Новый дебитор / кредитор';
     const opening_balance_kind = debtDirection === 'borrowed' || debtDirection === 'repaid' ? 'payable' : 'receivable';
-    onCreateCounterpartyRequest?.({ name, opening_balance_kind });
+    onCreateDebtPartnerRequest?.({ name, opening_balance_kind });
   }
 
   function handleCreateCategoryClick() {
@@ -700,12 +700,12 @@ export function TransactionForm({
           target_account_id: showTransferTarget && values.target_account_id ? Number(values.target_account_id) : null,
           credit_account_id: showCreditRepaymentFields && values.credit_account_id ? Number(values.credit_account_id) : null,
           category_id: showCategory && values.category_id ? Number(values.category_id) : null,
-          counterparty_id: showCounterparty && values.counterparty_id ? Number(values.counterparty_id) : null,
+          debt_partner_id: showDebtPartner && values.debt_partner_id ? Number(values.debt_partner_id) : null,
           goal_id: showGoalField && values.goal_id ? Number(values.goal_id) : null,
           amount: Number(values.amount),
           credit_principal_amount: showCreditRepaymentFields ? Number(values.credit_principal_amount) : null,
           credit_interest_amount: showCreditPaymentFields ? Number(values.credit_interest_amount) : showCreditEarlyRepaymentFields ? 0 : null,
-          debt_direction: showCounterparty && debtDirection ? debtDirection : null,
+          debt_direction: showDebtPartner && debtDirection ? debtDirection : null,
           currency: (selectedAccount?.currency ?? selectedTargetAccount?.currency ?? 'RUB').trim().toUpperCase(),
           type: getDerivedType(
             values.operation_type,
@@ -721,7 +721,7 @@ export function TransactionForm({
     >
       <input type="hidden" {...register('operation_type', { required: true })} />
       <input type="hidden" {...register('account_id', { required: 'Выбери счёт отправления' })} />
-      <input type="hidden" {...register('counterparty_id')} />
+      <input type="hidden" {...register('debt_partner_id')} />
       <input
         type="hidden"
         {...register('target_account_id', {
@@ -789,8 +789,8 @@ export function TransactionForm({
               setTargetAccountQuery('');
               setValue('credit_account_id', '', { shouldValidate: true, shouldDirty: true });
               setCreditAccountQuery('');
-              setValue('counterparty_id', '', { shouldValidate: true, shouldDirty: true });
-              setCounterpartyQuery('');
+              setValue('debt_partner_id', '', { shouldValidate: true, shouldDirty: true });
+              setDebtPartnerQuery('');
               setValue('credit_principal_amount', '', { shouldValidate: true, shouldDirty: true });
               setValue('credit_interest_amount', '', { shouldValidate: true, shouldDirty: true });
             }
@@ -854,33 +854,33 @@ export function TransactionForm({
           />
         ) : null}
 
-        {showCounterparty ? (
+        {showDebtPartner ? (
           <SearchSelect
-            id="tx-counterparty"
-            label="Контрагент"
-            placeholder="Выбери контрагента"
+            id="tx-debt-partner"
+            label="Дебитор / Кредитор"
+            placeholder="Выбери дебитора / кредитора"
             widthClassName="w-full"
-            query={counterpartyQuery}
-            setQuery={setCounterpartyQuery}
-            items={counterpartyItems}
-            selectedValue={selectedCounterpartyItem?.value}
+            query={debtPartnerQuery}
+            setQuery={setDebtPartnerQuery}
+            items={debtPartnerItems}
+            selectedValue={selectedDebtPartnerItem?.value}
             showAllOnFocus
             onSelect={(item) => {
-              setValue('counterparty_id', item.value, { shouldValidate: true, shouldDirty: true });
-              setCounterpartyQuery(item.label);
+              setValue('debt_partner_id', item.value, { shouldValidate: true, shouldDirty: true });
+              setDebtPartnerQuery(item.label);
             }}
-            error={submitCount > 0 && !hasValidCounterparty ? 'Выбери контрагента' : undefined}
-            onDeleteItem={onDeleteCounterpartyRequest ? (item) => {
-              const found = counterparties.find((counterparty) => String(counterparty.id) === item.value);
-              if (found) onDeleteCounterpartyRequest(found);
+            error={submitCount > 0 && !hasValidDebtPartner ? 'Выбери дебитора / кредитора' : undefined}
+            onDeleteItem={onDeleteDebtPartnerRequest ? (item) => {
+              const found = debtPartners.find((debtPartner) => String(debtPartner.id) === item.value);
+              if (found) onDeleteDebtPartnerRequest(found);
             } : undefined}
-            deleteItemLabel="Удалить контрагента"
+            deleteItemLabel="Удалить дебитора / кредитора"
             createAction={
-              onCreateCounterpartyRequest
+              onCreateDebtPartnerRequest
                 ? {
-                    visible: showCreateCounterpartyAction,
-                    label: 'Создать контрагента',
-                    onClick: handleCreateCounterpartyClick,
+                    visible: showCreateDebtPartnerAction,
+                    label: 'Создать дебитора / кредитора',
+                    onClick: handleCreateDebtPartnerClick,
                   }
                 : undefined
             }

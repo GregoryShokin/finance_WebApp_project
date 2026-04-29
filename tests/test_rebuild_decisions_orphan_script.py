@@ -89,7 +89,7 @@ class TestRebuildDecisionsForOrphans:
         )
 
         monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
-        script.run(execute=False, session_filter=None)
+        script.run(execute=False, session_filter=None, mode="orphans")
 
         db.refresh(row)
         # Untouched on dry-run.
@@ -121,7 +121,7 @@ class TestRebuildDecisionsForOrphans:
         )
 
         monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
-        script.run(execute=True, session_filter=None)
+        script.run(execute=True, session_filter=None, mode="orphans")
 
         db.refresh(row)
         norm = row.normalized_data_json
@@ -176,7 +176,7 @@ class TestRebuildDecisionsForOrphans:
         )
 
         monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
-        script.run(execute=True, session_filter=None)
+        script.run(execute=True, session_filter=None, mode="orphans")
 
         db.refresh(row)
         norm = row.normalized_data_json
@@ -211,7 +211,7 @@ class TestRebuildDecisionsForOrphans:
         )
 
         monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
-        script.run(execute=True, session_filter=None)
+        script.run(execute=True, session_filter=None, mode="orphans")
 
         db.refresh(row)
         assert row.status == "ready"
@@ -247,9 +247,223 @@ class TestRebuildDecisionsForOrphans:
         db.add(error_row); db.commit(); db.refresh(error_row)
 
         monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
-        script.run(execute=True, session_filter=None)
+        script.run(execute=True, session_filter=None, mode="orphans")
 
         db.refresh(committed_row); db.refresh(error_row)
         assert committed_row.status == "committed"
         assert committed_row.normalized_data_json["applied_rule_id"] == orphan.id
         assert error_row.status == "error"
+
+
+class TestRebuildDecisionsDemotedTransfers:
+    """§12.1 + §5.2 v1.1 trigger 6 — restore silently-demoted transfers
+    to (operation_type=transfer, status=error). The marker is a
+    `error_message` substring «понижен до regular» left by pre-567b497
+    silent demotion code."""
+
+    def _make_demoted_row(
+        self, db, session, *, status, op="regular", category_id=None, target=None,
+    ):
+        row = ImportRow(
+            session_id=session.id, row_index=0, status=status,
+            raw_data_json={},
+            normalized_data_json={
+                "operation_type": op,
+                "account_id": session.account_id,
+                "target_account_id": target,
+                "category_id": category_id,
+                "normalized_description": "внутренний перевод договор",
+                "skeleton": "внутренний перевод договор",
+                "fingerprint": "fp-demoted",
+                "amount": "1000.00",
+            },
+            error_message="перевод без счёта получателя: понижен до regular",
+        )
+        db.add(row); db.commit(); db.refresh(row)
+        return row
+
+    def test_ready_demoted_transfer_restored_to_transfer_error(
+        self, db, user, category, session, monkeypatch,
+    ):
+        from scripts import rebuild_decisions_for_orphans as script
+
+        row = self._make_demoted_row(
+            db, session, status="ready", category_id=category.id,
+        )
+
+        monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
+        script.run(execute=True, session_filter=None, mode="demoted")
+
+        db.refresh(row)
+        norm = row.normalized_data_json
+        # Restored to transfer per §12.1.
+        assert norm["operation_type"] == "transfer"
+        # Category dropped — transfers don't carry budget category.
+        assert norm.get("category_id") is None
+        # Facts preserved (§3.2).
+        assert norm["fingerprint"] == "fp-demoted"
+        assert norm["amount"] == "1000.00"
+        # Status escalated to error per §5.2 v1.1 trigger 6.
+        assert row.status == "error"
+        # Issue text recorded for the moderator UI.
+        assert row.error_message and "transfer" in row.error_message
+
+    def test_warning_demoted_row_is_not_touched(
+        self, db, user, category, session, monkeypatch,
+    ):
+        """Warning rows are already visible to the user — don't poke them."""
+        from scripts import rebuild_decisions_for_orphans as script
+
+        row = self._make_demoted_row(
+            db, session, status="warning", category_id=category.id,
+        )
+
+        monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
+        script.run(execute=True, session_filter=None, mode="demoted")
+
+        db.refresh(row)
+        assert row.status == "warning"
+        assert row.normalized_data_json["operation_type"] == "regular"
+
+    def test_row_without_demoted_marker_untouched(
+        self, db, user, category, session, monkeypatch,
+    ):
+        """A regular ready row with no demotion marker must not be restored."""
+        from scripts import rebuild_decisions_for_orphans as script
+
+        row = ImportRow(
+            session_id=session.id, row_index=0, status="ready",
+            raw_data_json={},
+            normalized_data_json={
+                "operation_type": "regular",
+                "account_id": session.account_id,
+                "category_id": category.id,
+                "normalized_description": "оплата кофе",
+                "skeleton": "оплата кофе",
+                "amount": "100.00",
+            },
+            error_message=None,
+        )
+        db.add(row); db.commit(); db.refresh(row)
+
+        monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
+        script.run(execute=True, session_filter=None, mode="demoted")
+
+        db.refresh(row)
+        assert row.status == "ready"
+        assert row.normalized_data_json["operation_type"] == "regular"
+        assert row.normalized_data_json["category_id"] == category.id
+
+    def test_demoted_row_with_target_account_set_untouched(
+        self, db, user, category, session, monkeypatch, regular_account,
+    ):
+        """If for some reason the target_account_id was later filled in,
+        the integrity violation is gone — don't escalate to error."""
+        from scripts import rebuild_decisions_for_orphans as script
+
+        row = self._make_demoted_row(
+            db, session, status="ready",
+            category_id=category.id,
+            target=regular_account.id,  # counter-account is set
+        )
+
+        monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
+        script.run(execute=True, session_filter=None, mode="demoted")
+
+        db.refresh(row)
+        # Untouched — no integrity violation.
+        assert row.status == "ready"
+        assert row.normalized_data_json["operation_type"] == "regular"
+
+
+class TestRebuildDecisionsSelfLoopTransfers:
+    """§12.1 extended — transfer rows where account_id == target_account_id
+    are semantically invalid (money cannot move from a single account to
+    itself). Strip the bogus target and escalate to error."""
+
+    def _make_self_loop_row(self, db, session, *, status, acc, category_id=None):
+        row = ImportRow(
+            session_id=session.id, row_index=0, status=status,
+            raw_data_json={},
+            normalized_data_json={
+                "operation_type": "transfer",
+                "account_id": acc,
+                "target_account_id": acc,  # same as source — the bug
+                "category_id": category_id,
+                "normalized_description": "внутрибанковский перевод договор",
+                "skeleton": "внутрибанковский перевод договор",
+                "fingerprint": "fp-selfloop",
+                "amount": "1000.00",
+            },
+        )
+        db.add(row); db.commit(); db.refresh(row)
+        return row
+
+    def test_ready_self_loop_cleared_and_escalated_to_error(
+        self, db, user, category, session, monkeypatch, regular_account,
+    ):
+        from scripts import rebuild_decisions_for_orphans as script
+
+        row = self._make_self_loop_row(
+            db, session, status="ready",
+            acc=regular_account.id, category_id=category.id,
+        )
+
+        monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
+        script.run(execute=True, session_filter=None, mode="self-loop")
+
+        db.refresh(row)
+        norm = row.normalized_data_json
+        assert norm["operation_type"] == "transfer"
+        assert norm.get("target_account_id") is None  # bogus tgt dropped
+        assert norm.get("category_id") is None
+        # Source preserved — that's a real fact.
+        assert int(norm["account_id"]) == regular_account.id
+        # Facts preserved (§3.2).
+        assert norm["fingerprint"] == "fp-selfloop"
+        assert norm["amount"] == "1000.00"
+        assert row.status == "error"
+
+    def test_warning_self_loop_untouched(
+        self, db, user, category, session, monkeypatch, regular_account,
+    ):
+        """Like demoted-mode, only ready rows are touched."""
+        from scripts import rebuild_decisions_for_orphans as script
+
+        row = self._make_self_loop_row(
+            db, session, status="warning",
+            acc=regular_account.id, category_id=category.id,
+        )
+
+        monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
+        script.run(execute=True, session_filter=None, mode="self-loop")
+
+        db.refresh(row)
+        assert row.status == "warning"
+        assert int(row.normalized_data_json["target_account_id"]) == regular_account.id
+
+    def test_distinct_account_transfer_not_touched(
+        self, db, user, category, session, monkeypatch, regular_account, credit_account,
+    ):
+        """A real cross-account transfer must survive the self-loop pass."""
+        from scripts import rebuild_decisions_for_orphans as script
+
+        row = ImportRow(
+            session_id=session.id, row_index=0, status="ready",
+            raw_data_json={},
+            normalized_data_json={
+                "operation_type": "transfer",
+                "account_id": regular_account.id,
+                "target_account_id": credit_account.id,
+                "amount": "5000.00",
+                "fingerprint": "fp-real-xfer",
+            },
+        )
+        db.add(row); db.commit(); db.refresh(row)
+
+        monkeypatch.setattr(script, "SessionLocal", lambda: _NoCloseSession(db))
+        script.run(execute=True, session_filter=None, mode="self-loop")
+
+        db.refresh(row)
+        assert row.status == "ready"
+        assert int(row.normalized_data_json["target_account_id"]) == credit_account.id

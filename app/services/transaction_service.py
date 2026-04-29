@@ -12,6 +12,7 @@ from app.models.transaction import Transaction
 from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
 from app.repositories.counterparty_repository import CounterpartyRepository
+from app.repositories.debt_partner_repository import DebtPartnerRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
@@ -76,6 +77,7 @@ class TransactionService:
         self.account_repo = AccountRepository(db)
         self.category_repo = CategoryRepository(db)
         self.counterparty_repo = CounterpartyRepository(db)
+        self.debt_partner_repo = DebtPartnerRepository(db)
         self.enrichment_service = TransactionEnrichmentService(db)
         self.category_rule_repo = TransactionCategoryRuleRepository(db)
 
@@ -425,6 +427,7 @@ class TransactionService:
             "credit_account_id": resolved_credit_account_id,
             "category_id": pick("category_id", transaction.category_id, allow_none=True),
             "counterparty_id": pick("counterparty_id", transaction.counterparty_id, allow_none=True),
+            "debt_partner_id": pick("debt_partner_id", getattr(transaction, "debt_partner_id", None), allow_none=True),
             "goal_id": pick("goal_id", getattr(transaction, "goal_id", None), allow_none=True),
             "amount": pick("amount", transaction.amount),
             "credit_principal_amount": pick("credit_principal_amount", transaction.credit_principal_amount, allow_none=True),
@@ -625,12 +628,19 @@ class TransactionService:
         prepared = dict(payload)
         description = prepared.get("description")
         operation_type = prepared.get("operation_type")
-        counterparty_id = prepared.get("counterparty_id")
-        if operation_type == "debt" and counterparty_id not in (None, "", 0):
-            counterparty = self.counterparty_repo.get_by_id_and_user(int(counterparty_id), int(prepared.get("user_id") or 0)) if prepared.get("user_id") else None
-            if counterparty is not None and not str(description or "").strip():
-                prepared["description"] = counterparty.name
-                description = counterparty.name
+        debt_partner_id = prepared.get("debt_partner_id")
+        user_id = prepared.get("user_id")
+        if (
+            operation_type == "debt"
+            and debt_partner_id not in (None, "", 0)
+            and user_id
+        ):
+            partner = self.debt_partner_repo.get_by_id_and_user(
+                int(debt_partner_id), int(user_id)
+            )
+            if partner is not None and not str(description or "").strip():
+                prepared["description"] = partner.name
+                description = partner.name
         prepared["normalized_description"] = self.enrichment_service.normalize_for_rule(description)
         return prepared
 
@@ -639,6 +649,7 @@ class TransactionService:
         target_account_id = payload.get("target_account_id")
         category_id = payload.get("category_id")
         counterparty_id = payload.get("counterparty_id")
+        debt_partner_id = payload.get("debt_partner_id")
         transaction_type = payload.get("type")
         debt_direction = payload.get("debt_direction")
 
@@ -665,20 +676,31 @@ class TransactionService:
         elif target_account_id is not None:
             raise TransactionValidationError("Счёт назначения можно указывать только для переводов.")
 
+        # Debt operations route to a DebtPartner (a debtor / creditor), NOT
+        # a Counterparty (a merchant / service). Keeping the two entities
+        # apart prevents "Пятёрочка" from ever appearing in a debt UI and
+        # vice versa. counterparty_id is not accepted on debt rows.
         if operation_type == "debt":
-            if counterparty_id in (None, "", 0):
-                raise TransactionValidationError("Для долга нужно указать контрагента.")
+            if debt_partner_id in (None, "", 0):
+                raise TransactionValidationError(
+                    "Для долга нужно указать дебитора / кредитора."
+                )
+            if counterparty_id not in (None, "", 0):
+                raise TransactionValidationError(
+                    "Для долга указывается дебитор / кредитор, а не контрагент."
+                )
             if debt_direction not in {"lent", "borrowed", "repaid", "collected"}:
-                raise TransactionValidationError("Для долга нужно выбрать корректное направление.")
+                raise TransactionValidationError(
+                    "Для долга нужно выбрать корректное направление."
+                )
         # Counterparty is allowed on any operation that represents an
-        # interaction with a real entity — regular purchases (merchant),
-        # refunds (reversal from the same merchant), and debt (the
-        # counterparty IS the debtor / creditor). It is NOT meaningful on
+        # interaction with a real entity — regular purchases (merchant) and
+        # refunds (reversal from the same merchant). It is NOT meaningful on
         # transfers (internal money move between user's own accounts),
         # credit disbursement/early repayment (bank is the account owner,
         # not a merchant), investment buy/sell (instrument, not a person),
         # or adjustments. Those paths reject counterparty_id to prevent
-        # accidental binding to an unrelated party.
+        # accidental binding to an unrelated party. Debt is handled above.
         elif operation_type in ("transfer", "credit_disbursement", "credit_early_repayment",
                                 "investment_buy", "investment_sell", "adjustment"):
             if counterparty_id not in (None, "", 0):
@@ -686,10 +708,23 @@ class TransactionService:
                     "Контрагент не применим к этому типу операции."
                 )
 
+        # debt_partner_id only valid on operation_type='debt'.
+        if operation_type != "debt" and debt_partner_id not in (None, "", 0):
+            raise TransactionValidationError(
+                "Дебитор / кредитор применим только к долговым операциям."
+            )
+
         if counterparty_id not in (None, "", 0):
             counterparty = self.counterparty_repo.get_by_id_and_user(int(counterparty_id), user_id)
             if counterparty is None:
                 raise TransactionValidationError("Контрагент не найден.")
+
+        if debt_partner_id not in (None, "", 0):
+            partner = self.debt_partner_repo.get_by_id_and_user(int(debt_partner_id), user_id)
+            if partner is None:
+                raise TransactionValidationError(
+                    "Дебитор / кредитор не найден."
+                )
 
         if category_id is None:
             return

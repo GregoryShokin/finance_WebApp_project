@@ -77,6 +77,8 @@ def _make_svc(rows: list, rule_by_identifier=None, rule_by_bank=None, rule_by_de
         label=None,
         cross_session_warning=None,
         confidence_boost=0.0,
+        suggest_exclude=False,
+        resolved_target_account_id=None,
     )
     svc.global_patterns = MagicMock()
     svc.global_patterns.get_matching_pattern.return_value = None

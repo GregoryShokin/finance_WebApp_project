@@ -35,7 +35,7 @@ import { useMetricsSummary } from '@/hooks/use-metrics-summary';
 import { getAccounts } from '@/lib/api/accounts';
 import { getBudgetProgress } from '@/lib/api/budget';
 import { getCategories } from '@/lib/api/categories';
-import { getCounterparties } from '@/lib/api/counterparties';
+import { getDebtPartners } from '@/lib/api/debt-partners';
 import { getGoals } from '@/lib/api/goals';
 import { getRealAssets } from '@/lib/api/real-assets';
 import { getTransactions } from '@/lib/api/transactions';
@@ -54,7 +54,7 @@ export default function DashboardPage() {
   });
   const categoriesQuery = useQuery({ queryKey: ['categories', 'dashboard-new'], queryFn: () => getCategories() });
   const goalsQuery = useQuery({ queryKey: ['goals'], queryFn: getGoals });
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
   const realAssetsQuery = useQuery({ queryKey: ['real-assets'], queryFn: getRealAssets });
   const transactionsQuery = useQuery({ queryKey: ['transactions', 'dashboard-new'], queryFn: () => getTransactions() });
   const metricsSummaryQuery = useMetricsSummary();
@@ -65,7 +65,7 @@ export default function DashboardPage() {
     budgetQuery.isLoading ||
     categoriesQuery.isLoading ||
     goalsQuery.isLoading ||
-    counterpartiesQuery.isLoading ||
+    debtPartnersQuery.isLoading ||
     realAssetsQuery.isLoading ||
     transactionsQuery.isLoading ||
     metricsSummaryQuery.isLoading;
@@ -76,7 +76,7 @@ export default function DashboardPage() {
       budgetQuery.error ||
       categoriesQuery.error ||
       goalsQuery.error ||
-      counterpartiesQuery.error ||
+      debtPartnersQuery.error ||
       realAssetsQuery.error ||
       transactionsQuery.error,
   );
@@ -85,7 +85,7 @@ export default function DashboardPage() {
   const transactions = transactionsQuery.data ?? [];
   const categories = categoriesQuery.data ?? [];
   const goals = goalsQuery.data ?? [];
-  const counterparties = counterpartiesQuery.data ?? [];
+  const debtPartners = debtPartnersQuery.data ?? [];
   const realAssets = realAssetsQuery.data ?? [];
   const budget = budgetQuery.data ?? [];
 
@@ -180,7 +180,7 @@ export default function DashboardPage() {
   const incomeStructure = useMemo(() => computeIncomeStructure(transactions, categories), [transactions, categories]);
   const avgDailyExpense = useMemo(() => computeAvgDailyExpense(transactions), [transactions]);
 
-  const debtsData = useMemo(() => computeDebts(counterparties), [counterparties]);
+  const debtsData = useMemo(() => computeDebts(debtPartners), [debtPartners]);
   const capitalData = useMemo(
     () => (health ? computeCapital(accounts, realAssets, health, debtsData) : null),
     [accounts, realAssets, health, debtsData],

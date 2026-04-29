@@ -4,14 +4,14 @@ import { TransactionForm } from '@/components/transactions/transaction-form';
 import type { Account } from '@/types/account';
 import type { Category, CategoryKind } from '@/types/category';
 import type { CreateTransactionPayload, Transaction } from '@/types/transaction';
-import type { Counterparty } from '@/types/counterparty';
+import type { DebtPartner } from '@/types/debt-partner';
 import type { GoalWithProgress } from '@/types/goal';
 
 export function TransactionsList({
   transactions,
   accounts,
   categories,
-  counterparties,
+  debtPartners,
   goals = [],
   onEdit,
   onDelete,
@@ -24,13 +24,13 @@ export function TransactionsList({
   onCancelEdit,
   onCreateCategoryRequest,
   onCreateAccountRequest,
-  onCreateCounterpartyRequest,
-  onDeleteCounterpartyRequest,
+  onCreateDebtPartnerRequest,
+  onDeleteDebtPartnerRequest,
 }: {
   transactions: Transaction[];
   accounts: Account[];
   categories: Category[];
-  counterparties?: Counterparty[];
+  debtPartners?: DebtPartner[];
   goals?: GoalWithProgress[];
   onEdit: (transaction: Transaction) => void;
   onDelete?: (transaction: Transaction) => void;
@@ -43,8 +43,8 @@ export function TransactionsList({
   onCancelEdit?: () => void;
   onCreateCategoryRequest?: (payload: { name: string; kind: CategoryKind }) => void;
   onCreateAccountRequest?: (payload: { name: string }) => void;
-  onCreateCounterpartyRequest?: (payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) => void;
-  onDeleteCounterpartyRequest?: (counterparty: Counterparty) => void;
+  onCreateDebtPartnerRequest?: (payload: { name: string; opening_balance_kind: 'receivable' | 'payable' }) => void;
+  onDeleteDebtPartnerRequest?: (debtPartner: DebtPartner) => void;
 }) {
   const pendingSet = new Set(pendingDeleteIds ?? []);
 
@@ -82,15 +82,15 @@ export function TransactionsList({
                   initialData={editingTransaction}
                   accounts={accounts}
                   categories={categories}
-                  counterparties={counterparties ?? []}
+                  debtPartners={debtPartners ?? []}
                   goals={goals}
                   isSubmitting={isSubmittingEdit}
                   onCancel={onCancelEdit}
                   onSubmit={onSubmitEdit}
                   onCreateAccountRequest={onCreateAccountRequest}
                   onCreateCategoryRequest={onCreateCategoryRequest}
-                  onCreateCounterpartyRequest={onCreateCounterpartyRequest}
-                  onDeleteCounterpartyRequest={onDeleteCounterpartyRequest}
+                  onCreateDebtPartnerRequest={onCreateDebtPartnerRequest}
+                  onDeleteDebtPartnerRequest={onDeleteDebtPartnerRequest}
                 />
               </Card>
             ) : null}
