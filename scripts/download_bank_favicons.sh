@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Download bank favicons via Google's S2 favicon service into
-# frontend/public/bank-logos/<code>.png. Used as a temporary stand-in for
-# proper SVG brand assets.
+# Download bank logo PNGs into frontend/public/bank-logos/<code>.png.
 #
-# Re-run safe — overwrites existing files. Run once after adding new banks
-# to alembic/versions/0045_add_banks_table.py.
+# Strategy per bank:
+#   1. Try the bank site's apple-touch-icon.png directly (typically 180-192px,
+#      brand-quality; what banks ship for iOS home-screen pinning).
+#   2. Fallback: Google S2 favicon service at sz=128 (low-res, sometimes a
+#      generic placeholder — used only when the bank's apple-touch-icon
+#      isn't reachable).
+#
+# Re-run safe — overwrites existing files. Run after adding new banks
+# to alembic/versions/0045_add_banks_table.py. Codes match that seed.
 
 set -euo pipefail
 
 OUT="$(cd "$(dirname "$0")/../frontend/public/bank-logos" && pwd)"
 
-# code:domain pairs — domain is whatever surface produces a usable favicon.
-# Some banks have multiple domains; the "right" one is the one whose
-# favicon is the brand mark.
+# code:domain pairs. Domain should be the bank's primary site (or a
+# subdomain that hosts the brand-quality apple-touch-icon).
 PAIRS=(
   "sber:sberbank.ru"
   "tbank:tbank.ru"
@@ -20,7 +24,7 @@ PAIRS=(
   "vtb:vtb.ru"
   "gazprombank:gazprombank.ru"
   "yandex:bank.yandex.ru"
-  "ozon:ozonbank.ru"
+  "ozon:finance.ozon.ru"
   "raiffeisen:raiffeisen.ru"
   "rosbank:rosbank.ru"
   "psb:psbank.ru"
@@ -46,13 +50,40 @@ PAIRS=(
   "zenit:zenit.ru"
 )
 
+try_apple_touch() {
+  # Probe a couple of common apple-touch-icon paths. Echo the URL of the
+  # first one that returns a >1KB PNG; otherwise empty.
+  local domain="$1"
+  for path in "/apple-touch-icon.png" "/apple-touch-icon-precomposed.png" "/static/apple-touch-icon.png"; do
+    local url="https://${domain}${path}"
+    local tmp; tmp="$(mktemp)"
+    if curl -fsSL --max-time 8 "$url" -o "$tmp" 2>/dev/null; then
+      local size; size="$(wc -c <"$tmp")"
+      if [ "$size" -gt 1000 ]; then
+        echo "$url"
+        rm -f "$tmp"
+        return
+      fi
+    fi
+    rm -f "$tmp"
+  done
+}
+
 for entry in "${PAIRS[@]}"; do
   code="${entry%%:*}"
   domain="${entry##*:}"
-  url="https://www.google.com/s2/favicons?domain=${domain}&sz=128"
   out="$OUT/${code}.png"
-  printf "→ %s ← %s\n" "$code" "$domain"
-  curl -fsSL "$url" -o "$out" || echo "   (failed: $code)"
+
+  apple_url="$(try_apple_touch "$domain")"
+  if [ -n "$apple_url" ]; then
+    printf "→ %-18s ← %s [apple-touch]\n" "$code" "$apple_url"
+    curl -fsSL --max-time 10 "$apple_url" -o "$out" || echo "   (failed: $code)"
+    continue
+  fi
+
+  google_url="https://www.google.com/s2/favicons?domain=${domain}&sz=128"
+  printf "→ %-18s ← %s [google s2]\n" "$code" "$domain"
+  curl -fsSL --max-time 10 "$google_url" -o "$out" || echo "   (failed: $code)"
 done
 
 printf "\nDone. Files in: %s\n" "$OUT"
