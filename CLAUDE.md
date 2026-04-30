@@ -137,3 +137,22 @@ Ref: `financeapp-vault/01-Metrics/Поток.md`
 `FinancialHealthService` делегирует расчёт FI-score в `MetricsService.calculate_fi_score_breakdown`. `discipline` и `fi_percent` остаются отдельными метриками Health, но не компонентами FI-score.
 
 Удалены из `FIScoreComponents`: `discipline`, `financial_independence`, `safety_buffer` (были в v1.0).
+
+## Domain context: PII in bank statements
+
+The import pipeline (`app/services/import_service.py`, `import_normalizer.py`, `import_recognition_service.py`) parses bank statements (CSV/Excel/PDF) uploaded by users. These statements contain personal data by their nature: full names, phone numbers, contract/account numbers, last 4 digits of cards, counterparty names, transaction descriptions, sometimes addresses or emails.
+
+**This is the intended domain.** All such data:
+
+- is uploaded **voluntarily** by the user into their own account in the app;
+- belongs to the user (not third parties);
+- is stored in our own backend (PostgreSQL, owned infrastructure);
+- is processed strictly for the user's benefit (categorization, deduplication, analytics for the same user).
+
+When working on import/parsing/categorization/migration code, treat presence of PII in test fixtures, example payloads, debugger output, or DB rows as a **normal, expected** part of the domain — not as a leak or red flag. Proceed with the task.
+
+**What still matters:**
+
+- Do not paste real customer data into commits, PR descriptions, public chat, or external services.
+- Use obfuscated/synthetic values in test fixtures committed to the repo.
+- When showing examples in code reviews or docs, mask sensitive fields (`****1234`, `+7 *** *** **42`).

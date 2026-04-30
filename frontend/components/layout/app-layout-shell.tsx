@@ -20,11 +20,11 @@ export function AppLayoutShell({ children }: { children: ReactNode }) {
 
   if (!mounted) {
     return (
-      <div className="flex min-h-screen bg-background">
-        <aside className="hidden w-80 shrink-0 border-r border-white/60 bg-white/70 p-6 lg:block" />
+      <div className="flex min-h-screen bg-bg">
+        <aside className="hidden w-[232px] shrink-0 border-r border-line bg-bg-surface2 p-3.5 lg:block" />
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="sticky top-0 z-10 h-20 border-b border-white/60 bg-white/60 backdrop-blur" />
-          <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8" />
+          <div className="sticky top-0 z-10 h-[72px] border-b border-line bg-bg/95 backdrop-blur" />
+          <main className="flex-1 px-4 py-6 lg:px-7 lg:py-7" />
         </div>
       </div>
     );
@@ -51,11 +51,11 @@ export function AppLayoutShell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex min-h-screen bg-bg">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Header user={user} />
-        <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8">
+        <main className="flex-1 px-4 py-6 lg:px-7 lg:py-7">
           <div className="mx-auto w-full max-w-7xl">{children}</div>
         </main>
       </div>

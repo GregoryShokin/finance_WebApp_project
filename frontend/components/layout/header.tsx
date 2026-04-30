@@ -1,20 +1,58 @@
 "use client";
 
-import { CalendarDays, LogOut, Settings, ShieldCheck } from 'lucide-react';
-import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { usePathname } from 'next/navigation';
 
-import { Button } from '@/components/ui/button';
-import { removeAccessToken } from '@/lib/auth/token';
 import type { User } from '@/types/auth';
 
-export function Header({ user }: { user: User | null }) {
-  const router = useRouter();
+const ROUTE_TITLE: Record<string, string> = {
+  '/dashboard': 'Дашборд',
+  '/health': 'Финансовое здоровье',
+  '/transactions': 'Транзакции',
+  '/planning': 'План',
+  '/goals': 'Цели',
+  '/import': 'Импорт выписок',
+  '/parked-queue': 'Недоразобранное',
+  '/categories': 'Категории',
+  '/rules': 'Правила',
+  '/accounts': 'Активы',
+  '/bank-connections': 'Банковские подключения',
+  '/settings': 'Настройки',
+  '/review': 'Ревью',
+};
+
+function titleFromPath(pathname: string): string {
+  const exact = ROUTE_TITLE[pathname];
+  if (exact) return exact;
+  // Fallback: take first segment, prettify
+  const seg = pathname.split('/').filter(Boolean)[0] ?? '';
+  return seg ? seg.charAt(0).toUpperCase() + seg.slice(1) : 'FinanceApp';
+}
+
+function sectionFromPath(pathname: string): string {
+  const seg = pathname.split('/').filter(Boolean)[0] ?? '';
+  if (!seg) return 'Личный кабинет';
+  return ROUTE_TITLE[`/${seg}`] ?? seg;
+}
+
+export function Header({
+  user: _user,
+  title,
+  subtitle,
+  actions,
+}: {
+  user: User | null;
+  /** Page title override; falls back to route mapping. */
+  title?: string;
+  /** Optional subtitle line under the title (e.g. statement metadata). */
+  subtitle?: ReactNode;
+  /** Right-side action slot (chips, buttons specific to a page). */
+  actions?: ReactNode;
+}) {
+  const pathname = usePathname();
   const [mounted, setMounted] = useState(false);
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  useEffect(() => setMounted(true), []);
 
   const todayLabel = useMemo(
     () =>
@@ -26,48 +64,27 @@ export function Header({ user }: { user: User | null }) {
     [],
   );
 
-  function handleLogout() {
-    removeAccessToken();
-    router.replace('/login');
-  }
-
-  function handleSettings() {
-    router.push('/settings');
-  }
+  const resolvedTitle = title ?? titleFromPath(pathname ?? '');
+  const section = sectionFromPath(pathname ?? '');
 
   return (
-    <header className="sticky top-0 z-20 border-b border-white/60 bg-white/75 backdrop-blur">
-      <div className="mx-auto flex h-20 w-full max-w-7xl items-center justify-between gap-4 px-4 lg:px-8">
+    <header className="sticky top-0 z-20 border-b border-line bg-bg/95 backdrop-blur">
+      <div className="flex w-full items-center justify-between gap-4 px-6 py-3.5 lg:px-7">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
-            <ShieldCheck className="size-4" />
-            Личный кабинет
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-3">
+            Личный кабинет · {section}
           </div>
-          <h1 className="mt-1 truncate text-lg font-semibold text-slate-950 lg:text-xl">
-            {mounted ? user?.full_name || user?.email || 'FinanceApp' : 'FinanceApp'}
-          </h1>
+          <h1 className="mt-0.5 truncate text-base font-semibold text-ink">{resolvedTitle}</h1>
+          {subtitle ? (
+            <div className="mt-1 text-xs text-ink-3">{subtitle}</div>
+          ) : null}
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="hidden rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 md:block">
-            <div className="flex items-center gap-2 text-sm text-slate-500">
-              <CalendarDays className="size-4" />
-              <span className="capitalize">{todayLabel}</span>
-            </div>
-            <p className="mt-0.5 max-w-56 truncate text-sm font-medium text-slate-700">
-              {mounted ? user?.email ?? 'Нет данных' : '...'}
-            </p>
-          </div>
-
-          <Button variant="secondary" onClick={handleSettings}>
-            <Settings className="size-4" />
-            Настройки
-          </Button>
-
-          <Button variant="secondary" onClick={handleLogout}>
-            <LogOut className="size-4" />
-            Выйти
-          </Button>
+        <div className="flex items-center gap-2.5">
+          {actions}
+          <span className="hidden rounded-pill border border-line bg-bg-surface px-2.5 py-1 text-[11px] font-medium capitalize text-ink-2 md:inline">
+            {mounted ? todayLabel : ''}
+          </span>
         </div>
       </div>
     </header>

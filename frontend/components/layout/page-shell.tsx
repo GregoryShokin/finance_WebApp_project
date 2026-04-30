@@ -15,12 +15,12 @@ export function PageShell({
   className?: string;
 }) {
   return (
-    <section className={cn('space-y-6 lg:space-y-7', className)}>
-      <div className="flex flex-col gap-4 rounded-3xl border border-white/60 bg-white/70 p-5 shadow-soft backdrop-blur lg:flex-row lg:items-start lg:justify-between lg:p-6">
+    <section className={cn('space-y-5 lg:space-y-6', className)}>
+      <div className="flex flex-col gap-4 surface-panel p-5 lg:flex-row lg:items-start lg:justify-between lg:p-6">
         <div className="max-w-3xl">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">FinanceApp</p>
-          <h2 className="text-2xl font-semibold text-slate-950 lg:text-3xl">{title}</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-500 lg:text-[15px]">{description}</p>
+          <p className="eyebrow mb-1.5">FinanceApp</p>
+          <h2 className="font-serif text-3xl leading-tight text-ink lg:text-4xl">{title}</h2>
+          <p className="mt-2 text-sm leading-6 text-ink-2">{description}</p>
         </div>
         {actions ? <div className="shrink-0">{actions}</div> : null}
       </div>

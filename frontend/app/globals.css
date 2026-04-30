@@ -11,18 +11,17 @@ html {
 }
 
 body {
-  @apply min-h-screen bg-background text-foreground antialiased;
-  background-image:
-    radial-gradient(circle at top, rgba(59, 130, 246, 0.08), transparent 30%),
-    linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  @apply min-h-screen bg-bg text-ink antialiased;
+  background-color: #e6e7ea;
+  font-size: 13px;
 }
 
 * {
-  @apply border-border;
+  @apply border-line;
 }
 
 *::selection {
-  @apply bg-slate-900 text-white;
+  @apply bg-ink text-white;
 }
 
 @layer base {
@@ -30,24 +29,82 @@ body {
   h2,
   h3,
   h4 {
-    @apply tracking-tight text-slate-950;
+    @apply tracking-tight text-ink;
   }
 
   p {
-    @apply text-slate-600;
+    @apply text-ink-2;
   }
 }
 
 @layer components {
+  /* Surfaces */
   .surface-panel {
-    @apply rounded-3xl border border-white/60 bg-white/90 shadow-soft backdrop-blur;
+    @apply rounded-3xl border border-line bg-bg-surface shadow-soft;
   }
 
   .surface-muted {
-    @apply rounded-2xl border border-slate-200/80 bg-slate-50/90;
+    @apply rounded-2xl border border-line bg-bg-surface2;
+  }
+
+  .surface-card {
+    @apply rounded-3xl border border-line bg-bg-surface;
   }
 
   .page-grid {
     @apply grid gap-4 xl:gap-5;
+  }
+
+  /* Eyebrow caption (uppercase, tracked) */
+  .eyebrow {
+    @apply text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-3;
+  }
+
+  /* Chip — small status pill with soft tint */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-pill border border-transparent px-2 py-0.5 text-[11px] font-medium leading-tight;
+  }
+  .chip-green  { @apply bg-accent-green-soft  text-accent-green; }
+  .chip-amber  { @apply bg-accent-amber-soft  text-accent-amber; }
+  .chip-red    { @apply bg-accent-red-soft    text-accent-red; }
+  .chip-blue   { @apply bg-accent-blue-soft   text-accent-blue; }
+  .chip-violet { @apply bg-accent-violet-soft text-accent-violet; }
+  .chip-line   { @apply bg-transparent text-ink-2 border-line-strong; }
+
+  /* Status dot */
+  .dot {
+    @apply inline-block size-1.5 rounded-full;
+  }
+  .dot-green  { @apply bg-accent-green; }
+  .dot-amber  { @apply bg-accent-amber; }
+  .dot-red    { @apply bg-accent-red; }
+  .dot-blue   { @apply bg-accent-blue; }
+  .dot-violet { @apply bg-accent-violet; }
+
+  /* Pill — neutral surface chip */
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-pill border border-line bg-bg-surface px-2.5 py-1 text-[11px] font-medium text-ink-2;
+  }
+
+  /* Buttons (warm design system) */
+  .btn-base {
+    @apply inline-flex items-center gap-1.5 rounded-xl border border-line bg-bg-surface px-3 py-1.5 font-sans text-xs font-medium text-ink transition hover:bg-bg-surface2 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-ink bg-ink text-white hover:bg-ink-2 hover:border-ink-2;
+  }
+  .btn-success {
+    @apply border-accent-green bg-accent-green text-white hover:bg-accent-green/90;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-ink-2 hover:bg-ink/5;
+  }
+  .btn-cta {
+    @apply rounded-xl px-4 py-2.5 text-sm font-medium;
+  }
+
+  /* Serif heading helper */
+  .h-serif {
+    @apply font-serif text-xl leading-tight;
   }
 }

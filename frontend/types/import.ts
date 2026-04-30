@@ -232,6 +232,7 @@ export type ImportRowUpdatePayload = {
   credit_account_id?: number | null;
   category_id?: number | null;
   counterparty_id?: number | null;
+  debt_partner_id?: number | null;
   amount?: number | null;
   type?: string | null;
   operation_type?: string | null;

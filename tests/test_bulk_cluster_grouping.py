@@ -85,10 +85,10 @@ class TestGroupByBrand:
     def test_brand_group_skipped_when_total_below_min_size(self) -> None:
         # Two fingerprints share a brand, but combined count < MIN_BRAND_CLUSTER_SIZE.
         # Even though there are ≥2 fingerprints, we don't emit a group.
-        assert MIN_BRAND_CLUSTER_SIZE == 5
+        assert MIN_BRAND_CLUSTER_SIZE == 3
         clusters = [
-            _cluster("fp-a", 2, "оплата в magnit mm illertaler volgodonsk rus"),
-            _cluster("fp-b", 2, "оплата в magnit gm volgodonsk 1 rus"),
+            _cluster("fp-a", 1, "оплата в magnit mm illertaler volgodonsk rus"),
+            _cluster("fp-b", 1, "оплата в magnit gm volgodonsk 1 rus"),
         ]
         assert ImportClusterService._group_by_brand(clusters) == []
 
@@ -227,11 +227,11 @@ class TestBuildBulkClustersFilters:
     def test_rows_with_any_transfer_match_excluded(self) -> None:
         """Any row tagged by the transfer matcher — primary or secondary —
         is already assigned to a cross-account transfer pair and must not
-        resurface in bulk UI. 3 regular + 3 with transfer_match → only 3
+        resurface in bulk UI. 2 regular + 3 with transfer_match → only 2
         remain → below threshold."""
         rows = [
             _mk_row(i, "fp-y", "оплата в pyaterochka 14130 volgodonsk rus")
-            for i in range(1, 4)  # 3 regular
+            for i in range(1, 3)  # 2 regular
         ] + [
             _mk_row(i + 50, "fp-y", "оплата в pyaterochka 14130 volgodonsk rus",
                     transfer_match={"is_secondary": True})
@@ -287,11 +287,11 @@ class TestBuildBulkClustersFilters:
         assert brand_clusters == []
 
     def test_duplicate_rows_dropped_but_remaining_cluster_still_qualifies(self) -> None:
-        """Cluster of 9: 6 marked duplicate (mirror of committed pair) + 3
-        live ones with no terminal status. After filtering only 3 remain —
+        """Cluster of 8: 6 marked duplicate (mirror of committed pair) + 2
+        live ones with no terminal status. After filtering only 2 remain —
         below MIN_BULK_CLUSTER_SIZE for non-transfer skeletons, so the
-        cluster correctly drops from bulk UI without absorbing the live 3
-        into a misleading group of 9."""
+        cluster correctly drops from bulk UI without absorbing the live 2
+        into a misleading group of 8."""
         rows = [
             _mk_row(
                 i,
@@ -306,7 +306,7 @@ class TestBuildBulkClustersFilters:
                 "fp-merchant",
                 "оплата в pyaterochka 14130 volgodonsk rus",
             )
-            for i in range(3)  # 3 live
+            for i in range(2)  # 2 live
         ]
         svc = _make_svc_with_rows(rows)
         session = MagicMock(id=1, user_id=1, account_id=None, mapping_json={})

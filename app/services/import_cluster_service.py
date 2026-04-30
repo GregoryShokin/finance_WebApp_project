@@ -350,8 +350,8 @@ class BrandCluster:
 
 # Bulk-confirm thresholds — the contract between backend and wizard UI.
 # Aligned with project_bulk_clusters.md.
-MIN_BULK_CLUSTER_SIZE = 5
-MIN_BRAND_CLUSTER_SIZE = 5
+MIN_BULK_CLUSTER_SIZE = 3
+MIN_BRAND_CLUSTER_SIZE = 3
 MIN_FINGERPRINT_COUNT_FOR_BRAND = 2
 # Transfers clustered by a concrete identifier (phone / contract / card / iban)
 # are a stronger signal than a skeleton brand: the identifier already uniquely
