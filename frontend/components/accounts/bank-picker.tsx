@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Building2, Search, X } from 'lucide-react';
 import { getBanks } from '@/lib/api/banks';
 import { Button } from '@/components/ui/button';
+import { BankIcon } from '@/components/ui/bank-icon';
 import type { Bank } from '@/types/account';
 
 type Props = {
@@ -39,7 +40,11 @@ export function BankPicker({ value, onChange }: Props) {
         onClick={() => setModalOpen(true)}
         className="flex h-10 w-full items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-left text-sm shadow-sm hover:border-slate-300 focus:outline-none focus:border-slate-400"
       >
-        <Building2 className="size-4 shrink-0 text-slate-400" />
+        {selected ? (
+          <BankIcon code={selected.code} bank={selected.name} size={20} />
+        ) : (
+          <Building2 className="size-4 shrink-0 text-slate-400" />
+        )}
         {selected ? (
           <span className="flex-1 font-medium text-slate-900">{selected.name}</span>
         ) : (
@@ -159,9 +164,7 @@ function BankModal({
                   bank.id === selectedId ? 'bg-indigo-50 font-medium text-indigo-700' : 'text-slate-800'
                 }`}
               >
-                <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-slate-100">
-                  <Building2 className="size-4 text-slate-500" />
-                </div>
+                <BankIcon code={bank.code} bank={bank.name} size={32} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{bank.name}</p>
                   {bank.bik && <p className="text-xs text-slate-400">БИК {bank.bik}</p>}
