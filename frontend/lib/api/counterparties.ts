@@ -12,6 +12,16 @@ export function createCounterparty(payload: CreateCounterpartyPayload) {
   });
 }
 
+export function updateCounterparty(
+  counterpartyId: number,
+  payload: { name?: string },
+) {
+  return apiClient<Counterparty>(`/counterparties/${counterpartyId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
 export function deleteCounterparty(counterpartyId: number) {
   return apiClient<void>(`/counterparties/${counterpartyId}`, {
     method: 'DELETE',

@@ -129,7 +129,7 @@ export function ImportPage() {
   }
 
   return (
-    <div className="relative flex-1 pb-32">
+    <div className="relative flex-1 pb-32 lg:pr-24">
       <ImportActionsBar
         queuePillRef={queuePillRef}
         uploading={uploadMut.isPending}

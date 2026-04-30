@@ -57,6 +57,7 @@ export function SplitModal({
   origin,
   options,
   onClose,
+  onSuccess,
 }: {
   row: ImportPreviewRow;
   origin: { x: number; y: number };
@@ -64,6 +65,9 @@ export function SplitModal({
     categories: (CreatableOption & { kind?: 'income' | 'expense' })[];
   };
   onClose: () => void;
+  /** Optional callback fired after the row is committed via split.
+   *  Caller may use this to optimistically remove the row from a parent list. */
+  onSuccess?: () => void;
 }) {
   const queryClient = useQueryClient();
   const nd = (row.normalized_data ?? {}) as Record<string, unknown>;
@@ -101,6 +105,8 @@ export function SplitModal({
       toast.success('Операция разделена');
       queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
       queryClient.invalidateQueries({ queryKey: ['imports', 'moderation-status'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+      onSuccess?.();
       onClose();
     },
     onError: (e: Error) => toast.error(e.message || 'Не удалось разделить операцию'),

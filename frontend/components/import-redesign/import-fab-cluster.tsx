@@ -460,7 +460,10 @@ function BucketPanel({
           origin={editing.origin}
           options={{
             categories: (categoriesQuery.data ?? []).map((c) => ({
-              value: String(c.id), label: c.name,
+              value: String(c.id),
+              label: c.name,
+              kind: c.kind,
+              hint: c.kind === 'income' ? 'доход' : undefined,
             })),
           }}
           onClose={() => setEditing(null)}
@@ -497,7 +500,7 @@ function BucketRow({
   const dir: 'income' | 'expense' = ((nd.direction as 'income' | 'expense') || 'expense');
 
   const opType = (nd.operation_type as string | undefined) ?? 'regular';
-  const t = mapOperationToType(opType);
+  const t = mapOperationToType(opType, nd);
   const typeOpt = TYPE_OPTIONS.find((x) => x.value === t) ?? TYPE_OPTIONS[0];
   const splitItems = (nd.split_items as ImportSplitItem[] | undefined) ?? null;
   const cpName = (nd.counterparty_id as number | null) != null
@@ -575,14 +578,20 @@ function BucketRow({
 // ──────────────────────────────────────────────────────────────────────────
 // Helpers — type mapping + detail chip per type
 
-function mapOperationToType(opType: string): string {
+function mapOperationToType(opType: string, nd: Record<string, unknown>): string {
   if (opType === 'debt') return 'debt';
-  if (opType === 'transfer') return 'transfer';
   if (opType === 'refund') return 'refund';
   if (opType === 'investment_buy' || opType === 'investment_sell') return 'investment';
   if (opType === 'credit_disbursement' || opType === 'credit_payment' || opType === 'credit_early_repayment') {
     return 'credit_operation';
   }
+  // Backend folds operation_type='credit_payment' into 'transfer' +
+  // requires_credit_split=true. Detect this so the row chips read
+  // "Кредитная операция · Регулярный платёж" instead of plain "Перевод".
+  if (opType === 'transfer' && Boolean(nd.requires_credit_split)) {
+    return 'credit_operation';
+  }
+  if (opType === 'transfer') return 'transfer';
   return 'regular';
 }
 
@@ -625,18 +634,32 @@ function detailChip(
   }
   if (t === 'credit_operation') {
     const opType = nd.operation_type as string | undefined;
-    const k = operationTypeToCreditKind(opType);
+    // Backend folds credit_payment into transfer + requires_credit_split.
+    // For that fold, infer kind='payment' so the direction chip still shows.
+    const k =
+      opType === 'transfer' && Boolean(nd.requires_credit_split)
+        ? 'payment'
+        : operationTypeToCreditKind(opType);
     const opt = CREDIT_KIND_OPTIONS.find((x) => x.value === k);
     if (!opt) return null;
-    return <Chip tone="line">{opt.label}</Chip>;
+    const accId = (nd.credit_account_id as number | null | undefined)
+      ?? (nd.target_account_id as number | null | undefined);
+    const accName = accId != null ? accountsById.get(accId) : null;
+    return (
+      <>
+        <Chip tone="line">{opt.label}</Chip>
+        {accName ? <Chip tone="line">{accName}</Chip> : null}
+      </>
+    );
   }
   if (t === 'transfer') {
     const accId = nd.target_account_id as number | null | undefined;
     if (accId == null) return null;
     const accName = accountsById.get(accId);
     if (!accName) return null;
-    // Income transfer (money in) → blue, prefix «↓ на»
-    // Expense transfer (money out) → orange, prefix «↑ с»
+    // `target_account_id` always holds the OTHER side of the pair. Prefix:
+    //   income (money came in) → «↓ с {target}» (came down from target).
+    //   expense (money went out) → «↑ на {target}» (went up to target).
     const isIncome = direction === 'income';
     return (
       <span
@@ -646,7 +669,7 @@ function detailChip(
           color: isIncome ? '#1d4f8a' : '#c47700',
         }}
       >
-        {isIncome ? '↓ на' : '↑ с'} {accName}
+        {isIncome ? '↓ с' : '↑ на'} {accName}
       </span>
     );
   }

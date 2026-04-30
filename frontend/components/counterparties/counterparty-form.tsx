@@ -13,16 +13,19 @@ type FormValues = {
 };
 
 export function CounterpartyForm({
+  mode = 'create',
   initialValues,
   isSubmitting,
   onSubmit,
   onCancel,
 }: {
+  mode?: 'create' | 'edit';
   initialValues?: Partial<CreateCounterpartyPayload> | null;
   isSubmitting?: boolean;
   onSubmit: (payload: CreateCounterpartyPayload) => void;
   onCancel: () => void;
 }) {
+  const isEdit = mode === 'edit';
   const {
     register,
     handleSubmit,
@@ -57,46 +60,54 @@ export function CounterpartyForm({
         {errors.name ? <p className="mt-1 text-xs text-danger">{errors.name.message}</p> : null}
       </div>
 
-      <div>
-        <Label htmlFor="counterparty-opening-balance">Текущая сумма долга не учитывая текущую сумму</Label>
-        <Input
-          id="counterparty-opening-balance"
-          className="h-10"
-          type="number"
-          step="0.01"
-          placeholder="0.00"
-          {...register('opening_balance', {
-            validate: (value) => !value || Number(value) >= 0 || 'Введите корректную сумму',
-          })}
-        />
-      </div>
+      {!isEdit ? (
+        <>
+          <div>
+            <Label htmlFor="counterparty-opening-balance">Текущая сумма долга не учитывая текущую сумму</Label>
+            <Input
+              id="counterparty-opening-balance"
+              className="h-10"
+              type="number"
+              step="0.01"
+              placeholder="0.00"
+              {...register('opening_balance', {
+                validate: (value) => !value || Number(value) >= 0 || 'Введите корректную сумму',
+              })}
+            />
+          </div>
 
-      <div>
-        <Label>Тип долга</Label>
-        <div className="mt-2 grid gap-3 sm:grid-cols-2">
-          <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 transition hover:border-slate-300">
-            <input type="radio" value="receivable" className="mt-1" {...register('opening_balance_kind')} />
-            <span>
-              <span className="block font-medium text-slate-900">Мне должны</span>
-              <span className="block text-xs text-slate-500">Контрагент должен деньги мне.</span>
-            </span>
-          </label>
-          <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 transition hover:border-slate-300">
-            <input type="radio" value="payable" className="mt-1" {...register('opening_balance_kind')} />
-            <span>
-              <span className="block font-medium text-slate-900">Я должен</span>
-              <span className="block text-xs text-slate-500">Я должен деньги этому контрагенту.</span>
-            </span>
-          </label>
-        </div>
-      </div>
+          <div>
+            <Label>Тип долга</Label>
+            <div className="mt-2 grid gap-3 sm:grid-cols-2">
+              <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 transition hover:border-slate-300">
+                <input type="radio" value="receivable" className="mt-1" {...register('opening_balance_kind')} />
+                <span>
+                  <span className="block font-medium text-slate-900">Мне должны</span>
+                  <span className="block text-xs text-slate-500">Контрагент должен деньги мне.</span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 transition hover:border-slate-300">
+                <input type="radio" value="payable" className="mt-1" {...register('opening_balance_kind')} />
+                <span>
+                  <span className="block font-medium text-slate-900">Я должен</span>
+                  <span className="block text-xs text-slate-500">Я должен деньги этому контрагенту.</span>
+                </span>
+              </label>
+            </div>
+          </div>
+        </>
+      ) : null}
 
       <div className="flex flex-col-reverse gap-3 border-t border-slate-200 pt-4 sm:flex-row sm:justify-end">
         <Button type="button" variant="secondary" onClick={onCancel}>
           Отмена
         </Button>
         <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? 'Сохраняем...' : 'Создать контрагента'}
+          {isSubmitting
+            ? 'Сохраняем...'
+            : isEdit
+              ? 'Сохранить'
+              : 'Создать контрагента'}
         </Button>
       </div>
     </form>

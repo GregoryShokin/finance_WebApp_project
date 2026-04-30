@@ -12,6 +12,10 @@ class CounterpartyCreateRequest(BaseModel):
     opening_balance_kind: str = Field(default="receivable", pattern="^(receivable|payable)$")
 
 
+class CounterpartyUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+
+
 class CounterpartyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

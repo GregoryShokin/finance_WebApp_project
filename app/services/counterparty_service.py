@@ -62,6 +62,24 @@ class CounterpartyService:
             opening_payable_amount=opening_balance if kind == "payable" else Decimal("0"),
         )
 
+    def update_counterparty(self, *, user_id: int, counterparty_id: int, payload: dict):
+        item = self.repo.get_by_id_and_user(counterparty_id, user_id)
+        if item is None:
+            raise CounterpartyNotFoundError("Контрагент не найден.")
+
+        if "name" in payload and payload["name"] is not None:
+            name = str(payload["name"]).strip()
+            if not name:
+                raise CounterpartyValidationError("Имя контрагента не может быть пустым.")
+            if name != item.name:
+                existing = self.repo.get_by_name_and_user(name, user_id)
+                if existing is not None and existing.id != item.id:
+                    raise CounterpartyValidationError("Контрагент с таким именем уже существует.")
+                item.name = name
+
+        self.db.flush()
+        return item
+
     def delete_counterparty(self, *, user_id: int, counterparty_id: int):
         item = self.repo.get_by_id_and_user(counterparty_id, user_id)
         if item is None:
