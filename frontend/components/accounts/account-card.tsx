@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { CreditCard, Pencil, RotateCcw, SlidersHorizontal, Trash2, Wallet } from 'lucide-react';
+import { BankIcon } from '@/components/ui/bank-icon';
 import { toast } from 'sonner';
 import { adjustAccountBalance } from '@/lib/api/accounts';
 import { MoneyAmount } from '@/components/shared/money-amount';
@@ -84,9 +85,27 @@ export function AccountCard({
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex items-start gap-4">
-            <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
-              {account.is_credit || isCreditCard ? <CreditCard className="size-5" /> : <Wallet className="size-5" />}
-            </div>
+            {account.bank ? (
+              <div className="relative shrink-0">
+                <BankIcon
+                  code={account.bank.code}
+                  bank={account.bank.name}
+                  size={48}
+                  className="border border-slate-200"
+                />
+                {/* Tiny corner badge so the card type still reads at a glance —
+                    bank logo + (credit-card / wallet) icon together. */}
+                <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full border border-white bg-slate-700 text-white shadow-sm">
+                  {account.is_credit || isCreditCard
+                    ? <CreditCard className="size-2.5" />
+                    : <Wallet className="size-2.5" />}
+                </span>
+              </div>
+            ) : (
+              <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-700">
+                {account.is_credit || isCreditCard ? <CreditCard className="size-5" /> : <Wallet className="size-5" />}
+              </div>
+            )}
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="truncate text-lg font-semibold text-slate-950">{account.name}</h3>

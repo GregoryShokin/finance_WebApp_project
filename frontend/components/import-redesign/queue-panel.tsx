@@ -62,14 +62,30 @@ const STATUS_DOT: Record<QueueStatus, string> = {
   error: 'bg-accent-red',
 };
 
-function bankFromFilename(filename: string): string {
+function bankFromFilename(filename: string): { name: string; code: string | null } {
   const lower = filename.toLowerCase();
-  if (lower.includes('tinkoff') || lower.includes('тинь')) return 'Тинькофф';
-  if (lower.includes('sber') || lower.includes('сбер')) return 'Сбер';
-  if (lower.includes('alfa') || lower.includes('альф')) return 'Альфа';
-  if (lower.includes('vtb') || lower.includes('втб')) return 'ВТБ';
-  if (lower.includes('gpb') || lower.includes('газпром')) return 'Газпромбанк';
-  return '?';
+  if (lower.includes('tinkoff') || lower.includes('тинь') || lower.includes('tbank') || lower.includes('т-банк')) {
+    return { name: 'Т-Банк', code: 'tbank' };
+  }
+  if (lower.includes('sber') || lower.includes('сбер')) {
+    return { name: 'Сбер', code: 'sber' };
+  }
+  if (lower.includes('alfa') || lower.includes('альф')) {
+    return { name: 'Альфа-Банк', code: 'alfa' };
+  }
+  if (lower.includes('vtb') || lower.includes('втб')) {
+    return { name: 'ВТБ', code: 'vtb' };
+  }
+  if (lower.includes('gpb') || lower.includes('газпром')) {
+    return { name: 'Газпромбанк', code: 'gazprombank' };
+  }
+  if (lower.includes('ozon') || lower.includes('озон')) {
+    return { name: 'Озон Банк', code: 'ozon' };
+  }
+  if (lower.includes('yandex') || lower.includes('яндекс')) {
+    return { name: 'Яндекс Банк', code: 'yandex' };
+  }
+  return { name: '?', code: null };
 }
 
 export function QueuePanel({
@@ -236,7 +252,14 @@ function QueueRow({
   onDelete: () => void;
   deleting: boolean;
 }) {
-  const bank = bankFromFilename(session.filename);
+  // Prefer bank info from the assigned account (always reliable when set);
+  // fall back to filename heuristic for sessions that haven't been assigned.
+  const accountForSession = session.account_id != null
+    ? accounts.find((a) => a.id === session.account_id) ?? null
+    : null;
+  const fromFilename = bankFromFilename(session.filename);
+  const bankCode = accountForSession?.bank?.code ?? fromFilename.code ?? null;
+  const bankName = accountForSession?.bank?.name ?? fromFilename.name;
 
   return (
     <div
@@ -249,13 +272,13 @@ function QueueRow({
           title={STATUS_LABEL[classified]}
           style={{ boxShadow: '0 0 0 3px rgba(0,0,0,0.04)' }}
         />
-        <BankIcon bank={bank} size={36} />
+        <BankIcon bank={bankName} code={bankCode} size={36} />
         <div className="min-w-0">
           <div className="truncate font-mono text-[13px] font-medium text-ink">
             {session.filename}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-3">
-            <span>{bank}</span>
+            <span>{bankName}</span>
             <span>·</span>
             <QueueAccountSelector
               session={session}
@@ -453,7 +476,7 @@ function QueueAccountSelector({
                   }
                 >
                   <span className="flex min-w-0 items-center gap-2">
-                    <BankIcon bank={a.bank?.name ?? null} size={20} />
+                    <BankIcon bank={a.bank?.name ?? null} code={a.bank?.code ?? null} size={20} />
                     <span className="truncate">{a.name}</span>
                   </span>
                   {sel ? <Check className="size-3" /> : null}

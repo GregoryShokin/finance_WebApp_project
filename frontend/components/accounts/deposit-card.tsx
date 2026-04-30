@@ -1,8 +1,9 @@
 'use client';
 
 import { useMemo } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Pencil, PiggyBank, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { BankIcon } from '@/components/ui/bank-icon';
 import { MoneyAmount } from '@/components/shared/money-amount';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { cn } from '@/lib/utils/cn';
@@ -104,11 +105,35 @@ export function DepositCard({
     <div className="rounded-3xl border border-white/60 bg-white/85 p-5 shadow-soft">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="truncate text-lg font-semibold text-slate-950">{account.name}</h3>
-            <StatusBadge tone={isClosed ? 'neutral' : 'success'}>
-              {isClosed ? 'Закрыт' : 'Активный'}
-            </StatusBadge>
+          <div className="flex items-start gap-3">
+            {account.bank ? (
+              <div className="relative shrink-0">
+                <BankIcon
+                  code={account.bank.code}
+                  bank={account.bank.name}
+                  size={48}
+                  className="border border-slate-200"
+                />
+                <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full border border-white bg-emerald-600 text-white shadow-sm">
+                  <PiggyBank className="size-2.5" />
+                </span>
+              </div>
+            ) : (
+              <div className="grid size-12 shrink-0 place-items-center rounded-2xl bg-emerald-50 text-emerald-700">
+                <PiggyBank className="size-5" />
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="truncate text-lg font-semibold text-slate-950">{account.name}</h3>
+                <StatusBadge tone={isClosed ? 'neutral' : 'success'}>
+                  {isClosed ? 'Закрыт' : 'Активный'}
+                </StatusBadge>
+              </div>
+              {account.bank ? (
+                <p className="mt-0.5 text-xs text-slate-500">{account.bank.name}</p>
+              ) : null}
+            </div>
           </div>
 
           <MoneyAmount
