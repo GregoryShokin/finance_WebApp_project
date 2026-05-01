@@ -46,7 +46,10 @@ export function SectionMoney({
   return (
     <>
       {/* ── Part 1: Metrics Row ───────────────────────────────── */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* Mobile: 1 col (читаемо), sm: 3 col (классическая компоновка трёх KPI),
+          xl: уже широкие плитки на FullHD остаются 3 — это ровно одна полоса
+          без пустоты, потому что родитель растёт до 2xl:max-w-none. */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {/* Card 1 -- Поток (средний за последние 12 месяцев) */}
         <div className={CARD_CLASS}>
           <div className="flex items-center justify-between">
@@ -112,7 +115,8 @@ export function SectionMoney({
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      {/* Деньги месяца: на мобиле колонка, на sm — 3 в ряд (как в KPI). */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {/* ── Card 1: Доступные средства ─────────────────────── */}
         <ExpandableCard
           isOpen={availOpen}

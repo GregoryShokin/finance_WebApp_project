@@ -90,7 +90,8 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
         {pillToggle}
       </div>
       <p className={`text-2xl font-extrabold ${valueColor}`}>{formatRub(value)}</p>
-      <div className="grid grid-cols-2 gap-4 mt-4">
+      {/* Активы и обязательства: на мобиле в столбик, на sm — рядом. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
         {/* Assets */}
         <div>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
@@ -172,7 +173,8 @@ function CapitalCard({ capital }: { capital: CapitalData }) {
       </div>
       <p className={`text-2xl font-extrabold ${valueColor}`}>{formatRub(value)}</p>
 
-      <div className="grid grid-cols-2 gap-6 mt-6">
+      {/* Расширенный capital expand: тоже колонка на мобиле, 2 col на sm+. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mt-6">
         {/* Assets column */}
         <div>
           <p className="text-xs font-semibold text-emerald-500 uppercase tracking-wider mb-3">
@@ -622,7 +624,9 @@ export function SectionCapital({ capital, debts, health }: Props) {
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      {/* На мобиле и планшете блоки колонкой, на lg+ — три карты в ряд
+          (CapitalCard | Debts | RealAssets). */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <CapitalCard capital={capital} />
 
         <div className="space-y-4">

@@ -159,7 +159,10 @@ function EditablePlanned({
 
 // ── ExpenseGroup ──────────────────────────────────────────────────────────────
 
-const EXP_COL = 'grid-cols-[1fr_130px_130px_130px_180px]';
+// Колонки бюджета: на sm+ — компактные 130px, на xl (FullHD) — просторные
+// 160px для сумм и 220px для прогресса, чтобы таблица заполняла всю ширину
+// контейнера, а не оставляла 340px пустыми справа.
+const EXP_COL = 'grid-cols-[1fr_130px_130px_130px_180px] xl:grid-cols-[1fr_160px_160px_160px_220px]';
 
 function ExpenseGroup({
   title,
@@ -283,7 +286,7 @@ function ExpenseGroup({
                 key={item.category_id}
                 className={cn(
                   'grid items-center gap-x-3 gap-y-1.5 border-b border-slate-50 px-5 py-3 last:border-0',
-                  'grid-cols-[1fr_auto] sm:grid-cols-[1fr_130px_130px_130px_180px]',
+                  'grid-cols-[1fr_auto] sm:grid-cols-[1fr_130px_130px_130px_180px] xl:grid-cols-[1fr_160px_160px_160px_220px]',
                 )}
               >
                 {/* Category */}
@@ -459,7 +462,7 @@ function IncomeGroup({
           ) : (
             <>
               {/* Column headers */}
-              <div className="hidden grid-cols-[1fr_130px_130px_130px_180px] gap-3 border-b border-slate-50 px-5 py-2 sm:grid">
+              <div className="hidden grid-cols-[1fr_130px_130px_130px_180px] xl:grid-cols-[1fr_160px_160px_160px_220px] gap-3 border-b border-slate-50 px-5 py-2 sm:grid">
                 {['Категория', 'План', 'Факт', 'Остаток', 'Прогресс'].map(h => (
                   <p key={h} className={cn('text-xs font-medium text-slate-400', h !== 'Категория' && h !== 'Прогресс' ? 'text-right' : '')}>{h}</p>
                 ))}
@@ -475,7 +478,7 @@ function IncomeGroup({
                 return (
                   <div
                     key={item.category_id}
-                    className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1.5 border-b border-slate-50 px-5 py-3 last:border-0 sm:grid-cols-[1fr_130px_130px_130px_180px]"
+                    className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1.5 border-b border-slate-50 px-5 py-3 last:border-0 sm:grid-cols-[1fr_130px_130px_130px_180px] xl:grid-cols-[1fr_160px_160px_160px_220px]"
                   >
                     <p className="truncate text-sm font-medium text-slate-900">{item.category_name}</p>
 
@@ -528,7 +531,7 @@ function IncomeGroup({
 
               {/* Totals */}
               {items.length > 1 && (
-                <div className="hidden grid-cols-[1fr_130px_130px_130px_180px] gap-3 border-t border-slate-100 bg-slate-50/60 px-5 py-3 sm:grid">
+                <div className="hidden grid-cols-[1fr_130px_130px_130px_180px] xl:grid-cols-[1fr_160px_160px_160px_220px] gap-3 border-t border-slate-100 bg-slate-50/60 px-5 py-3 sm:grid">
                   <p className="text-xs font-medium text-slate-500">Итого</p>
                   <p className="text-right text-xs font-semibold tabular-nums text-slate-700">{formatMoney(groupPlanned)}</p>
                   <p className="text-right text-xs font-semibold tabular-nums text-emerald-600">{formatMoney(groupSpent)}</p>

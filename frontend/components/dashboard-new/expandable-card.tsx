@@ -206,8 +206,14 @@ export function ExpandableCard({ isOpen, onToggle, expandedWidth = '560px', coll
                 onTransitionEnd={handleTransitionEnd}
                 className="fixed left-1/2 top-1/2 z-[101] max-h-[85vh] overflow-hidden bg-white p-7 shadow-[0_25px_80px_rgba(0,0,0,0.18)]"
                 style={{
-                  width: expandedWidth,
-                  maxWidth: 'calc(100vw - 2rem)',
+                  // Берём минимум из заданной ширины и 92vw, чтобы на узких
+                  // экранах (320–640px) карточка не была шире viewport'а.
+                  // Минимум 280px защищает от слишком узкой карточки на
+                  // маленьких устройствах. Старая `maxWidth: calc(100vw - 2rem)`
+                  // схлопывала expandedWidth=720px до 308px на мобиле — резко
+                  // и без масштабирования содержимого. min(...) даёт плавность.
+                  width: `min(${expandedWidth}, 92vw)`,
+                  minWidth: 'min(280px, 92vw)',
                 }}
               >
                 <button

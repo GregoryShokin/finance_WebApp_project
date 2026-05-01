@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronDown, LogOut, Settings } from 'lucide-react';
+import { ChevronDown, LogOut, Settings, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { cn } from '@/lib/utils/cn';
@@ -111,17 +111,51 @@ function NavGroupItem({ item }: { item: NavGroup }) {
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
-export function Sidebar() {
+type SidebarProps = {
+  /** Контролирует видимость мобильного drawer (на <lg экранах). На lg+
+      sidebar всегда виден sticky. На <lg — выезжает только при isMobileOpen. */
+  isMobileOpen?: boolean;
+  onMobileClose?: () => void;
+};
+
+export function Sidebar({ isMobileOpen = false, onMobileClose }: SidebarProps = {}) {
   const router = useRouter();
   const { user } = useAuth();
+  const pathname = usePathname();
 
   function handleLogout() {
     removeAccessToken();
     router.replace('/login');
   }
 
-  return (
-    <aside className="sticky top-0 hidden h-screen w-[232px] shrink-0 flex-col border-r border-line bg-bg-surface2 px-2.5 py-3.5 lg:flex">
+  // Auto-close drawer on route change.
+  useEffect(() => {
+    if (isMobileOpen) onMobileClose?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  // Lock body scroll while drawer is open on mobile.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const original = document.body.style.overflow;
+    if (isMobileOpen) document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = original;
+    };
+  }, [isMobileOpen]);
+
+  // Close on Escape key while open.
+  useEffect(() => {
+    if (!isMobileOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onMobileClose?.();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isMobileOpen, onMobileClose]);
+
+  const innerContent = (
+    <>
       <Link
         href="/dashboard"
         className="mb-2.5 flex items-center gap-2.5 border-b border-line px-2 pb-3.5 pt-1.5"
@@ -173,6 +207,39 @@ export function Sidebar() {
           </div>
         ) : null}
       </div>
-    </aside>
+    </>
+  );
+
+  return (
+    <>
+      {/* Mobile drawer (<lg). Render only when open so animations stay simple
+          and tab-order is correct on desktop. */}
+      {isMobileOpen ? (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <button
+            type="button"
+            aria-label="Закрыть меню"
+            onClick={onMobileClose}
+            className="absolute inset-0 bg-ink/40 backdrop-blur-[2px]"
+          />
+          <aside className="relative z-50 flex h-full w-[280px] max-w-[85vw] flex-col border-r border-line bg-bg-surface2 px-2.5 py-3.5 shadow-xl">
+            <button
+              type="button"
+              onClick={onMobileClose}
+              className="absolute right-2 top-2 grid size-8 place-items-center rounded-lg text-ink-2 hover:bg-ink/5"
+              aria-label="Закрыть меню"
+            >
+              <X className="size-4" />
+            </button>
+            {innerContent}
+          </aside>
+        </div>
+      ) : null}
+
+      {/* Desktop sticky sidebar (lg+). */}
+      <aside className="sticky top-0 hidden h-screen w-[232px] shrink-0 flex-col border-r border-line bg-bg-surface2 px-2.5 py-3.5 lg:flex">
+        {innerContent}
+      </aside>
+    </>
   );
 }

@@ -908,7 +908,9 @@ export function SectionAnalytics({
       <div className="mt-4 mb-4">
         <p className="text-base font-semibold text-slate-800 mb-3">Денежный поток</p>
 
-        <div className="grid grid-cols-[0.72fr_1.28fr] gap-4">
+        {/* На мобиле — колонка (FlowWidget сверху, Trend снизу), на lg —
+            оригинальная пропорция 0.72/1.28. */}
+        <div className="grid grid-cols-1 lg:grid-cols-[0.72fr_1.28fr] gap-4">
           {/* Left — FlowWidget (Phase 5) */}
           <div className="self-start">
             <FlowWidget summary={metricsSummary} transactions={transactions} ccAccountIds={ccAccountIds} />
@@ -971,10 +973,11 @@ export function SectionAnalytics({
         </div>
       </div>
 
-      {/* Row 2: Detail */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* Row 2: Detail. На мобиле — колонка, на lg — 3 col с col-span-2
+          для top expense, чтобы пропорция 2:1 сохранилась. */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Top Expense Categories — spans 2 cols */}
-        <div className="col-span-2">
+        <div className="lg:col-span-2">
           <ExpandableCard
             isOpen={topExpensesOpen}
             onToggle={() => setTopExpensesOpen((v) => !v)}

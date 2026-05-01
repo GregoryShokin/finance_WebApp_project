@@ -2,6 +2,7 @@
 
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { usePathname } from 'next/navigation';
+import { Menu } from 'lucide-react';
 
 import type { User } from '@/types/auth';
 
@@ -40,6 +41,7 @@ export function Header({
   title,
   subtitle,
   actions,
+  onMobileMenuToggle,
 }: {
   user: User | null;
   /** Page title override; falls back to route mapping. */
@@ -48,6 +50,8 @@ export function Header({
   subtitle?: ReactNode;
   /** Right-side action slot (chips, buttons specific to a page). */
   actions?: ReactNode;
+  /** Toggle for the mobile sidebar drawer (rendered only on <lg). */
+  onMobileMenuToggle?: () => void;
 }) {
   const pathname = usePathname();
   const [mounted, setMounted] = useState(false);
@@ -70,7 +74,20 @@ export function Header({
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-bg/95 backdrop-blur">
       <div className="flex w-full items-center justify-between gap-4 px-6 py-3.5 lg:px-7">
-        <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-3">
+          {/* Hamburger only on <lg — when sidebar is hidden. Skipped if no
+              handler is provided (Header is reused on screens without Sidebar). */}
+          {onMobileMenuToggle ? (
+            <button
+              type="button"
+              onClick={onMobileMenuToggle}
+              aria-label="Открыть меню"
+              className="grid size-9 shrink-0 place-items-center rounded-lg border border-line bg-bg-surface text-ink-2 hover:bg-ink/5 lg:hidden"
+            >
+              <Menu className="size-4" />
+            </button>
+          ) : null}
+          <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-3">
             Личный кабинет · {section}
           </div>
@@ -78,6 +95,7 @@ export function Header({
           {subtitle ? (
             <div className="mt-1 text-xs text-ink-3">{subtitle}</div>
           ) : null}
+          </div>
         </div>
 
         <div className="flex items-center gap-2.5">

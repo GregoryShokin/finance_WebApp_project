@@ -79,7 +79,10 @@ function RealAssetForm({
 
   return (
     <form onSubmit={handleSubmit} className="surface-muted space-y-3 rounded-2xl p-4">
-      <div className="grid gap-3 sm:grid-cols-3">
+      {/* На <md (планшет в портретной 768px) — стек, на md+ — три колонки.
+          На sm:grid-cols-3 (старое) поля по 200px давали тесно и текст не
+          помещался в Select. */}
+      <div className="grid gap-3 md:grid-cols-3">
         <div>
           <label className="mb-1 block text-xs font-medium text-slate-500">Тип</label>
           <Select
