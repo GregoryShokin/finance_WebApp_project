@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.models.account import Account as AccountModel
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
 from app.models.transaction import Transaction as TransactionModel
@@ -150,11 +151,19 @@ class TransferMatcherService:
         # Second pass: mark import rows as duplicates when a committed transaction
         # already covers the same account/direction/amount (e.g. phantom income
         # created when the other side of a transfer was committed earlier).
+        #
+        # Only skip rows that were paired with another ACTIVE import session
+        # (cross-session pairs). Rows paired with a committed transaction must
+        # NOT be skipped: their phantom income duplicate check must still run.
+        # Without this distinction, importing Яндекс Дебет after a committed
+        # Т банк Дебет session would bypass duplicate detection and create a
+        # second income transaction on Яндекс Дебет.
         already_assigned = {
             row_id
             for a, b, _ in assignments
-            for row_id in [a.row_id, b.row_id]
+            for row_id, other in [(a.row_id, b), (b.row_id, a)]
             if row_id is not None
+            and other.session_id is not None  # partner is an active session row
         }
         if date_range:
             self._detect_committed_duplicates(
@@ -291,11 +300,13 @@ class TransferMatcherService:
         rows_with_sessions = (
             self.db.query(ImportSession, ImportRow)
             .join(ImportRow, ImportRow.session_id == ImportSession.id)
+            .join(AccountModel, AccountModel.id == ImportSession.account_id)
             .filter(
                 ImportSession.user_id == user_id,
                 ImportSession.status != "committed",
                 ImportSession.account_id.isnot(None),
                 ImportRow.status.in_(["ready", "warning", "error"]),
+                AccountModel.is_credit.is_(False),
             )
             .all()
         )
@@ -353,10 +364,12 @@ class TransferMatcherService:
         """
         sessions = (
             self.db.query(ImportSession)
+            .join(AccountModel, AccountModel.id == ImportSession.account_id)
             .filter(
                 ImportSession.user_id == user_id,
                 ImportSession.status == "analyzed",
                 ImportSession.account_id.isnot(None),
+                AccountModel.is_credit.is_(False),
             )
             .all()
         )
@@ -447,6 +460,7 @@ class TransferMatcherService:
         dt_aware = (date_to + buffer).replace(tzinfo=_tz.utc) if (date_to + buffer).tzinfo is None else (date_to + buffer)
         txs = (
             self.db.query(TransactionModel)
+            .join(AccountModel, AccountModel.id == TransactionModel.account_id)
             .filter(
                 TransactionModel.user_id == user_id,
                 TransactionModel.transaction_date >= df_aware - buffer,
@@ -456,6 +470,7 @@ class TransferMatcherService:
                     TransactionModel.operation_type != "transfer",
                     TransactionModel.target_account_id.is_(None),
                 ),
+                AccountModel.is_credit.is_(False),
             )
             .all()
         )
@@ -838,6 +853,14 @@ class TransferMatcherService:
                 # остаётся: он защищает от ложных склеек двух разных операций
                 # на одном счёте с совпавшими суммой+датой (§8.6).
                 is_mirror = tx.account_id != cand.account_id
+                # Income-операция может поступить только на один конкретный
+                # счёт. Если committed income живёт на счёте A, а import row
+                # тоже income, но на счёте B — это разные операции, не дубли.
+                # Зеркальный ключ (target_account_id, income) был добавлен
+                # для edge-case расхождений направления у кредитных погашений,
+                # но для income-строк всегда даёт false-positive.
+                if is_mirror and cand.direction == "income":
+                    continue
                 # Фантомный transfer-income: committed tx живёт на ТОМ ЖЕ
                 # счёте, что и import row (is_mirror=False), но был создан
                 # автоматически через _create_transfer_pair при коммите
@@ -849,9 +872,9 @@ class TransferMatcherService:
                 #   • operation_type=transfer (создан как пара перевода)
                 # Для таких строк снимаем skeleton guard — time-window + ключ
                 # (account_id, income, amount) достаточно для корректного матча.
-                # Риск false-positive минимален: два несвязанных transfer-income
-                # на одном счёте с одинаковой суммой в пределах ±2 дней — крайне
-                # редкий кейс; при необходимости юзер исправит вручную.
+                # Остаточный риск false-positive закрыт contract guard'ом ниже:
+                # повторные переводы одной суммы с разных договоров разделяются
+                # по contract token'у в описании.
                 is_phantom_transfer_income = (
                     not is_mirror
                     and str(tx.type or "") == "income"
@@ -865,6 +888,25 @@ class TransferMatcherService:
                     and row_skel != tx_skel
                 ):
                     continue
+                # Contract guard for intrabank phantom income: two transfers
+                # of the same amount to the same account within ±2 days (e.g.
+                # repeated 100 000 ₽ transfers from different source contracts)
+                # produce identical skeletons. Extract the contract token from
+                # both descriptions — when both carry a contract and they
+                # differ, this is a different transfer, not a duplicate.
+                if is_phantom_transfer_income:
+                    from app.services.import_normalizer_v2 import (
+                        extract_tokens as _extract_tokens_tms,
+                    )
+                    row_contract = _extract_tokens_tms(
+                        cand.description or ""
+                    ).contract
+                    if row_contract:
+                        phantom_contract = _extract_tokens_tms(
+                            tx.description or ""
+                        ).contract
+                        if phantom_contract and phantom_contract != row_contract:
+                            continue
                 rows_to_mark[cand.row_id] = tx
                 break
 

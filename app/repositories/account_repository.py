@@ -73,16 +73,90 @@ class AccountRepository:
             accounts.append(account)
         return accounts
 
-    def find_by_contract_number(self, user_id: int, contract_number: str) -> Account | None:
-        return (
-            self.db.query(Account)
-            .filter(
+    def find_by_contract_number(
+        self,
+        user_id: int,
+        contract_number: str,
+        exclude_account_id: int | None = None,
+    ) -> Account | None:
+        """Find an account by contract number using a three-level lookup.
+
+        Level 1 — Account.contract_number (fast, indexed).
+        Level 2 — parse_settings.contract_number of active import sessions
+                  (PDF extracted the contract into the session header).
+        Level 3 — tokens.contract inside import_rows of active sessions
+                  (contract appears in transaction descriptions, not PDF header;
+                   covers Ozon Bank and other banks that omit it from the header).
+
+        `exclude_account_id` filters out the caller's own account so the lookup
+        always returns the COUNTERPART account, not the one we already know.
+        """
+        def _load(account_id: int) -> Account | None:
+            filters = [
+                Account.id == account_id,
                 Account.user_id == user_id,
-                Account.contract_number == contract_number,
                 Account.is_active == True,
+            ]
+            if exclude_account_id is not None:
+                filters.append(Account.id != exclude_account_id)
+            return self.db.query(Account).filter(*filters).first()
+
+        # Level 1: committed Account.contract_number (indexed, fast path).
+        base_filters = [
+            Account.user_id == user_id,
+            Account.contract_number == contract_number,
+            Account.is_active == True,
+        ]
+        if exclude_account_id is not None:
+            base_filters.append(Account.id != exclude_account_id)
+        account = self.db.query(Account).filter(*base_filters).first()
+        if account is not None:
+            return account
+
+        from app.models.import_session import ImportSession  # local to avoid circular import
+
+        active_sessions = (
+            self.db.query(ImportSession)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.status != "committed",
+                ImportSession.account_id.isnot(None),
             )
-            .first()
+            .all()
         )
+        if exclude_account_id is not None:
+            active_sessions = [s for s in active_sessions if s.account_id != exclude_account_id]
+
+        # Level 2: parse_settings.contract_number (PDF header extraction).
+        for sess in active_sessions:
+            ps: dict = sess.parse_settings or {}
+            if ps.get("contract_number") == contract_number:
+                result = _load(sess.account_id)
+                if result is not None:
+                    return result
+
+        # Level 3: tokens.contract inside import_rows (description extraction).
+        # Covers banks whose PDF headers don't carry the contract number but whose
+        # transaction descriptions do (e.g. Ozon Bank: «по договору №2025-11-27-KK»).
+        from sqlalchemy import text as _sa_text
+        session_ids = [s.id for s in active_sessions]
+        if not session_ids:
+            return None
+        row = self.db.execute(
+            _sa_text(
+                "SELECT DISTINCT s.account_id "
+                "FROM import_rows r "
+                "JOIN import_sessions s ON s.id = r.session_id "
+                "WHERE s.id = ANY(:sids) "
+                "  AND r.normalized_data_json -> 'tokens' ->> 'contract' = :cn "
+                "LIMIT 1"
+            ),
+            {"sids": session_ids, "cn": contract_number},
+        ).fetchone()
+        if row is not None:
+            return _load(int(row[0]))
+
+        return None
 
     def find_by_statement_account_number(self, user_id: int, statement_account_number: str) -> Account | None:
         return (

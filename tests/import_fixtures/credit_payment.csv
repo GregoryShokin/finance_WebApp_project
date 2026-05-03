@@ -1,0 +1,3 @@
+date;description;amount;direction;raw_type
+2026-04-20;Платёж по кредиту (тело);-12000.00;expense;credit_payment
+2026-04-20;Платёж по кредиту (проценты);-3000.00;expense;credit_interest

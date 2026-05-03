@@ -350,8 +350,12 @@ class BrandCluster:
 
 # Bulk-confirm thresholds — the contract between backend and wizard UI.
 # Aligned with project_bulk_clusters.md.
-MIN_BULK_CLUSTER_SIZE = 3
-MIN_BRAND_CLUSTER_SIZE = 3
+# MIN_BULK_CLUSTER_SIZE lowered 3→2: 2 identical rows are a clear pattern
+# worth one bulk-confirm slot. At 3 the user sees short periods (1-2 monthly
+# transactions of the same kind) as unrelated singles in the attention feed,
+# which defeats the purpose of clustering.
+MIN_BULK_CLUSTER_SIZE = 2
+MIN_BRAND_CLUSTER_SIZE = 2
 MIN_FINGERPRINT_COUNT_FOR_BRAND = 2
 # Transfers clustered by a concrete identifier (phone / contract / card / iban)
 # are a stronger signal than a skeleton brand: the identifier already uniquely

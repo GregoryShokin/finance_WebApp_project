@@ -105,7 +105,7 @@ class ImportRepository:
             raw_data_json=self._to_json_safe(raw_data or {}),
             normalized_data_json=self._to_json_safe(normalized_data or {}),
             status=status,
-            error_message="".join([item for item in (errors or []) if item]) or None,
+            error_message="\n".join([item for item in (errors or []) if item]) or None,
         )
         self._hydrate_row_runtime_fields(
             row,
@@ -220,7 +220,7 @@ class ImportRepository:
         for key, value in updates.items():
             target_key = alias_map.get(key, key)
             if target_key == "error_message" and isinstance(value, list):
-                value = "".join([item for item in value if item]) or None
+                value = "\n".join([item for item in value if item]) or None
             if target_key in json_fields:
                 value = self._to_json_safe(value or {})
             setattr(row, target_key, value)

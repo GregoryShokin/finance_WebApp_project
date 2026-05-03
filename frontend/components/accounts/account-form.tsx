@@ -1,15 +1,28 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { SearchSelect, type SearchSelectItem } from '@/components/ui/search-select';
 import { Select } from '@/components/ui/select';
 import { BankPicker } from '@/components/accounts/bank-picker';
 import type { Account, AccountType, Bank, CreateAccountPayload } from '@/types/account';
+
+type TypeOption = { value: AccountType; label: string };
+const ALL_TYPE_OPTIONS: TypeOption[] = [
+  { value: 'cash',             label: 'Наличные' },
+  { value: 'main',             label: 'Дебетовая карта' },
+  { value: 'credit_card',      label: 'Кредитная карта' },
+  { value: 'installment_card', label: 'Карта рассрочки' },
+  { value: 'marketplace',      label: 'Маркетплейс / электронный кошелёк' },
+  { value: 'broker',           label: 'Брокерский счёт' },
+  { value: 'currency',         label: 'Валютный счёт' },
+  { value: 'savings',          label: 'Вклад' },
+  { value: 'savings_account',  label: 'Накопительный счёт' },
+  { value: 'loan',             label: 'Кредит / ипотека' },
+];
 
 type AccountFormValues = CreateAccountPayload;
 type AccountTypeValue = AccountType;
@@ -35,12 +48,14 @@ const defaultValues: AccountFormValues = {
 export function AccountForm({
   initialData,
   initialValues,
+  allowedTypes,
   isSubmitting,
   onSubmit,
   onCancel,
 }: {
   initialData?: Account | null;
   initialValues?: Partial<CreateAccountPayload> | null;
+  allowedTypes?: AccountType[];
   isSubmitting?: boolean;
   onSubmit: (values: AccountFormValues) => void;
   onCancel: () => void;
@@ -54,23 +69,8 @@ export function AccountForm({
   } = useForm<AccountFormValues>({ defaultValues });
 
   const [accountType, setAccountType] = useState<AccountTypeValue>('main');
-  const [accountTypeQuery, setAccountTypeQuery] = useState('Основной счёт');
   const [selectedBank, setSelectedBank] = useState<Bank | null>(null);
   const [bankError, setBankError] = useState<string | null>(null);
-
-  const accountTypeItems = useMemo<SearchSelectItem[]>(
-    () => [
-      { value: 'main', label: 'Основной счёт', searchText: 'основной дебетовый наличные карта main regular' },
-      { value: 'marketplace', label: 'Маркетплейс', searchText: 'маркетплейс ozon wildberries wb кошелёк marketplace' },
-      { value: 'savings', label: 'Вклад / накопительный', searchText: 'вклад депозит накопительный savings deposit проценты' },
-      { value: 'broker', label: 'Брокерский счёт', searchText: 'брокерский инвестиции broker' },
-      { value: 'currency', label: 'Валютный счёт', searchText: 'currency usd eur' },
-      { value: 'credit_card', label: 'Кредитная карта', searchText: 'кредитная карта credit card лимит' },
-      { value: 'installment_card', label: 'Карта рассрочки', searchText: 'рассрочка халва сплит installment карта' },
-      { value: 'loan', label: 'Кредит / ипотека', searchText: 'кредит ипотека заём loan credit потребительский' },
-    ],
-    [],
-  );
 
   useEffect(() => {
     const resolvedAccountType =
@@ -78,9 +78,6 @@ export function AccountForm({
       initialValues?.account_type ??
       (initialData?.is_credit ?? initialValues?.is_credit ? 'loan' : 'main');
     setAccountType(resolvedAccountType);
-    setAccountTypeQuery(
-      accountTypeItems.find((item) => item.value === resolvedAccountType)?.label ?? 'Обычный счёт',
-    );
 
     if (initialData) {
       setSelectedBank(initialData.bank ?? null);
@@ -127,11 +124,17 @@ export function AccountForm({
       deposit_close_date: initialValues?.deposit_close_date ?? null,
       deposit_capitalization_period: initialValues?.deposit_capitalization_period ?? null,
     });
-  }, [accountTypeItems, initialData, initialValues, reset]);
+  }, [initialData, initialValues, reset]);
 
+  const typeOptions = allowedTypes
+    ? ALL_TYPE_OPTIONS.filter((o) => allowedTypes.includes(o.value))
+    : ALL_TYPE_OPTIONS;
+
+  const isCash = accountType === 'cash';
   const isLoan = accountType === 'loan';
   const isCreditCard = accountType === 'credit_card';
   const isSavings = accountType === 'savings';
+  const isSavingsAccount = accountType === 'savings_account';
   const isInstallmentCard = accountType === 'installment_card';
 
   return (
@@ -139,7 +142,7 @@ export function AccountForm({
       className="space-y-4"
       autoComplete="off"
       onSubmit={handleSubmit((values) => {
-        if (!selectedBank) {
+        if (!isCash && !selectedBank) {
           setBankError('Выбери банк — без него выписки не распознаются');
           return;
         }
@@ -148,7 +151,7 @@ export function AccountForm({
           ...values,
           account_type: accountType,
           is_credit: isLoan,
-          bank_id: selectedBank.id,
+          bank_id: isCash ? null : selectedBank!.id,
           balance: isLoan ? 0 : Number(values.balance),
           credit_limit_original: isLoan || isCreditCard || isInstallmentCard ? Number(values.credit_limit_original) : null,
           credit_current_amount: isLoan || isInstallmentCard ? Number(values.credit_current_amount) : null,
@@ -180,45 +183,44 @@ export function AccountForm({
         {errors.name ? <p className="mt-1 text-sm text-danger">{errors.name.message}</p> : null}
       </div>
 
-      <div>
-        <label className="mb-1.5 block text-sm font-medium text-slate-700">
-          Банк <span className="text-danger">*</span>
-        </label>
-        <BankPicker
-          value={selectedBank?.id ?? null}
-          onChange={(bank) => {
-            setSelectedBank(bank);
-            if (bank) setBankError(null);
-          }}
-        />
-        {bankError ? (
-          <p className="mt-1 text-sm text-danger">{bankError}</p>
-        ) : (
-          <p className="mt-1 text-xs text-slate-400">Помогает правильно распознавать выписки и связывать счета</p>
-        )}
-      </div>
+      {!isCash ? (
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-slate-700">
+            Банк <span className="text-danger">*</span>
+          </label>
+          <BankPicker
+            value={selectedBank?.id ?? null}
+            onChange={(bank) => {
+              setSelectedBank(bank);
+              if (bank) setBankError(null);
+            }}
+          />
+          {bankError ? (
+            <p className="mt-1 text-sm text-danger">{bankError}</p>
+          ) : (
+            <p className="mt-1 text-xs text-slate-400">Помогает правильно распознавать выписки и связывать счета</p>
+          )}
+        </div>
+      ) : null}
 
       <input type="hidden" {...register('account_type')} />
 
       <div>
-        <SearchSelect
+        <Label htmlFor="account-type">Тип счёта</Label>
+        <Select
           id="account-type"
-          label="Тип счёта"
-          placeholder="Выбери тип"
-          widthClassName="w-full"
-          query={accountTypeQuery}
-          setQuery={setAccountTypeQuery}
-          items={accountTypeItems}
-          selectedValue={accountType}
-          showAllOnFocus
-          onSelect={(item) => {
-            const nextType = item.value as AccountTypeValue;
+          value={accountType}
+          onChange={(e) => {
+            const nextType = e.target.value as AccountTypeValue;
             setAccountType(nextType);
-            setAccountTypeQuery(item.label);
             setValue('account_type', nextType);
             setValue('is_credit', nextType === 'loan');
           }}
-        />
+        >
+          {typeOptions.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </Select>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -239,7 +241,7 @@ export function AccountForm({
 
         {!isLoan && !isCreditCard && !isInstallmentCard ? (
           <div>
-            <Label htmlFor="account-balance">Баланс</Label>
+            <Label htmlFor="account-balance">{isSavings || isSavingsAccount ? 'Сумма' : 'Баланс'}</Label>
             <Input
               id="account-balance"
               type="number"
@@ -293,6 +295,13 @@ export function AccountForm({
             <Input id="credit-card-balance" type="number" step="0.01" placeholder="0" {...register('balance', { required: 'Укажи текущий баланс', valueAsNumber: true, validate: (value) => Number.isFinite(value) || 'Введите корректное число' })} />
             {errors.balance ? <p className="mt-1 text-sm text-danger">{errors.balance.message}</p> : null}
           </div>
+        </div>
+      ) : null}
+
+      {isSavingsAccount ? (
+        <div>
+          <Label htmlFor="savings-account-rate">Процентная ставка, % годовых</Label>
+          <Input id="savings-account-rate" type="number" step="0.01" placeholder="0" {...register('deposit_interest_rate', { valueAsNumber: true })} />
         </div>
       ) : null}
 

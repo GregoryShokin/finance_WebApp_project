@@ -214,16 +214,26 @@ export type ImportSessionListItem = {
   updated_at: string;
   row_count: number;
   ready_count: number;
+  warning_count: number;
   error_count: number;
+  user_touched_rows: number;
   auto_preview_status: 'pending' | 'running' | 'ready' | 'failed' | 'skipped' | null;
   transfer_match_status: 'pending' | 'running' | 'ready' | 'failed' | null;
 };
 
 
 export type ImportSplitItem = {
-  category_id: number;
+  operation_type?: string | null;
+  category_id?: number | null;
   amount: number;
   description?: string | null;
+  // transfer part
+  target_account_id?: number | null;
+  // debt part
+  debt_direction?: string | null;
+  debt_partner_id?: number | null;
+  // shared optional
+  counterparty_id?: number | null;
 };
 
 export type ImportRowUpdatePayload = {

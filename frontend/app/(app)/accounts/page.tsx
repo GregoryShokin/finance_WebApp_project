@@ -22,7 +22,11 @@ import { getTransactions } from '@/lib/api/transactions';
 import { formatMoney } from '@/lib/utils/format';
 import { cn } from '@/lib/utils/cn';
 import { useDelayedDelete } from '@/hooks/use-delayed-delete';
-import type { Account, CreateAccountPayload } from '@/types/account';
+import type { Account, AccountType, CreateAccountPayload } from '@/types/account';
+
+const CARD_TYPES: AccountType[] = ['cash', 'main', 'credit_card', 'installment_card'];
+const DEPOSIT_TYPES: AccountType[] = ['savings', 'savings_account'];
+const CREDIT_TYPES: AccountType[] = ['loan'];
 import type { RealAsset, RealAssetPayload, RealAssetType } from '@/types/real-asset';
 import type { Transaction } from '@/types/transaction';
 
@@ -242,6 +246,7 @@ export default function AccountsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [dialogInitialValues, setDialogInitialValues] = useState<Partial<CreateAccountPayload> | null>(null);
+  const [dialogAllowedTypes, setDialogAllowedTypes] = useState<AccountType[] | undefined>(undefined);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'accounts' | 'credits' | 'deposits' | 'property'>('accounts');
   const [assetForm, setAssetForm] = useState<{ id?: number; initial: RealAssetPayload } | null>(null);
@@ -331,7 +336,7 @@ export default function AccountsPage() {
   const creditAccounts = accounts.filter((account) => account.account_type === 'loan');
 
   const accountItems = useMemo(
-    () => accounts.filter((account) => account.account_type !== 'loan' && account.account_type !== 'savings'),
+    () => accounts.filter((a) => CARD_TYPES.includes(a.account_type as AccountType)),
     [accounts],
   );
 
@@ -340,7 +345,7 @@ export default function AccountsPage() {
     [accounts],
   );
   const depositItems = useMemo(
-    () => accounts.filter((account) => account.account_type === 'savings'),
+    () => accounts.filter((a) => DEPOSIT_TYPES.includes(a.account_type as AccountType)),
     [accounts],
   );
 
@@ -418,15 +423,22 @@ export default function AccountsPage() {
     [depositItems],
   );
 
-  function openCreateDialog(initialValues: Partial<CreateAccountPayload>) {
+  function openCreateDialog(initialValues: Partial<CreateAccountPayload>, allowed?: AccountType[]) {
     setEditingAccount(null);
     setDialogInitialValues(initialValues);
+    setDialogAllowedTypes(allowed);
     setDialogOpen(true);
   }
 
   function openEditDialog(account: Account) {
     setEditingAccount(account);
     setDialogInitialValues(null);
+    const t = account.account_type as AccountType;
+    setDialogAllowedTypes(
+      DEPOSIT_TYPES.includes(t) ? DEPOSIT_TYPES :
+      CREDIT_TYPES.includes(t)  ? CREDIT_TYPES  :
+      CARD_TYPES,
+    );
     setDialogOpen(true);
   }
 
@@ -617,9 +629,9 @@ export default function AccountsPage() {
       return (
         <div className="space-y-4">
           <div className="mb-4 flex justify-end">
-            <Button onClick={() => openCreateDialog({ account_type: 'savings', is_credit: false })}>
+            <Button onClick={() => openCreateDialog({ account_type: 'savings', is_credit: false }, DEPOSIT_TYPES)}>
               <PlusCircle className="size-4" />
-              Добавить вклад
+              Добавить вклад или накопительный счёт
             </Button>
           </div>
 
@@ -656,7 +668,7 @@ export default function AccountsPage() {
         <div className="space-y-4">
           <div className="mb-4 flex justify-end">
             <Button
-              onClick={() => openCreateDialog({ account_type: 'loan', is_credit: true })}
+              onClick={() => openCreateDialog({ account_type: 'loan', is_credit: true }, CREDIT_TYPES)}
             >
               <PlusCircle className="size-4" />
               Добавить кредит
@@ -689,7 +701,7 @@ export default function AccountsPage() {
     return (
       <div className="space-y-4">
         <div className="mb-4 flex justify-end">
-          <Button onClick={() => openCreateDialog({ account_type: 'main' })}>
+          <Button onClick={() => openCreateDialog({ account_type: 'main' }, CARD_TYPES)}>
             <PlusCircle className="size-4" />
             Добавить счёт или карту
           </Button>
@@ -750,11 +762,13 @@ export default function AccountsPage() {
         mode={editingAccount ? 'edit' : 'create'}
         account={editingAccount}
         initialValues={editingAccount ? null : dialogInitialValues}
+        allowedTypes={dialogAllowedTypes}
         isSubmitting={createMutation.isPending || updateMutation.isPending}
         onClose={() => {
           setDialogOpen(false);
           setEditingAccount(null);
           setDialogInitialValues(null);
+          setDialogAllowedTypes(undefined);
         }}
         onSubmit={handleDialogSubmit}
       />

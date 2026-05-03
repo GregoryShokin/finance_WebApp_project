@@ -46,16 +46,27 @@ PHONE_RX = re.compile(
 
 # Contract/agreement number. Examples: "№1234567", "№ 1234567", "договор 1234567",
 # "договор №1234567", "договора ABC-1234", "contract_id=1234567".
-# Allows digits, latin/cyrillic letters, hyphens and slashes (up to 20 chars).
+# Allows digits, latin/cyrillic letters, hyphens and slashes (up to 50 chars).
 CONTRACT_RX = re.compile(
     r"(?:договор[ауе]?\s*(?:№\s*)?|№\s*|contract[_\s]*id\s*[=:]\s*)"
-    r"([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9\-/]{3,19})",
+    r"([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9\-/]{3,49})",
     re.IGNORECASE,
 )
 
 # IBAN: two uppercase letters + two digits + 10..30 alphanumerics (no separators).
 # Pre-stripping internal spaces is caller's job if needed.
 IBAN_RX = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b")
+
+# SBP merchant payment — T-Bank / Ozon format:
+#   "26033 MOR SBP 0387"  or  "26033 MOP SBP 1232"
+# Structure: MERCHANT_ID(4-6 digits) + CAT_CODE(2-5 latin letters) + SBP + TERMINAL_ID(3-6 digits)
+# The merchant ID uniquely identifies the business; the category code and terminal ID
+# vary per store location and are meaningless for categorisation.
+# Replacement keeps the merchant ID so different merchants stay in different clusters.
+SBP_MERCHANT_RX = re.compile(
+    r"\b(\d{4,6})\s+[A-Za-z]{2,5}\s+SBP\s+\d{3,6}\b",
+    re.IGNORECASE,
+)
 
 # Masked card: "**** 1234", "*1234", "**** **** **** 1234", "·· 1234".
 CARD_MASKED_RX = re.compile(r"(?:[*•·]{1,4}[\s\-]*){1,4}\d{4}\b")
@@ -93,9 +104,20 @@ DATE_ISO_RX = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 
 
 # Minimal stop-word list. Start narrow — widen only when golden dataset shows need.
+#
+# Geographic suffixes appended by Russian banks to merchant descriptions:
+# T-Bank uses both "Moskva" and "Moscow" for the same city depending on the
+# statement period/version — without normalising them, identical merchants
+# get different skeletons and fingerprints.  "RUS" is the ISO country code
+# that always follows the city name.  None of these carry categorisation value.
 STOPWORDS: frozenset[str] = frozenset({
     "руб", "rub", "rur", "р",
     "от", "на", "по", "для", "через", "за", "из",
+    # Geographic noise added by banks — strip so location variants don't split clusters
+    "rus", "moscow", "moskva", "moscow", "spb", "saint", "peterburg", "peterburgh",
+    "volgodonsk", "novosibirsk", "yekaterinburg", "ekaterinburg", "kazan",
+    "nizhny", "novgorod", "chelyabinsk", "omsk", "samara", "ufa", "rostov",
+    "don", "krasnodar", "voronezh", "saratov", "perm", "ulyanovsk", "tver",
 })
 
 
@@ -446,6 +468,11 @@ def normalize_skeleton(description: str, extracted: ExtractedTokens) -> str:
 
     # Order matters: longer / more specific patterns first so they consume
     # substrings before narrower patterns see them.
+    # SBP merchant payments must be normalized before AMOUNT_RX/CONTRACT_RX
+    # would swallow the merchant-ID digits individually.
+    # "26033 MOR SBP 0387" → "26033 <SBP_PAYMENT>" — merchant ID kept as
+    # the cluster discriminant; category code + terminal ID removed.
+    text = SBP_MERCHANT_RX.sub(r"\1 <SBP_PAYMENT>", text)
     text = CARD_FULL_RX.sub("<CARD>", text)
     text = CARD_MASKED_RX.sub("<CARD>", text)
     text = IBAN_RX.sub("<IBAN>", text)

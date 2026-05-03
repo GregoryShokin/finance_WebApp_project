@@ -98,6 +98,7 @@ class CommitOrchestrator:
         counters = CommitCounters()
         for row in rows:
             self._commit_one(user_id=user_id, row=row, counters=counters)
+        self._link_refund_originals(rows=rows)
         return counters
 
     # ------------------------------------------------------------------
@@ -300,6 +301,43 @@ class CommitOrchestrator:
         self.import_repo.update_row(
             row, status=row.status, errors=row.errors, review_required=True,
         )
+
+    def _link_refund_originals(self, *, rows: list[ImportRow]) -> None:
+        """Post-commit pass: set refund_for_transaction_id on refund transactions.
+
+        Runs after all rows in the session are committed so that
+        created_transaction_id is populated on both sides of a same-session
+        refund pair. Two resolution paths:
+          1. refund_match.matched_tx_id — original was committed in a prior
+             session; id is known directly.
+          2. refund_match.matched_row_id — original is in this session; look up
+             its created_transaction_id (set by _commit_one earlier in the loop).
+        """
+        from app.models.transaction import Transaction as TransactionModel
+
+        for row in rows:
+            if row.created_transaction_id is None:
+                continue
+            normalized = row.normalized_data or {}
+            if str(normalized.get("operation_type") or "") != "refund":
+                continue
+            refund_match = normalized.get("refund_match") or {}
+
+            original_tx_id: int | None = refund_match.get("matched_tx_id")
+            if not original_tx_id:
+                matched_row_id = refund_match.get("matched_row_id")
+                if matched_row_id:
+                    orig_row = self.db.get(ImportRow, int(matched_row_id))
+                    if orig_row and orig_row.created_transaction_id:
+                        original_tx_id = orig_row.created_transaction_id
+
+            if not original_tx_id:
+                continue
+
+            tx = self.db.get(TransactionModel, row.created_transaction_id)
+            if tx is not None and tx.refund_for_transaction_id is None:
+                tx.refund_for_transaction_id = int(original_tx_id)
+                self.db.add(tx)
 
     def _maybe_bind_refund_counterparty(
         self, *, user_id: int, row: ImportRow, normalized: dict[str, Any],

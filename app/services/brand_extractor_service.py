@@ -46,11 +46,15 @@ _FILLER_TOKENS: frozenset[str] = frozenset({
     "gm", "mm", "hm",
     # Noise seen in practice
     "md", "mop", "sbp", "qsr",
+    # Mobile banking app prefixes — not brands
+    "mbank", "мбанк",
     # Payment-method / card / transaction-type words
     "pos", "atm", "retail", "card", "payment", "visa", "mastercard", "mir",
     "оплата", "оплаты", "оплате", "оплату",
     "платёж", "платежа", "платежу", "платеж",
     "покупка", "покупки", "покупке", "покупку",
+    # Generic service/utility words — not brands (e.g. "Оплата услуг mBank.MegaFon")
+    "услуг", "услуга", "услуги", "услуге", "услугу", "услугами", "услугах",
     "в",
     # Refund / reversal keywords — these describe the transaction KIND, not
     # the merchant. Required so refund rows like "Отмена операции оплаты

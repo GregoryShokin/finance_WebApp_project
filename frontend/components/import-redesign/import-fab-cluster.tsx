@@ -13,11 +13,11 @@
  * an "Изменить" action to deep-edit the row, and "Вернуть" for snz/excl.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AnimatePresence, motion } from 'framer-motion';
-import { Banknote, Check, Clock4, FileText, Landmark, Link as LinkIcon, ListTree, Pencil, PiggyBank, Plus, Trash2, User, Wallet, X } from 'lucide-react';
+import { AnimatePresence, motion, useAnimate } from 'framer-motion';
+import { Banknote, Check, Clock4, FileText, Landmark, Link as LinkIcon, ListTree, Pencil, PiggyBank, Plus, Split, Trash2, User, Wallet, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Chip } from '@/components/ui/status-chip';
@@ -33,17 +33,23 @@ import {
   operationTypeToCreditKind,
 } from './option-sets';
 import { SplitChip } from './split-chip';
+import { SplitModal } from './split-modal';
 import { EditTxRazvorot } from './edit-tx-razvorot';
 import {
+  getParkedQueue,
   unexcludeImportRow,
+  unpairImportRow,
   unparkImportRow,
+  updateImportRow,
 } from '@/lib/api/imports';
 import { createCategory, getCategories } from '@/lib/api/categories';
 import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
 import { createAccount, getAccounts } from '@/lib/api/accounts';
+import { getDebtPartners } from '@/lib/api/debt-partners';
 import type { CreateAccountPayload } from '@/types/account';
 import type { CreateCategoryPayload } from '@/types/category';
-import type { ImportPreviewResponse, ImportPreviewRow, ImportSplitItem } from '@/types/import';
+import type { ImportPreviewResponse, ImportPreviewRow, ImportSplitItem, ParkedQueueItem } from '@/types/import';
+import { useFlyToFab, type FlyBucket } from './fly-to-fab-context';
 
 type Bucket = 'done' | 'snz' | 'excl' | 'transfers_dupes';
 
@@ -55,15 +61,23 @@ const BUCKET_CFG: Record<Bucket, { bg: string; title: string }> = {
 };
 
 function isTransferOrDuplicate(r: ImportPreviewRow): boolean {
+  if (r.status === 'committed' || r.status === 'parked' || r.status === 'skipped') return false;
   if (r.status === 'duplicate') return true;
   const nd = r.normalized_data as Record<string, unknown> | undefined;
   // (1) TransferMatcher found a partner row in the same statement → has
-  // transfer_match_meta. (2) Recognition decided this is a transfer based on
+  // transfer_match. (2) Recognition decided this is a transfer based on
   // the description alone (e.g. «Внутрибанковский перевод с договора…»)
   // and set operation_type='transfer' + target_account_id, but the partner
   // side lives in a different statement we don't have here. Both cases are
   // self-transfers and don't represent income/expense.
-  if (nd?.transfer_match_meta) return true;
+  //
+  // EXCEPTION: backend folds operation_type='credit_payment' into
+  // 'transfer' + requires_credit_split=true (spec §9.3). That fold is a
+  // storage detail — semantically it's a credit payment (interest expense
+  // + principal transfer at commit), not a self-transfer. Such rows belong
+  // in the «Проверено» bucket, not «Переводы и дубли».
+  if (nd?.requires_credit_split) return false;
+  if (nd?.transfer_match) return true;
   if (nd?.operation_type === 'transfer') return true;
   return false;
 }
@@ -72,7 +86,11 @@ function bucketize(rows: ImportPreviewRow[], bucket: Bucket): ImportPreviewRow[]
   if (bucket === 'snz') return rows.filter((r) => r.status === 'parked');
   if (bucket === 'excl') return rows.filter((r) => r.status === 'skipped');
   if (bucket === 'transfers_dupes') return rows.filter(isTransferOrDuplicate);
-  return rows.filter((r) => r.status === 'ready');
+  // `done` excludes transfer/duplicate rows so they appear only in the
+  // «Переводы и дубли» bucket — without this, a self-transfer row showed
+  // up in both buckets simultaneously, double-counting toward the «Готово
+  // к импорту» pile.
+  return rows.filter((r) => r.status === 'ready' && !isTransferOrDuplicate(r));
 }
 
 function sumAmount(rows: ImportPreviewRow[]): number {
@@ -95,10 +113,17 @@ export function ImportFabCluster({
 }) {
   const [open, setOpen] = useState<{ bucket: Bucket; origin: { x: number; y: number } } | null>(null);
 
+  // Global parked count — spans all sessions, not just the active one.
+  const parkedQuery = useQuery({
+    queryKey: ['imports', 'parked-queue'],
+    queryFn: getParkedQueue,
+    staleTime: 30_000,
+  });
+
   const rows = preview?.rows ?? [];
   const counts = {
     done:            bucketize(rows, 'done').length,
-    snz:             bucketize(rows, 'snz').length,
+    snz:             parkedQuery.data?.total ?? 0,
     excl:            bucketize(rows, 'excl').length,
     transfers_dupes: bucketize(rows, 'transfers_dupes').length,
   };
@@ -125,12 +150,16 @@ export function ImportFabCluster({
 
       <AnimatePresence>
         {open ? (
-          <BucketPanel
-            bucket={open.bucket}
-            origin={open.origin}
-            rows={bucketize(rows, open.bucket)}
-            onClose={() => setOpen(null)}
-          />
+          open.bucket === 'snz' ? (
+            <ParkedPanel origin={open.origin} onClose={() => setOpen(null)} />
+          ) : (
+            <BucketPanel
+              bucket={open.bucket}
+              origin={open.origin}
+              rows={bucketize(rows, open.bucket)}
+              onClose={() => setOpen(null)}
+            />
+          )
         ) : null}
       </AnimatePresence>
     </>
@@ -293,8 +322,33 @@ function FabBubble({
     bucket === 'snz' ? Clock4 :
     bucket === 'excl' ? Trash2 :
     LinkIcon;
+
+  const flyCtx = useFlyToFab();
+  const [scope, animate] = useAnimate<HTMLButtonElement>();
+
+  // Only done/snz/excl are valid fly targets (transfers_dupes is not).
+  const isReceiver = bucket === 'done' || bucket === 'snz' || bucket === 'excl';
+
+  // Register this button as the FAB target for its bucket.
+  useEffect(() => {
+    if (!isReceiver || !flyCtx || !scope.current) return;
+    flyCtx.registerFab(bucket as FlyBucket, scope.current);
+    return () => flyCtx.registerFab(bucket as FlyBucket, null);
+  }, [isReceiver, flyCtx, bucket, scope]);
+
+  // Pulse when a phantom arrives.
+  const pulse = useCallback(() => {
+    void animate(scope.current, { scale: [1, 1.35, 1] }, { duration: 0.28, ease: 'easeOut' });
+  }, [animate, scope]);
+
+  useEffect(() => {
+    if (!isReceiver || !flyCtx) return;
+    return flyCtx.subscribePulse(bucket as FlyBucket, pulse);
+  }, [isReceiver, flyCtx, bucket, pulse]);
+
   return (
     <button
+      ref={scope}
       type="button"
       onClick={onClick}
       title={cfg.title}
@@ -359,10 +413,10 @@ function BucketPanel({
 
   const restoreMut = useMutation({
     mutationFn: async (rowId: number) => {
-      if (bucket === 'excl') return unexcludeImportRow(rowId);
-      if (bucket === 'snz')  return unparkImportRow(rowId);
-      // transfers_dupes — backend "unpair" endpoint is not yet available.
-      throw new Error('Разрыв пары / снятие метки дубликата ещё не подключены к бэку');
+      if (bucket === 'excl')            return unexcludeImportRow(rowId);
+      if (bucket === 'snz')             return unparkImportRow(rowId);
+      if (bucket === 'transfers_dupes') return unpairImportRow(rowId);
+      throw new Error('Неизвестный бакет');
     },
     onSuccess: () => {
       toast.success('Возвращено в обработку');
@@ -389,7 +443,7 @@ function BucketPanel({
         ? 'Эти строки пока не размечены — мы не будем их импортировать, пока ты не примешь решение.'
         : bucket === 'excl'
           ? 'Эти строки исключены из импорта. Можно вернуть отдельную строку или восстановить все целиком.'
-          : 'Переводы между своими счетами и обнаруженные дубликаты. Их сумма не учитывается как доход/расход. Разрыв пары пока не реализован — нужен новый бэкенд-эндпоинт.';
+          : 'Переводы между своими счетами и обнаруженные дубликаты. Их сумма не учитывается как доход/расход. «Вернуть» разрывает пару и возвращает строку в очередь на разбор.';
 
   return createPortal(
     <>
@@ -508,13 +562,30 @@ function BucketRow({
     : null;
 
   return (
-    <div className="grid grid-cols-[50px_1fr_auto_auto] items-start gap-3 rounded-xl px-3 py-2.5 transition hover:bg-bg-surface2">
+    <div className="grid grid-cols-[80px_1fr_auto_auto] items-start gap-3 rounded-xl px-3 py-2.5 transition hover:bg-bg-surface2">
       <span className="pt-1 font-mono text-[11px] text-ink-3">{fmtDateShort(date)}</span>
 
       <div className="min-w-0">
         <div className="truncate text-[12.5px]">{desc || '(без описания)'}</div>
         <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {splitItems && splitItems.length > 0 ? (
+          {/* Duplicate rows: show "Дубль" badge instead of operation type */}
+          {row.status === 'duplicate' ? (
+            <>
+              <Chip tone="line">
+                <span className="size-1.5 rounded-full" style={{ background: '#8a8b91' }} />
+                Дубль
+              </Chip>
+              {(() => {
+                const tm = nd.transfer_match as Record<string, unknown> | undefined;
+                const srcName = tm?.matched_account_name as string | undefined;
+                return srcName ? (
+                  <Chip tone="line">уже есть в {srcName}</Chip>
+                ) : (
+                  <Chip tone="line">уже импортировано</Chip>
+                );
+              })()}
+            </>
+          ) : splitItems && splitItems.length > 0 ? (
             <SplitChip
               parts={splitItems}
               categoriesById={categoriesById}
@@ -674,4 +745,261 @@ function detailChip(
     );
   }
   return null;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Adapt ParkedQueueItem → ImportPreviewRow shape expected by EditTxRazvorot / SplitModal.
+function parkedItemToRow(item: ParkedQueueItem): ImportPreviewRow {
+  return {
+    id: item.row_id,
+    row_index: item.row_index,
+    status: item.status,
+    confidence: 0,
+    confidence_label: 'low' as const,
+    issues: [],
+    unresolved_fields: [],
+    error_message: null,
+    review_required: false,
+    raw_data: item.raw_data,
+    normalized_data: item.normalized_data,
+  };
+}
+
+// ParkedPanel — global «Отложено» panel, reads from /imports/parked-queue
+// so it shows parked rows across ALL sessions, not just the active one.
+
+function ParkedPanel({
+  origin,
+  onClose,
+}: {
+  origin: { x: number; y: number };
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const cfg = BUCKET_CFG['snz'];
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['imports', 'parked-queue'],
+    queryFn: getParkedQueue,
+    staleTime: 30_000,
+  });
+
+  // Shared entity lists for EditTxRazvorot / SplitModal
+  const categoriesQuery     = useQuery({ queryKey: ['categories'],     queryFn: () => getCategories() });
+  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  const debtPartnersQuery   = useQuery({ queryKey: ['debt-partners'],  queryFn: () => getDebtPartners() });
+  const accountsQuery       = useQuery({ queryKey: ['accounts'],       queryFn: getAccounts });
+
+  const opts = useMemo(() => ({
+    categories:    (categoriesQuery.data ?? []).map((c) => ({ value: String(c.id), label: c.name, kind: (c.kind as 'income' | 'expense') })),
+    counterparties:(counterpartiesQuery.data ?? []).map((c) => ({ value: String(c.id), label: c.name })),
+    debtPartners:  (debtPartnersQuery.data ?? []).map((p: { id: number; name: string }) => ({ value: String(p.id), label: p.name })),
+    accounts:      (accountsQuery.data ?? []).map((a) => ({ value: String(a.id), label: a.name })),
+    accountsRaw:   accountsQuery.data ?? [],
+  }), [categoriesQuery.data, counterpartiesQuery.data, debtPartnersQuery.data, accountsQuery.data]);
+
+  const invalidate = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['imports', 'parked-queue'] });
+    queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+    queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+    queryClient.invalidateQueries({ queryKey: ['imports', 'moderation-status'] });
+  }, [queryClient]);
+
+  const unparkMut = useMutation({
+    mutationFn: (rowId: number) => unparkImportRow(rowId),
+    onSuccess: () => { toast.success('Возвращено в обработку'); invalidate(); },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось'),
+  });
+
+  const confirmMut = useMutation({
+    mutationFn: ({ rowId, nd }: { rowId: number; nd: Record<string, unknown> }) =>
+      updateImportRow(rowId, {
+        action: 'confirm',
+        operation_type: nd.operation_type as string | undefined,
+        category_id: nd.category_id as number | null | undefined,
+        counterparty_id: nd.counterparty_id as number | null | undefined,
+        debt_partner_id: nd.debt_partner_id as number | null | undefined,
+        target_account_id: nd.target_account_id as number | null | undefined,
+      }),
+    onSuccess: () => { toast.success('Подтверждено'); invalidate(); },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось подтвердить'),
+  });
+
+  const [editingFor, setEditingFor] = useState<{ item: ParkedQueueItem; origin: { x: number; y: number } } | null>(null);
+  const [splitFor, setSplitFor] = useState<{ item: ParkedQueueItem; origin: { x: number; y: number } } | null>(null);
+
+  const items = data?.items ?? [];
+  const anyPending = unparkMut.isPending || confirmMut.isPending;
+
+  return createPortal(
+    <>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1, transition: { duration: 0.18 } }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 z-[9000] bg-ink/30 backdrop-blur-[2px]"
+        onClick={onClose}
+      />
+      <div className="pointer-events-none fixed inset-0 z-[9001] flex items-center justify-center p-4">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.05 }}
+          animate={{ opacity: 1, scale: 1, transition: { duration: 0.32, ease: [0.16, 0.84, 0.3, 1] } }}
+          exit={{ opacity: 0, scale: 0.96, transition: { duration: 0.14 } }}
+          style={{
+            transformOrigin: `${origin.x - window.innerWidth / 2}px ${origin.y - window.innerHeight / 2}px`,
+          }}
+          className="pointer-events-auto flex max-h-[80vh] w-[min(720px,94vw)] flex-col overflow-hidden rounded-3xl border border-line bg-bg-surface shadow-modal"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center gap-3 border-b border-line px-5 py-4">
+            <span className="grid size-8 place-items-center rounded-full text-white" style={{ background: cfg.bg }}>
+              <Clock4 className="size-3.5" />
+            </span>
+            <div className="flex-1">
+              <div className="text-[15px] font-semibold text-ink">{cfg.title}</div>
+              <div className="mt-0.5 text-xs text-ink-3">
+                {isLoading ? 'Загрузка…' : `${items.length} строк из всех сессий`}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="grid size-8 place-items-center rounded-full text-ink-3 transition hover:bg-ink/5"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+
+          <div className="overflow-auto px-2 py-1">
+            {isLoading ? (
+              <div className="grid h-32 place-items-center text-xs text-ink-3">Загрузка…</div>
+            ) : items.length === 0 ? (
+              <div className="grid h-32 place-items-center text-xs text-ink-3">Ничего не отложено.</div>
+            ) : (
+              items.map((item) => (
+                <ParkedItemRow
+                  key={item.row_id}
+                  item={item}
+                  disabled={anyPending}
+                  onUnpark={() => unparkMut.mutate(item.row_id)}
+                  onConfirm={() => confirmMut.mutate({ rowId: item.row_id, nd: item.normalized_data })}
+                  onEdit={(origin) => setEditingFor({ item, origin })}
+                  onSplit={(origin) => setSplitFor({ item, origin })}
+                />
+              ))
+            )}
+          </div>
+
+          <footer className="border-t border-line bg-bg-surface2 px-5 py-3 text-[11.5px] leading-snug text-ink-3">
+            Строки отложены из разных выписок. «Вернуть» переносит строку обратно в разбор нужной сессии.
+          </footer>
+        </motion.div>
+      </div>
+
+      {editingFor ? (
+        <EditTxRazvorot
+          sessionId={editingFor.item.session_id}
+          row={parkedItemToRow(editingFor.item)}
+          origin={editingFor.origin}
+          options={opts}
+          onClose={() => setEditingFor(null)}
+          onSuccess={() => { setEditingFor(null); invalidate(); }}
+        />
+      ) : null}
+
+      {splitFor ? (
+        <SplitModal
+          row={parkedItemToRow(splitFor.item)}
+          origin={splitFor.origin}
+          options={{ categories: opts.categories }}
+          onSuccess={() => { setSplitFor(null); invalidate(); }}
+          onClose={() => setSplitFor(null)}
+        />
+      ) : null}
+    </>,
+    document.body,
+  );
+}
+
+function ParkedItemRow({
+  item,
+  disabled,
+  onUnpark,
+  onConfirm,
+  onEdit,
+  onSplit,
+}: {
+  item: ParkedQueueItem;
+  disabled: boolean;
+  onUnpark: () => void;
+  onConfirm: () => void;
+  onEdit: (origin: { x: number; y: number }) => void;
+  onSplit: (origin: { x: number; y: number }) => void;
+}) {
+  const nd = item.normalized_data;
+  const description = (nd.description as string | undefined) || (item.raw_data?.description) || '—';
+  const amount = (nd.amount as string | number | null) ?? null;
+  const dir: 'income' | 'expense' = ((nd.direction as 'income' | 'expense') || 'expense');
+  const date = (nd.date as string | undefined) || (nd.transaction_date as string | undefined) || '';
+
+  const getOrigin = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  };
+
+  return (
+    <div className="grid grid-cols-[72px_1fr_auto_auto] items-center gap-3 rounded-xl px-3 py-2.5 transition hover:bg-bg-surface2">
+      <span className="font-mono text-[11px] text-ink-3">{fmtDateShort(date)}</span>
+      <div className="min-w-0">
+        <div className="truncate text-[12.5px]">{description}</div>
+        <div className="mt-0.5 text-[10.5px] text-ink-3 truncate">{item.filename}</div>
+      </div>
+      <span
+        className={`min-w-[72px] text-right font-mono text-[12.5px] font-semibold tabular-nums ${
+          dir === 'income' ? 'text-accent-green' : 'text-ink'
+        }`}
+      >
+        {fmtRubSigned(amount, dir)}
+      </span>
+      {/* Action buttons — same semantics as TxRow traffic-light */}
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          title="Редактировать"
+          disabled={disabled}
+          onClick={(e) => onEdit(getOrigin(e))}
+          className="grid size-7 place-items-center rounded-md text-ink-3 transition hover:bg-ink/8 hover:text-ink disabled:opacity-40"
+        >
+          <Pencil className="size-3" />
+        </button>
+        <button
+          type="button"
+          title="Разделить"
+          disabled={disabled}
+          onClick={(e) => onSplit(getOrigin(e))}
+          className="grid size-7 place-items-center rounded-md text-ink-3 transition hover:bg-ink/8 hover:text-ink disabled:opacity-40"
+        >
+          <Split className="size-3" />
+        </button>
+        <button
+          type="button"
+          title="Вернуть в обработку"
+          disabled={disabled}
+          onClick={onUnpark}
+          className="rounded-lg px-2 py-1 text-[11px] text-ink-3 transition hover:bg-ink/8 hover:text-ink disabled:opacity-40"
+        >
+          Вернуть
+        </button>
+        <button
+          type="button"
+          title="Подтвердить"
+          disabled={disabled}
+          onClick={onConfirm}
+          className="grid size-7 place-items-center rounded-md bg-accent-green-soft text-accent-green transition hover:bg-accent-green hover:text-white disabled:opacity-40"
+        >
+          <Check className="size-3" />
+        </button>
+      </div>
+    </div>
+  );
 }

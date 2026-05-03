@@ -46,11 +46,24 @@ export function fmtRubAbs(amount: number | string | null | undefined): string {
   return `${ABS_RUB.format(Math.abs(n))} ₽`;
 }
 
+const DATE_FMT = new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
 export function fmtDateShort(iso: string | null | undefined): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit' }).format(d);
+  return DATE_FMT.format(d);
+}
+
+/** дд.мм.гггг | чч:мм */
+export function fmtDateTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const datePart = DATE_FMT.format(d);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${datePart} | ${hh}:${mm}`;
 }
 
 export function fmtDateLong(iso: string | null | undefined): string {

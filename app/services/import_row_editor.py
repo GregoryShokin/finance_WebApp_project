@@ -56,6 +56,7 @@ BLOCKING_MESSAGES: frozenset[str] = frozenset({
     "Не указан счёт отправителя.",
     "Не выбран кредитный счёт.",
     "Не выбрана категория.",
+    "Категория не совпадает с направлением операции.",
     "Разбивка заполнена некорректно.",
     "Сумма разбивки должна совпадать с суммой транзакции.",
     "В разбивке каждая часть должна быть больше нуля.",
@@ -138,6 +139,26 @@ class ImportRowEditor:
         if payload.transaction_date is not None:
             normalized["transaction_date"] = payload.transaction_date.isoformat()
             normalized["date"] = payload.transaction_date.isoformat()
+
+        # Semantic coercion: income direction + expense category = refund.
+        # bulk_apply sends operation_type='regular' for all rows in a cluster,
+        # but income rows with an expense category must be classified as refunds.
+        # Applied after the payload loop so it catches bulk-apply, individual
+        # edits, and any other call path.
+        _direction = normalized.get("direction") or normalized.get("type") or ""
+        _op_type = normalized.get("operation_type") or "regular"
+        _cat_id = normalized.get("category_id")
+        if (
+            str(_direction).lower() == "income"
+            and str(_op_type).lower() == "regular"
+            and _cat_id not in (None, "", 0)
+        ):
+            from app.models.category import Category as _CategoryModel
+            _cat = self.db.query(_CategoryModel).filter(
+                _CategoryModel.id == int(_cat_id)
+            ).first()
+            if _cat is not None and str(getattr(_cat, "kind", "")) == "expense":
+                normalized["operation_type"] = "refund"
 
         action = (payload.action or "").strip().lower()
         issues = [
@@ -451,9 +472,22 @@ class ImportRowEditor:
                     _escalate("warning")
             else:
                 normalized["split_items"] = []
-                if normalized.get("category_id") in (None, "", 0):
+                cat_id = normalized.get("category_id")
+                if cat_id in (None, "", 0):
                     local_issues.append("Не выбрана категория.")
                     _escalate("warning")
+                else:
+                    # category.kind must match transaction direction — mismatched
+                    # rows would be rejected by TransactionService at commit time;
+                    # surfacing the error here gives user feedback in the UI.
+                    tx_type = str(normalized.get("type") or "expense").lower()
+                    from app.models.category import Category as _CategoryModel
+                    _cat = self.db.query(_CategoryModel).filter(
+                        _CategoryModel.id == int(cat_id)
+                    ).first()
+                    if _cat is not None and str(getattr(_cat, "kind", "")) != tx_type:
+                        local_issues.append("Категория не совпадает с направлением операции.")
+                        _escalate("warning")
         elif operation_type == "refund":
             normalized["target_account_id"] = None
             normalized["split_items"] = []

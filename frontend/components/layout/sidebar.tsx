@@ -3,27 +3,13 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import { ChevronDown, LogOut, Settings, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { cn } from '@/lib/utils/cn';
-import { getParkedQueue } from '@/lib/api/imports';
 import { removeAccessToken } from '@/lib/auth/token';
 import { useAuth } from '@/hooks/use-auth';
 import { isNavGroup, navItems, type NavGroup, type NavLeaf } from './nav-items';
-
-// ── Badge hook ────────────────────────────────────────────────────────────────
-
-function useParkedQueueCount(): number {
-  const { data } = useQuery({
-    queryKey: ['imports', 'parked-queue'],
-    queryFn: () => getParkedQueue(),
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-  return data?.total ?? 0;
-}
 
 // ── Leaf link ─────────────────────────────────────────────────────────────────
 
@@ -31,8 +17,6 @@ function NavLeafLink({ item, indent = false }: { item: NavLeaf; indent?: boolean
   const pathname = usePathname();
   const isActive = pathname === item.href;
   const Icon = item.icon;
-  const parkedCount = useParkedQueueCount();
-  const badgeValue = item.badge === 'parked-queue' ? parkedCount : null;
 
   return (
     <Link
@@ -47,16 +31,6 @@ function NavLeafLink({ item, indent = false }: { item: NavLeaf; indent?: boolean
     >
       <Icon className={cn('size-4 shrink-0', isActive ? 'opacity-90' : 'opacity-60')} />
       <span className="flex-1 truncate">{item.label}</span>
-      {badgeValue && badgeValue > 0 ? (
-        <span
-          className={cn(
-            'inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold tabular-nums',
-            isActive ? 'bg-white text-ink' : 'bg-bg-surface2 text-ink-2',
-          )}
-        >
-          {badgeValue}
-        </span>
-      ) : null}
     </Link>
   );
 }

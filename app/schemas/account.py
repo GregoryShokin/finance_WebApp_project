@@ -7,13 +7,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 AccountType = Literal[
-    'main',             # обычный дебетовый / наличные
+    'main',             # обычный дебетовый
+    'cash',             # наличный счёт (без привязки к банку)
     'marketplace',      # маркетплейсовый кошелёк (Ozon, WB, …)
     'loan',             # потребительский кредит
     'credit_card',      # кредитная карта
     'installment_card', # карта рассрочки (Халва, Сплит)
     'broker',           # брокерский счёт
-    'savings',          # сберегательный / накопительный вклад
+    'savings',          # вклад (срочный, с датами и капитализацией)
+    'savings_account',  # накопительный счёт (бессрочный, только ставка)
     'currency',         # валютный счёт
 ]
 
@@ -34,9 +36,9 @@ class AccountCreateRequest(BaseModel):
     is_active: bool = True
     account_type: AccountType = "main"
     is_credit: bool = False
-    # Bank is mandatory: every account must be tied to a concrete bank so
-    # statement extractors and counterparty-binding logic can resolve correctly.
-    bank_id: int = Field(ge=1)
+    # Bank is optional only for cash accounts (no statement extractor needed).
+    # All other account types require a bank for statement parsing.
+    bank_id: int | None = Field(default=None, ge=1)
 
     credit_limit_original: Decimal | None = None
     credit_current_amount: Decimal | None = None
@@ -49,6 +51,12 @@ class AccountCreateRequest(BaseModel):
     deposit_capitalization_period: str | None = None
     contract_number: str | None = None
     statement_account_number: str | None = None
+
+    @model_validator(mode='after')
+    def validate_bank_and_loan(self) -> 'AccountCreateRequest':
+        if self.account_type != 'cash' and self.bank_id is None:
+            raise ValueError('Банк обязателен для всех счетов, кроме наличных')
+        return self
 
     @model_validator(mode='after')
     def validate_loan_requires_params(self) -> 'AccountCreateRequest':

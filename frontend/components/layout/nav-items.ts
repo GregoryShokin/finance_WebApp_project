@@ -5,7 +5,6 @@ import {
   FileUp,
   FolderTree,
   HeartPulse,
-  Inbox,
   Landmark,
   LayoutDashboard,
   ListTree,
@@ -19,8 +18,6 @@ export type NavLeaf = {
   href: string;
   label: string;
   icon: LucideIcon;
-  /** Optional dynamic badge source — resolved by the sidebar via a hook. */
-  badge?: 'parked-queue';
 };
 
 export type NavGroup = {
@@ -54,7 +51,6 @@ export const navItems: NavItem[] = [
     ],
   },
   { href: '/import', label: 'Импорт', icon: FileUp },
-  { href: '/parked-queue', label: 'Недоразобранное', icon: Inbox, badge: 'parked-queue' },
   { href: '/categories', label: 'Категории', icon: ListTree },
   { href: '/rules', label: 'Правила', icon: FolderTree },
   { href: '/accounts', label: 'Активы', icon: Wallet },

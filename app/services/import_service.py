@@ -143,7 +143,7 @@ class ImportService:
         extension = self._detect_extension(filename)
         extractor = self.extractors.get(extension)
         if extractor is None:
-            raise ImportValidationError(f"Р¤РѕСЂРјР°С‚ .{extension} РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ РґР»СЏ РёРјРїРѕСЂС‚Р°.")
+            raise ImportValidationError(f"Формат .{extension} не поддерживается для импорта.")
 
         try:
             extraction = extractor.extract(
@@ -152,10 +152,10 @@ class ImportService:
                 options={"delimiter": delimiter, "has_header": has_header},
             )
         except Exception as exc:
-            raise ImportValidationError(f"РќРµ СѓРґР°Р»РѕСЃСЊ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ С„Р°Р№Р» {filename}: {exc}") from exc
+            raise ImportValidationError(f"Не удалось обработать файл {filename}: {exc}") from exc
 
         if not extraction.tables:
-            raise ImportValidationError("РќРµ СѓРґР°Р»РѕСЃСЊ РёР·РІР»РµС‡СЊ РґР°РЅРЅС‹Рµ РёР· С„Р°Р№Р»Р°.")
+            raise ImportValidationError('Не удалось извлечь данные из файла.')
 
         primary_table = self._pick_primary_table(extraction)
         detection = self.recognition_service.recognize(table=primary_table)
@@ -256,7 +256,7 @@ class ImportService:
     def get_session(self, *, user_id: int, session_id: int) -> ImportSession:
         session = self.import_repo.get_session(session_id=session_id, user_id=user_id)
         if session is None:
-            raise ImportNotFoundError("РЎРµСЃСЃРёСЏ РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
+            raise ImportNotFoundError('Сессия импорта не найдена.')
         return session
 
     def get_bulk_clusters(self, *, user_id: int, session_id: int) -> dict[str, Any]:
@@ -526,31 +526,40 @@ class ImportService:
         self.db.add(row)
         self.db.flush()
 
-        # Preserve a refund classification if the row carries one — attach
-        # must not silently demote a refund to a regular income row. The
-        # refund's own category was set earlier (from purchase history) and
-        # continues to win over `target_operation_type` we just computed
-        # from the counterparty's tx history.
         existing_op = str(normalized.get("operation_type") or "").lower()
-        effective_op = "refund" if existing_op == "refund" else target_operation_type
+        user_already_confirmed = bool(normalized.get("user_confirmed_at"))
 
-        # Only auto-confirm the row when a category was resolved. Without
-        # a category the row must stay in the attention bucket so the user
-        # can classify it before commit — we still persist the counterparty
-        # binding and cluster attachment so next time a matching row comes
-        # in, it lands with the counterparty pre-filled.
-        if target_category_id is not None:
+        if user_already_confirmed:
+            # Row was individually confirmed via the pencil editor — the user
+            # explicitly chose operation_type and category. Preserve those
+            # choices: only attach the counterparty so the row is grouped
+            # correctly in the UI, without overriding anything else.
             row_payload = ImportRowUpdateRequest(
-                operation_type=effective_op,
-                category_id=target_category_id,
                 counterparty_id=counterparty_id,
                 action="confirm",
             )
         else:
-            row_payload = ImportRowUpdateRequest(
-                operation_type=effective_op,
-                counterparty_id=counterparty_id,
-            )
+            # Preserve a refund classification if the row carries one — attach
+            # must not silently demote a refund to a regular income row.
+            effective_op = "refund" if existing_op == "refund" else target_operation_type
+
+            # Only auto-confirm the row when a category was resolved. Without
+            # a category the row must stay in the attention bucket so the user
+            # can classify it before commit — we still persist the counterparty
+            # binding and cluster attachment so next time a matching row comes
+            # in, it lands with the counterparty pre-filled.
+            if target_category_id is not None:
+                row_payload = ImportRowUpdateRequest(
+                    operation_type=effective_op,
+                    category_id=target_category_id,
+                    counterparty_id=counterparty_id,
+                    action="confirm",
+                )
+            else:
+                row_payload = ImportRowUpdateRequest(
+                    operation_type=effective_op,
+                    counterparty_id=counterparty_id,
+                )
         self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
 
         self.db.commit()
@@ -705,6 +714,7 @@ class ImportService:
                 "updated_at": session.updated_at,
                 "row_count": len(rows),
                 "ready_count": sum(1 for r in rows if r.status == "ready"),
+                "warning_count": sum(1 for r in rows if r.status == "warning"),
                 "error_count": sum(1 for r in rows if r.status == "error"),
                 "auto_preview_status": auto_preview,
                 "transfer_match_status": transfer_match,
@@ -714,7 +724,7 @@ class ImportService:
     def delete_session(self, *, user_id: int, session_id: int) -> None:
         session = self.import_repo.get_session(session_id=session_id, user_id=user_id)
         if session is None:
-            raise ImportNotFoundError("РЎРµСЃСЃРёСЏ РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
+            raise ImportNotFoundError('Сессия импорта не найдена.')
         self.import_repo.delete_session(session)
         self.db.commit()
 
@@ -722,20 +732,20 @@ class ImportService:
     def send_row_to_review(self, *, user_id: int, row_id: int) -> dict[str, Any]:
         session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
         if session_row is None:
-            raise ImportNotFoundError("РЎС‚СЂРѕРєР° РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
+            raise ImportNotFoundError('Строка импорта не найдена.')
 
         session, row = session_row
         row_status = str(row.status or "").strip().lower()
         if row.created_transaction_id is not None or row_status == "committed":
-            raise ImportValidationError("РЎС‚СЂРѕРєР° СѓР¶Рµ РёРјРїРѕСЂС‚РёСЂРѕРІР°РЅР° Рё РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РѕС‚РїСЂР°РІР»РµРЅР° РЅР° РїСЂРѕРІРµСЂРєСѓ.")
+            raise ImportValidationError('Строка уже импортирована и не может быть отправлена на проверку.')
         if row_status == "duplicate":
-            raise ImportValidationError("Р”СѓР±Р»РёРєР°С‚ РЅРµР»СЊР·СЏ РѕС‚РїСЂР°РІРёС‚СЊ РЅР° РїСЂРѕРІРµСЂРєСѓ РІСЂСѓС‡РЅСѓСЋ.")
+            raise ImportValidationError('Дубликат нельзя отправить на проверку вручную.')
         if row_status == "error":
-            raise ImportValidationError("РЎС‚СЂРѕРєР° СѓР¶Рµ СЃРѕРґРµСЂР¶РёС‚ РѕС€РёР±РєСѓ Рё Р±СѓРґРµС‚ РґРѕСЃС‚СѓРїРЅР° РІ РїСЂРѕРІРµСЂРєРµ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё.")
+            raise ImportValidationError('Строка уже содержит ошибку и будет доступна в проверке автоматически.')
         if row_status != "ready":
-            raise ImportValidationError("РќР° РїСЂРѕРІРµСЂРєСѓ РјРѕР¶РЅРѕ РѕС‚РїСЂР°РІРёС‚СЊ С‚РѕР»СЊРєРѕ СЃС‚СЂРѕРєРё СЃРѕ СЃС‚Р°С‚СѓСЃРѕРј 'Р“РѕС‚РѕРІРѕ'.")
+            raise ImportValidationError("На проверку можно отправить только строки со статусом 'Готово'.")
 
-        issues = list(dict.fromkeys([*(getattr(row, "errors", None) or []), "РћС‚РїСЂР°РІР»РµРЅРѕ РЅР° РїСЂРѕРІРµСЂРєСѓ РІСЂСѓС‡РЅСѓСЋ."]))
+        issues = list(dict.fromkeys([*(getattr(row, "errors", None) or []), 'Отправлено на проверку вручную.']))
         row = self.import_repo.update_row(
             row,
             status="warning",
@@ -1091,6 +1101,41 @@ class ImportService:
         self.import_repo._hydrate_row_runtime_fields(row)
         return {"session_id": session.id, "row_id": row.id, "status": row.status, "summary": summary}
 
+    def unpair_row(self, *, user_id: int, row_id: int) -> dict[str, Any]:
+        """Remove a transfer/duplicate pairing from a row and return it to 'warning'
+        so the user can re-categorise it as a regular expense/income.
+
+        Clears: transfer_match, operation_type, target_account_id, was_orphan_transfer.
+        Works on rows with status in (ready, warning, duplicate) that have a
+        transfer_match or operation_type='transfer'.
+        """
+        session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
+        if session_row is None:
+            raise ImportNotFoundError("Строка импорта не найдена.")
+
+        session, row = session_row
+        row_status = str(row.status or "").strip().lower()
+        if row_status == "committed":
+            raise ImportValidationError("Импортированную строку нельзя разорвать.")
+
+        nd: dict = dict(row.normalized_data_json or {})
+        nd.pop("transfer_match", None)
+        nd.pop("target_account_id", None)
+        nd.pop("operation_type", None)
+        nd.pop("was_orphan_transfer", None)
+        nd["transfer_match_locked"] = True  # prevent matcher from re-pairing immediately
+        row.normalized_data_json = nd
+        row = self.import_repo.update_row(row, status="warning", review_required=True)
+
+        summary = self._recalculate_summary(session.id)
+        session.summary_json = summary
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        self.db.refresh(row)
+        self.import_repo._hydrate_row_runtime_fields(row)
+        return {"session_id": session.id, "row_id": row.id, "status": row.status, "summary": summary}
+
     def update_row(self, *, user_id: int, row_id: int, payload: ImportRowUpdateRequest) -> dict[str, Any]:
         """Single-row edit — delegated to ImportRowEditor (extracted 2026-04-29
         as §1 backlog step 7). Translates the editor's local exception types
@@ -1165,6 +1210,7 @@ class ImportService:
             "duplicate_rows": 0,
             "skipped_rows": 0,
             "parked_rows": 0,
+            "user_touched_rows": 0,
         }
         for row in rows:
             status = str(row.status or "").strip().lower()
@@ -1182,6 +1228,9 @@ class ImportService:
             elif status == "parked":
                 summary["parked_rows"] += 1
                 summary["skipped_rows"] += 1
+            nd = row.normalized_data_json or {}
+            if nd.get("user_confirmed_at") or nd.get("cluster_bulk_acked_at"):
+                summary["user_touched_rows"] += 1
         return summary
 
     def _apply_refund_matches(self, *, session_id: int) -> None:
@@ -1197,6 +1246,40 @@ class ImportService:
         ImportPostProcessor(self.db, import_repo=self.import_repo).apply_refund_cluster_overrides(
             session=session,
         )
+
+    def _apply_bank_mechanics(self, *, session: ImportSession) -> None:
+        """Delegate to ImportPostProcessor.apply_bank_mechanics (§9.10 / §6.9)."""
+        from app.services.import_post_processor import ImportPostProcessor
+        ImportPostProcessor(self.db, import_repo=self.import_repo).apply_bank_mechanics(
+            session=session,
+        )
+
+    def _reapply_bank_mechanics_for_siblings(
+        self, *, user_id: int, exclude_session_id: int
+    ) -> None:
+        """Re-run bank mechanics for all other preview_ready sessions of this user.
+
+        Called when a new contract_number is saved to an Account during build_preview.
+        Sibling sessions may have stale 'regular' rows that failed to resolve the
+        counter-account (because the contract wasn't available at their preview time).
+        Re-running is idempotent: rows with user_confirmed_at or committed status
+        are protected by guards inside ImportPostProcessor.apply_bank_mechanics.
+        """
+        siblings = (
+            self.db.query(ImportSession)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.status == "preview_ready",
+                ImportSession.id != exclude_session_id,
+            )
+            .all()
+        )
+        for sibling in siblings:
+            try:
+                self._apply_bank_mechanics(session=sibling)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
 
     def _recalculate_summary(self, session_id: int) -> dict[str, Any]:
         # Merge fresh row counts into the existing summary so non-counter blocks
@@ -1256,18 +1339,18 @@ class ImportService:
 
         tables = self._load_tables_from_session(session)
         if not tables:
-            raise ImportValidationError("РќРµ СѓРґР°Р»РѕСЃСЊ РІРѕСЃСЃС‚Р°РЅРѕРІРёС‚СЊ РґР°РЅРЅС‹Рµ СЃРµСЃСЃРёРё РёРјРїРѕСЂС‚Р°.")
+            raise ImportValidationError('Не удалось восстановить данные сессии импорта.')
 
         current_mapping = session.mapping_json or {}
         table_name = payload.table_name or current_mapping.get("selected_table") or tables[0].name
         table = next((item for item in tables if item.name == table_name), None)
         if table is None:
-            raise ImportValidationError("Р’С‹Р±СЂР°РЅРЅР°СЏ С‚Р°Р±Р»РёС†Р° РЅРµ РЅР°Р№РґРµРЅР° РІ РёСЃС‚РѕС‡РЅРёРєРµ.")
+            raise ImportValidationError('Выбранная таблица не найдена в источнике.')
         if not table.rows:
-            raise ImportValidationError("Р’ РІС‹Р±СЂР°РЅРЅРѕР№ С‚Р°Р±Р»РёС†Рµ РЅРµС‚ СЃС‚СЂРѕРє РґР»СЏ РёРјРїРѕСЂС‚Р°.")
+            raise ImportValidationError('В выбранной таблице нет строк для импорта.')
         if table.meta.get("schema") == "diagnostics":
             raise ImportValidationError(
-                "РЎС‚СЂСѓРєС‚СѓСЂР° СЌС‚РѕРіРѕ PDF РЅРµ СЂР°СЃРїРѕР·РЅР°РЅР° Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё. РџСЂРѕРІРµСЂСЊ РґРёР°РіРЅРѕСЃС‚РёС‡РµСЃРєСѓСЋ С‚Р°Р±Р»РёС†Сѓ РІ СЂРµР·СѓР»СЊС‚Р°С‚Рµ РёР·РІР»РµС‡РµРЅРёСЏ Рё РїСЂРёС€Р»Рё С„Р°Р№Р» РґР»СЏ СЂР°СЃС€РёСЂРµРЅРёСЏ С€Р°Р±Р»РѕРЅРѕРІ."
+                'Структура этого PDF не распознана автоматически. Проверь диагностическую таблицу в результате извлечения и пришли файл для расширения шаблонов.'
             )
 
         # Store bank_code in mapping_json so downstream services (build_clusters)
@@ -1281,6 +1364,20 @@ class ImportService:
         if session.account_id != payload.account_id:
             session.account_id = payload.account_id
             self.db.add(session)
+
+        # Early write: save contract_number / statement_account_number to the
+        # Account as soon as build_preview runs (not only at commit). This lets
+        # other sessions (e.g. Яндекс Дебет) find this account via
+        # AccountRepository.find_by_contract_number without requiring a specific
+        # import order. Guard: only write if the field is currently empty.
+        _ps = session.parse_settings or {}
+        _early_updates: dict[str, str] = {}
+        if _ps.get("contract_number") and not account.contract_number:
+            _early_updates["contract_number"] = _ps["contract_number"]
+        if _ps.get("statement_account_number") and not account.statement_account_number:
+            _early_updates["statement_account_number"] = _ps["statement_account_number"]
+        if _early_updates:
+            self.account_repo.update(account, auto_commit=False, **_early_updates)
 
         detection = self.recognition_service.recognize(table=table)
         merged_detection = {**detection, "selected_table": table.name, "field_mapping": payload.field_mapping}
@@ -1385,6 +1482,26 @@ class ImportService:
             account_id=payload.account_id,
             currency=payload.currency,
         )
+
+        # Early save of contract token from row descriptions → Account.contract_number.
+        # Complements the parse_settings early save above: for banks whose PDF headers
+        # don't carry the contract number (e.g. Ozon Bank), the contract appears only
+        # in transaction descriptions. Extracting it here ensures find_by_contract_number
+        # can resolve the sibling account via Level 1 (Account field) regardless of
+        # which session is previewed first, making the matching fully order-independent.
+        _new_contract_saved = False
+        if not account.contract_number:
+            _row_contracts = [
+                str((r.normalized_data_json or {}).get("tokens", {}).get("contract") or "")
+                for r in preview_rows
+                if (r.normalized_data_json or {}).get("tokens", {}).get("contract")
+            ]
+            if _row_contracts:
+                from collections import Counter as _Counter
+                _dominant = _Counter(_row_contracts).most_common(1)[0][0]
+                self.account_repo.update(account, auto_commit=False, contract_number=_dominant)
+                _new_contract_saved = True
+
         self.db.commit()
         self.db.refresh(session)
 
@@ -1415,6 +1532,44 @@ class ImportService:
         self._apply_refund_cluster_overrides(session=session)
         self.db.commit()
 
+        # Bank-mechanics post-process (§9.10 / §6.9): propagate cluster-level
+        # bank_mechanics results to individual rows. Two effects:
+        # (1) suggest_exclude=True → auto-exclude Яндекс Сплит phantom-mirror
+        #     rows («погашение основного долга» income) so the Сплит balance
+        #     is not double-credited at commit time.
+        # (2) resolved_target_account_id → stamp target_account_id on Яндекс
+        #     Дебет transfer rows (resolved from the contract token in the
+        #     cluster's identifier) so the user does not have to pick the
+        #     counter-account manually.
+        self._apply_bank_mechanics(session=session)
+        self.db.commit()
+
+        # If a new contract was saved to Account during this preview, sibling
+        # sessions may have stale 'regular' rows that couldn't resolve the
+        # counter-account before the contract was available. Re-run bank mechanics
+        # for all other preview_ready sessions of this user so they benefit
+        # immediately — no manual re-open required.
+        if _new_contract_saved:
+            self._reapply_bank_mechanics_for_siblings(user_id=user_id, exclude_session_id=session.id)
+
+
+        # Safety gate: post-processors change operation_type without
+        # re-running the preview status checks. A refund or regular row
+        # without a category must never be ready — enforce the invariant
+        # here, after all post-processors have had their turn.
+        _needs_fix = [
+            row for row in self.import_repo.list_rows(session_id=session.id)
+            if row.status == "ready"
+            and str((row.normalized_data_json or {}).get("operation_type") or "").lower()
+               in ("regular", "refund")
+            and not (row.normalized_data_json or {}).get("category_id")
+        ]
+        if _needs_fix:
+            for _row in _needs_fix:
+                _row.status = "warning"
+                self.db.add(_row)
+            self.db.commit()
+
         # Response rows are serialized now — transfer_match metadata is filled in
         # by the debounced matcher a few seconds later and picked up via polling.
         updated_rows = self.import_repo.list_rows(session_id=session.id)
@@ -1432,7 +1587,7 @@ class ImportService:
     def set_row_label(self, *, user_id: int, row_id: int, user_label: str) -> dict[str, Any]:
         session_row = self.import_repo.get_row_for_user(row_id=row_id, user_id=user_id)
         if session_row is None:
-            raise ImportNotFoundError("РЎС‚СЂРѕРєР° РёРјРїРѕСЂС‚Р° РЅРµ РЅР°Р№РґРµРЅР°.")
+            raise ImportNotFoundError('Строка импорта не найдена.')
 
         _, row = session_row
         normalized = dict(getattr(row, "normalized_data", None) or (row.normalized_data_json or {}))
@@ -1443,11 +1598,11 @@ class ImportService:
         operation_type = normalized.get("operation_type") or "regular"
 
         if not norm_desc:
-            raise ImportValidationError("РЎС‚СЂРѕРєР° РЅРµ СЃРѕРґРµСЂР¶РёС‚ РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅРѕРіРѕ РѕРїРёСЃР°РЅРёСЏ РґР»СЏ СЃРѕР·РґР°РЅРёСЏ РїСЂР°РІРёР»Р°.")
+            raise ImportValidationError('Строка не содержит нормализованного описания для создания правила.')
         if not category_id:
-            raise ImportValidationError("РЎС‚СЂРѕРєР° РЅРµ СЃРѕРґРµСЂР¶РёС‚ РєР°С‚РµРіРѕСЂРёРё РґР»СЏ СЃРѕР·РґР°РЅРёСЏ РїСЂР°РІРёР»Р°.")
+            raise ImportValidationError('Строка не содержит категории для создания правила.')
         if operation_type in NON_ANALYTICS_OPERATION_TYPES:
-            raise ImportValidationError("Р”Р»СЏ РґР°РЅРЅРѕРіРѕ С‚РёРїР° РѕРїРµСЂР°С†РёРё РїСЂР°РІРёР»Рѕ РєР»Р°СЃСЃРёС„РёРєР°С†РёРё РЅРµ РїСЂРёРјРµРЅСЏРµС‚СЃСЏ.")
+            raise ImportValidationError('Для данного типа операции правило классификации не применяется.')
 
         rule = self.category_rule_repo.upsert(
             user_id=user_id,
@@ -1615,15 +1770,15 @@ class ImportService:
         operation_type = normalized.get("operation_type")
 
         if account_id in (None, "", 0):
-            raise ValueError("РќРµ СѓРєР°Р·Р°РЅ СЃС‡С‘С‚ РґР»СЏ С‚СЂР°РЅР·Р°РєС†РёРё.")
+            raise ValueError('Не указан счёт для транзакции.')
         if amount in (None, ""):
-            raise ValueError("РќРµ СѓРєР°Р·Р°РЅР° СЃСѓРјРјР° С‚СЂР°РЅР·Р°РєС†РёРё.")
+            raise ValueError('Не указана сумма транзакции.')
         if not currency:
-            raise ValueError("РќРµ СѓРєР°Р·Р°РЅР° РІР°Р»СЋС‚Р° С‚СЂР°РЅР·Р°РєС†РёРё.")
+            raise ValueError('Не указана валюта транзакции.')
         if not tx_type:
-            raise ValueError("РќРµ СѓРєР°Р·Р°РЅ С‚РёРї С‚СЂР°РЅР·Р°РєС†РёРё.")
+            raise ValueError('Не указан тип транзакции.')
         if not operation_type:
-            raise ValueError("РќРµ СѓРєР°Р·Р°РЅ operation_type С‚СЂР°РЅР·Р°РєС†РёРё.")
+            raise ValueError('Не указан operation_type транзакции.')
 
         base_payload: dict[str, Any] = {
             "account_id": int(account_id),
@@ -1767,9 +1922,9 @@ class ImportService:
         if isinstance(value, str):
             cleaned = value.strip().replace(" ", "").replace(",", ".")
             if not cleaned:
-                raise ValueError("РџСѓСЃС‚РѕРµ Р·РЅР°С‡РµРЅРёРµ СЃСѓРјРјС‹.")
+                raise ValueError('Пустое значение суммы.')
             return Decimal(cleaned)
-        raise TypeError("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ С„РѕСЂРјР°С‚ СЃСѓРјРјС‹.")
+        raise TypeError('Некорректный формат суммы.')
 
     @staticmethod
     def _to_datetime(value: Any) -> datetime:
@@ -1777,7 +1932,7 @@ class ImportService:
             return value
         if isinstance(value, str):
             return datetime.fromisoformat(value)
-        raise TypeError("РќРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ С„РѕСЂРјР°С‚ РґР°С‚С‹ С‚СЂР°РЅР·Р°РєС†РёРё.")
+        raise TypeError('Некорректный формат даты транзакции.')
 
     def _session_to_upload_response(self, session: ImportSession) -> dict[str, Any]:
         ps = session.parse_settings or {}
@@ -1884,6 +2039,7 @@ class ImportService:
         skeleton: str | None,
         normalized_description: str | None,
         transaction_type: str = "expense",
+        contract: str | None = None,
     ) -> bool:
         """§8.1 deduplication against committed transactions.
 
@@ -1891,6 +2047,12 @@ class ImportService:
         placeholder-rich form, which collapses identifier variation (same
         merchant, different phone/contract) into one key. This is what the
         spec calls for.
+
+        Exception: when `contract` is provided (transfer rows with a contract
+        number in the description), skeleton candidates are post-filtered to
+        require the same contract value. "Внутрибанковский перевод с договора
+        5867986654" and "…договора 5452737298" produce identical skeletons but
+        are transfers between different accounts — they must not be merged.
 
         The function is layered:
           1. (account + amount + date ±1 + skeleton) — strict match. Bank
@@ -1901,8 +2063,19 @@ class ImportService:
              widen to ±3 days and match on `normalized_description`. Legacy
              rows keep working until the backfill script populates skeleton.
         """
+        from app.services.import_normalizer_v2 import extract_tokens as _extract_tokens
+
         incoming_skeleton = (skeleton or "").strip()
         incoming_norm = (normalized_description or "").strip().lower()
+
+        def _contract_matches(candidate: Any) -> bool:
+            """Return True when the candidate is compatible with `contract`."""
+            if not contract:
+                return True
+            candidate_contract = _extract_tokens(
+                candidate.description or ""
+            ).contract
+            return candidate_contract == contract
 
         # Level 1: skeleton match in ±1 day window.
         if incoming_skeleton:
@@ -1915,7 +2088,7 @@ class ImportService:
                 days_window=1,
                 transaction_type=transaction_type,
             )
-            if exact_candidates:
+            if any(_contract_matches(c) for c in exact_candidates):
                 return True
 
             # Level 2a: skeleton match widened to ±3 days — covers cases where
@@ -1929,7 +2102,7 @@ class ImportService:
                 days_window=3,
                 transaction_type=transaction_type,
             )
-            if wide_candidates:
+            if any(_contract_matches(c) for c in wide_candidates):
                 return True
 
         # Level 2b: legacy fallback for transactions imported before the
@@ -1949,6 +2122,7 @@ class ImportService:
         return any(
             item.skeleton is None
             and (item.normalized_description or "").strip().lower() == incoming_norm
+            and _contract_matches(item)
             for item in legacy_candidates
         )
 

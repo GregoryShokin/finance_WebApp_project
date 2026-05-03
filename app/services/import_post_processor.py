@@ -1,6 +1,6 @@
 """Post-processors for the import preview pipeline.
 
-Three deterministic, idempotent passes that run after normalization and
+Four deterministic, idempotent passes that run after normalization and
 enrichment but before the rows are written to disk:
 
 1. `gate_transfer_integrity` — §12.1 / §5.2 trigger 6 — escalate transfers
@@ -10,6 +10,10 @@ enrichment but before the rows are written to disk:
 3. `apply_refund_cluster_overrides` — for every refund cluster, push
    counterparty + dominant-category from purchase history onto member rows
    (compensator model).
+4. `apply_bank_mechanics` — propagate cluster-level bank-mechanics results
+   to individual rows: auto-exclude Яндекс Сплит phantom-mirror rows
+   (suggest_exclude), stamp resolved target_account_id on Яндекс Дебет
+   transfer rows (§9.10 / §6.9).
 
 Extracted from `import_service.py` 2026-04-29 as step 5 of the §1 backlog
 god-object decomposition. No DB ownership: caller controls commit/rollback.
@@ -228,3 +232,98 @@ class ImportPostProcessor:
                     if existing_cp in (None, "", 0):
                         nd["counterparty_id"] = int(cluster.refund_resolved_counterparty_id)
                 self.import_repo.update_row(row, normalized_data=nd)
+
+    # ------------------------------------------------------------------
+    # 4. Bank-mechanics post-process (§9.10 / §6.9)
+    # ------------------------------------------------------------------
+
+    def apply_bank_mechanics(self, *, session: ImportSession) -> None:
+        """Propagate cluster-level bank-mechanics results to ImportRows.
+
+        Two effects, applied only when the row has not been explicitly
+        confirmed by the user (guarded by `user_confirmed_at`):
+
+        1. `suggest_exclude=True` — auto-exclude phantom-mirror rows, e.g.
+           Яндекс Сплит income «погашение основного долга» that is already
+           covered by the phantom income created when the paired Дебет
+           transfer committed. Committing a second time would double-credit
+           the Сплит account balance.
+
+        2. `resolved_target_account_id` — stamp `target_account_id` onto
+           Яндекс Дебет transfer rows so the user does not have to pick the
+           Сплит counter-account manually (account resolved from the
+           contract token in the cluster's identifier at cluster-build time).
+        """
+        from app.services.import_cluster_service import ImportClusterService
+
+        cluster_svc = ImportClusterService(self.db)
+        clusters = cluster_svc.build_clusters(session)
+
+        mechanic_clusters = [
+            c for c in clusters
+            if c.bank_mechanics_suggest_exclude
+            or c.bank_mechanics_resolved_target_account_id is not None
+        ]
+        if not mechanic_clusters:
+            return
+
+        rows_by_id: dict[int, ImportRow] = {
+            r.id: r for r in self.import_repo.get_rows(session_id=session.id)
+        }
+
+        for cluster in mechanic_clusters:
+            for row_id in cluster.row_ids:
+                row = rows_by_id.get(row_id)
+                if row is None:
+                    continue
+
+                nd = dict(row.normalized_data_json or {})
+
+                # Guard: user explicitly confirmed this row → preserve choice.
+                if nd.get("user_confirmed_at"):
+                    continue
+
+                # Terminal statuses are not modified.
+                if str(row.status or "").lower() in ("committed", "parked"):
+                    continue
+
+                nd_changed = False
+                new_status: str | None = None
+
+                if (
+                    cluster.bank_mechanics_suggest_exclude
+                    and row.status not in ("excluded", "committed")
+                ):
+                    new_status = "excluded"
+
+                if (
+                    cluster.bank_mechanics_resolved_target_account_id is not None
+                    and nd.get("target_account_id") in (None, "", 0)
+                ):
+                    nd["target_account_id"] = cluster.bank_mechanics_resolved_target_account_id
+                    if nd.get("operation_type") != "transfer":
+                        nd["operation_type"] = "transfer"
+                    # Clear credit-split flag: bank_mechanics resolved this row
+                    # as a simple inter-account transfer (Ozon дебет → кредитка).
+                    # requires_credit_split=True was set by _CREDIT_PAYMENT_KEYWORDS
+                    # matching "погашение кредита", but that flag conflicts with the
+                    # bank_mechanics decision — a resolved transfer has no split.
+                    # Without clearing it, isTransferOrDuplicate returns false and
+                    # the row lands in "Проверено" instead of "Переводы и дубли".
+                    nd["requires_credit_split"] = False
+                    nd["credit_account_id"] = None
+                    nd["credit_principal_amount"] = None
+                    nd["credit_interest_amount"] = None
+                    nd_changed = True
+                    # A transfer with both accounts resolved is valid — upgrade
+                    # 'warning' to 'ready' so it appears correctly in the UI.
+                    if str(row.status or "") == "warning" and not new_status:
+                        new_status = "ready"
+
+                if new_status or nd_changed:
+                    kwargs: dict[str, Any] = {}
+                    if new_status:
+                        kwargs["status"] = new_status
+                    if nd_changed:
+                        kwargs["normalized_data"] = nd
+                    self.import_repo.update_row(row, **kwargs)

@@ -1,0 +1,6 @@
+date;description;amount;direction;raw_type
+2026-04-11;Покупка в Магните;-540.00;expense;purchase
+2026-04-12;Перевод на накопительный счёт;-10000.00;expense;transfer
+2026-04-13;Такси Яндекс;-380.00;expense;purchase
+2026-04-14;Перевод на накопительный (повтор);-5000.00;expense;transfer
+2026-04-15;Аптека;-1200.00;expense;purchase

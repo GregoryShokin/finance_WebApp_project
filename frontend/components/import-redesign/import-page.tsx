@@ -13,7 +13,7 @@
  *   MappingModal       ── recovery flow for sessions with parse errors
  */
 
-import { useRef, useState } from 'react';
+import { useRef, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -34,6 +34,7 @@ import { ImportFabCluster } from './import-fab-cluster';
 import { QueuePanel } from './queue-panel';
 import { MappingModal } from './mapping-modal';
 import { useActiveImportSession } from './use-active-session';
+import { FlyToFabProvider } from './fly-to-fab-context';
 import { fmtRubAbs } from './format';
 
 export function ImportPage() {
@@ -69,6 +70,10 @@ export function ImportPage() {
       toast.success(`Импортировано: ${res.imported_count} операций`);
       await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
       await queryClient.invalidateQueries({ queryKey: ['imports', 'preview', res.session_id] });
+      // Committed rows are excluded from build_bulk_clusters — without this
+      // invalidation the ClusterGrid shows stale cards for committed rows.
+      await queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters', res.session_id] });
+      await queryClient.invalidateQueries({ queryKey: ['imports', 'moderation-status', res.session_id] });
     },
     onError: (e: Error) => toast.error(e.message || 'Не удалось импортировать'),
   });
@@ -99,8 +104,24 @@ export function ImportPage() {
 
   const totalRows = preview?.summary.total_rows ?? 0;
   const readyRows = preview?.summary.ready_rows ?? 0;
-  const reviewRows =
-    totalRows - readyRows - (preview?.summary.duplicate_rows ?? 0) - (preview?.summary.skipped_rows ?? 0);
+
+  // Count only rows that actually appear in the attention feed:
+  // warning status, not in any cluster, not a transfer/duplicate/parked/skipped.
+  const reviewRows = useMemo(() => {
+    if (!preview) return 0;
+    const inCluster = new Set<number>();
+    for (const fc of clusters?.fingerprint_clusters ?? []) {
+      for (const id of fc.row_ids) inCluster.add(id);
+    }
+    return preview.rows.filter((r) => {
+      if (r.status === 'ready' || r.status === 'committed' || r.status === 'duplicate') return false;
+      if (r.status === 'parked' || r.status === 'skipped') return false;
+      if (inCluster.has(r.id)) return false;
+      const nd = r.normalized_data as Record<string, unknown> | undefined;
+      if (nd?.transfer_match || nd?.operation_type === 'transfer') return false;
+      return true;
+    }).length;
+  }, [preview, clusters]);
 
   const queueOk = sessions.filter((s) => s.row_count > 0 && s.ready_count === s.row_count).length;
   const queueExc = sessions.filter((s) => s.auto_preview_status === 'failed' || s.status === 'failed').length;
@@ -129,6 +150,7 @@ export function ImportPage() {
   }
 
   return (
+    <FlyToFabProvider>
     <div className="relative flex-1 pb-32 lg:pr-24">
       <ImportActionsBar
         queuePillRef={queuePillRef}
@@ -182,6 +204,7 @@ export function ImportPage() {
           onClose={() => setQueueOpen(null)}
           onResume={(id) => setActive(id)}
           onOpenMapping={(id) => setMappingSessionId(id)}
+          activeSessionId={activeSessionId}
         />
       ) : null}
 
@@ -189,6 +212,7 @@ export function ImportPage() {
         <MappingModal sessionId={mappingSessionId} onClose={() => setMappingSessionId(null)} />
       ) : null}
     </div>
+    </FlyToFabProvider>
   );
 }
 

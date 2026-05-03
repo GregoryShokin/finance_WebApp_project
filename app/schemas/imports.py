@@ -27,6 +27,11 @@ class ImportRowStatus(str, Enum):
     # missing from this enum, which made every preview response containing
     # a parked row 500 with ResponseValidationError.
     parked = "parked"
+    # Excluded rows — auto-excluded by bank_mechanics (e.g. Яндекс Сплит /
+    # Озон кредитка phantom-mirror income rows) or manually by the user.
+    # Missing from this enum caused every preview containing an excluded row
+    # to 500 with ResponseValidationError.
+    excluded = "excluded"
 
 
 class ImportSourceType(str, Enum):
@@ -232,6 +237,7 @@ class ImportSessionListItem(BaseModel):
     updated_at: datetime
     row_count: int
     ready_count: int
+    warning_count: int = 0
     error_count: int
     # Mirrors session.summary_json["auto_preview"]["status"]:
     # pending | running | ready | failed | skipped | null (never attempted).

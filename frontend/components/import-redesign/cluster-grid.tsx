@@ -24,7 +24,7 @@ import {
   Clock,
   Loader2,
   Pencil,
-  Scissors,
+  Split,
   Trash2,
   X,
 } from 'lucide-react';
@@ -32,10 +32,12 @@ import { toast } from 'sonner';
 
 import { Chip } from '@/components/ui/status-chip';
 import { CategorySelect, CounterpartySelect } from '@/components/import/entity-selects';
-import { fmtRubSigned } from './format';
+import { fmtDateTime, fmtRubSigned } from './format';
 import { SplitModal } from './split-modal';
+import { SplitChip } from './split-chip';
 import { EditTxRazvorot } from './edit-tx-razvorot';
 import {
+  attachRowToCounterparty,
   bulkApplyCluster,
   detachImportRowFromCluster,
   excludeImportRow,
@@ -60,11 +62,53 @@ type CardData = {
   totalAmount: string;
   direction: 'income' | 'expense' | string;
   candidateCategoryId: number | null;
+  /** All distinct category IDs found across member rows (non-null). Used when
+   *  candidateCategoryId is null because rows have mixed categories — the card
+   *  then shows "Зарплата · +2" instead of "Категория не выбрана". */
+  uniqueCategoryIds: number[];
+  /** Dominant non-regular/non-refund operation type when ALL rows share one
+   *  (e.g. 'debt', 'transfer'). These rows have no category by design, so the
+   *  card should show the type label instead of "Выбери категорию". */
+  dominantOpType: string | null;
   candidateCounterpartyId: number | null;
   rowIds: number[];
   clusterKey: string;
   clusterType: 'fingerprint' | 'brand' | 'counterparty';
 };
+
+// Collect all distinct non-null category IDs across member rows.
+function uniqueCategoriesFrom(
+  rowIds: number[],
+  rowsById: Map<number, ImportPreviewRow>,
+): number[] {
+  const seen = new Set<number>();
+  for (const id of rowIds) {
+    const v = (rowsById.get(id)?.normalized_data as Record<string, unknown> | undefined)?.category_id;
+    if (v != null) {
+      const n = Number(v);
+      if (Number.isFinite(n)) seen.add(n);
+    }
+  }
+  return [...seen];
+}
+
+// If ALL member rows share the same non-regular/non-refund operation_type,
+// return it (e.g. 'debt', 'transfer'). These rows carry no category by design.
+function dominantNonCategoryOpType(
+  rowIds: number[],
+  rowsById: Map<number, ImportPreviewRow>,
+): string | null {
+  let found: string | null = null;
+  for (const id of rowIds) {
+    const op = String(
+      ((rowsById.get(id)?.normalized_data ?? {}) as Record<string, unknown>).operation_type ?? 'regular',
+    ).toLowerCase();
+    if (op === 'regular' || op === 'refund') return null; // has category rows — not a pure typed cluster
+    if (found === null) found = op;
+    else if (found !== op) return null; // mixed op types
+  }
+  return found;
+}
 
 // Per-row consensus across a card's member rows. Returns the unique non-null
 // value if all populated rows agree, otherwise null. Used when cluster-level
@@ -121,6 +165,8 @@ function buildCards(
       totalAmount: g.total_amount,
       direction: g.direction,
       candidateCategoryId: cat,
+      uniqueCategoryIds: uniqueCategoriesFrom(rowIds, rowsById),
+      dominantOpType: dominantNonCategoryOpType(rowIds, rowsById),
       candidateCounterpartyId: g.counterparty_id,
       rowIds,
       clusterKey: g.counterparty_name,
@@ -150,6 +196,8 @@ function buildCards(
       totalAmount: b.total_amount,
       direction: b.direction,
       candidateCategoryId: cat,
+      uniqueCategoryIds: uniqueCategoriesFrom(rowIds, rowsById),
+      dominantOpType: dominantNonCategoryOpType(rowIds, rowsById),
       candidateCounterpartyId: cp,
       rowIds,
       clusterKey: b.brand,
@@ -163,14 +211,21 @@ function buildCards(
     const cat =
       fc.candidate_category_id ?? consensusFrom(fc.row_ids, rowsById, 'category_id');
     const cp = consensusFrom(fc.row_ids, rowsById, 'counterparty_id');
+    const rawSkeleton = fc.skeleton || '(без шаблона)';
+    const label =
+      fc.identifier_key && fc.identifier_value
+        ? rawSkeleton.replace(`<${fc.identifier_key.toUpperCase()}>`, fc.identifier_value)
+        : rawSkeleton;
     cards.push({
       key: `fp-${fc.fingerprint}`,
       type: 'fingerprint',
-      label: fc.skeleton || '(без шаблона)',
+      label,
       count: fc.count,
       totalAmount: fc.total_amount,
       direction: fc.direction,
       candidateCategoryId: cat,
+      uniqueCategoryIds: uniqueCategoriesFrom(fc.row_ids, rowsById),
+      dominantOpType: dominantNonCategoryOpType(fc.row_ids, rowsById),
       candidateCounterpartyId: cp,
       rowIds: fc.row_ids,
       clusterKey: fc.fingerprint,
@@ -241,6 +296,7 @@ export function ClusterGrid({
             key={c.key}
             card={c}
             categoryName={c.candidateCategoryId != null ? categoryById.get(c.candidateCategoryId) ?? null : null}
+            categoryNames={c.uniqueCategoryIds.map((id) => categoryById.get(id) ?? null).filter((n): n is string => n !== null)}
             counterpartyName={
               // Counterparty-typed cards already use their own name as the
               // header label, so showing a duplicate chip is noise.
@@ -277,14 +333,27 @@ export function ClusterGrid({
 function ClusterCardCollapsed({
   card,
   categoryName,
+  categoryNames,
   counterpartyName,
   onClick,
 }: {
   card: CardData;
   categoryName: string | null;
+  /** Names of all distinct categories when rows have mixed categories. */
+  categoryNames: string[];
   counterpartyName: string | null;
   onClick: (origin: { x: number; y: number }) => void;
 }) {
+  // single consensus → violet; mixed → first + "+N" in neutral;
+  // no categories but typed op (debt/transfer/…) → op label; empty → prompt
+  const displayName = categoryName ?? (categoryNames.length === 1 ? categoryNames[0] : null);
+  const isMulti = !categoryName && categoryNames.length > 1;
+  const opLabel: string | null = (!displayName && !isMulti && card.dominantOpType)
+    ? ({ debt: 'Долг', transfer: 'Перевод', investment_buy: 'Инвестиция',
+         investment_sell: 'Инвестиция', credit_disbursement: 'Получение кредита',
+         credit_early_repayment: 'Досрочное погашение' } as Record<string, string>)[card.dominantOpType] ?? null
+    : null;
+
   return (
     <button
       type="button"
@@ -326,9 +395,18 @@ function ClusterCardCollapsed({
       ) : (
         <span aria-hidden className="hidden" />
       )}
-      <Chip tone={categoryName ? 'violet' : 'line'}>
-        {categoryName ?? 'Категория не выбрана'}
-      </Chip>
+      {isMulti ? (
+        <span className="flex items-center gap-1">
+          <Chip tone="line">{categoryNames[0]}</Chip>
+          <Chip tone="line">+{categoryNames.length - 1}</Chip>
+        </span>
+      ) : opLabel ? (
+        <Chip tone="blue">{opLabel}</Chip>
+      ) : (
+        <Chip tone={displayName ? 'violet' : 'line'}>
+          {displayName ?? 'Выбери категорию'}
+        </Chip>
+      )}
       <ChevronRight className="size-3.5 text-ink-3" />
     </button>
   );
@@ -444,6 +522,10 @@ function ClusterModal({
   // after bulk-apply showed empty bulk pickers even when every member row
   // carried the user-chosen value.
   const [bulkCategoryId, setBulkCategoryId] = useState<number | null>(card.candidateCategoryId);
+  // Track whether the user explicitly chose a category in THIS modal session.
+  // Auto-filled candidateCategoryId should NOT be applied on «Подтвердить» —
+  // only a user-chosen category (or one set via «Применить ко всем») should.
+  const [userPickedBulkCategory, setUserPickedBulkCategory] = useState(false);
   const [bulkCounterpartyId, setBulkCounterpartyId] = useState<number | null>(
     card.candidateCounterpartyId,
   );
@@ -479,6 +561,13 @@ function ClusterModal({
       const row = rowsById.get(id);
       if (!row) return false;
       const nd = (row.normalized_data ?? {}) as Record<string, unknown>;
+      // Individually confirmed rows (stamped by EditTxRazvorot or TxRow confirm)
+      // are already saved with the correct operation_type — exclude from bulk-apply
+      // so a subsequent «Подтвердить» click cannot overwrite them with 'regular'.
+      if (nd.user_confirmed_at) return false;
+      // Already-split rows are confirmed — bulk-apply must not overwrite them.
+      const splitItems = nd.split_items as unknown[] | null | undefined;
+      if (Array.isArray(splitItems) && splitItems.length >= 2) return false;
       const op = String(nd.operation_type ?? 'regular').toLowerCase();
       return op === 'regular' || op === 'refund' || !op;
     },
@@ -580,10 +669,54 @@ function ClusterModal({
   const totalProgress = checkedRowIds.length + preConfirmedCount;
 
   const handleApplyBulk = async () => {
+    // Force a fresh fetch so we always see the latest row states — including
+    // user_confirmed_at and operation_type saved moments ago via EditTxRazvorot.
+    // Without this, reading from React state (rowsById) or the cache may still
+    // show stale data if the component hasn't re-rendered after the last edit.
+    await queryClient.refetchQueries({
+      queryKey: ['imports', 'preview', sessionId],
+      type: 'active',
+    });
+    const freshPreview = queryClient.getQueryData<ImportPreviewResponse>(
+      ['imports', 'preview', sessionId],
+    );
+    const freshRowsById = new Map<number, ImportPreviewRow>();
+    if (freshPreview) {
+      for (const r of freshPreview.rows) freshRowsById.set(r.id, r);
+    }
+    const isFreshEligible = (id: number): boolean => {
+      const row = freshRowsById.get(id) ?? rowsById.get(id);
+      if (!row) return false;
+      const nd = (row.normalized_data ?? {}) as Record<string, unknown>;
+      if (nd.user_confirmed_at) return false;
+      const splitItems = nd.split_items as unknown[] | null | undefined;
+      if (Array.isArray(splitItems) && splitItems.length >= 2) return false;
+      const op = String(nd.operation_type ?? 'regular').toLowerCase();
+      return op === 'regular' || op === 'refund' || !op;
+    };
+    const freshCheckedIds = visibleRowIds.filter(
+      (id) => checks.get(id) !== false && isFreshEligible(id),
+    );
+    const freshPreConfirmed = visibleRowIds.filter((id) => !isFreshEligible(id)).length;
+
     // Two cases: (a) some regular rows are checked → run bulk-apply for them;
     // (b) only non-regular rows visible → they're already saved, just close.
-    if (checkedRowIds.length === 0) {
-      if (preConfirmedCount > 0) {
+    if (freshCheckedIds.length === 0) {
+      if (freshPreConfirmed > 0) {
+        // Non-eligible rows (debt, transfer, etc.) are already individually
+        // confirmed. If the user picked a cluster-level counterparty, create
+        // the CounterpartyFingerprint binding so these rows are grouped under
+        // the counterparty card in ClusterGrid (§6.3 — binding-level grouping
+        // is separate from row-level counterparty_id, which stays null for
+        // debt rows per §12.2 invariant).
+        if (bulkCounterpartyId) {
+          const nonEligibleIds = visibleRowIds.filter((id) => !isFreshEligible(id));
+          await Promise.allSettled(
+            nonEligibleIds.map((rowId) =>
+              attachRowToCounterparty(sessionId, rowId, bulkCounterpartyId),
+            ),
+          );
+        }
         invalidate();
         onClose();
         return;
@@ -591,32 +724,48 @@ function ClusterModal({
       toast.error('Нет выбранных строк');
       return;
     }
-    const missingCat = checkedRowIds.filter(
-      (row_id) => (perRowCat.get(row_id) ?? bulkCategoryId) == null,
-    );
+    // Use bulkCategoryId as fallback ONLY when the user explicitly chose it
+    // in this modal session. Auto-filled candidateCategoryId must not be forced
+    // onto rows when the user clicks «Подтвердить» without touching the header.
+    const effectiveBulkCat = userPickedBulkCategory ? bulkCategoryId : null;
+    const missingCat = freshCheckedIds.filter((row_id) => {
+      const rowFresh = freshRowsById.get(row_id) ?? rowsById.get(row_id);
+      const ndCat = ((rowFresh?.normalized_data ?? {}) as Record<string, unknown>).category_id as number | null | undefined;
+      return (perRowCat.get(row_id) ?? effectiveBulkCat ?? ndCat) == null;
+    });
     if (missingCat.length > 0) {
       toast.error(
-        missingCat.length === checkedRowIds.length
+        missingCat.length === freshCheckedIds.length
           ? 'Выбери категорию'
           : `У ${missingCat.length} строк нет категории`,
       );
       return;
     }
-    const updates: BulkClusterRowUpdate[] = checkedRowIds.map((row_id) => ({
-      row_id,
-      operation_type: 'regular',
-      category_id: perRowCat.get(row_id) ?? bulkCategoryId,
-      counterparty_id: bulkCounterpartyId,
-    }));
+    const updates: BulkClusterRowUpdate[] = freshCheckedIds.map((row_id) => {
+      const rowFresh = freshRowsById.get(row_id) ?? rowsById.get(row_id);
+      const rowNd = (rowFresh?.normalized_data ?? {}) as Record<string, unknown>;
+      const ndCat = rowNd.category_id as number | null | undefined;
+      // Preserve 'refund' operation_type for income rows that were already
+      // classified as refunds — bulk-apply must not overwrite them with 'regular'.
+      const existingOp = String(rowNd.operation_type ?? 'regular').toLowerCase();
+      return {
+        row_id,
+        operation_type: existingOp === 'refund' ? 'refund' : 'regular',
+        category_id: perRowCat.get(row_id) ?? effectiveBulkCat ?? ndCat ?? null,
+        counterparty_id: bulkCounterpartyId,
+      };
+    });
     try {
-      // Detach unchecked eligible rows so they leave the cluster. Non-regular
-      // rows (already saved) are NOT touched — their unchecked state is
-      // decorative.
       const unchecked = visibleRowIds.filter(
-        (id) => checks.get(id) === false && isBulkEligible(id),
+        (id) => checks.get(id) === false && isFreshEligible(id),
       );
-      for (const id of unchecked) {
-        await detachMut.mutateAsync(id);
+      // If ≥ 3 rows are unchecked, keep them in their fingerprint clusters
+      // so they appear as a separate cluster card for independent review.
+      // If < 3, detach them individually into the attention feed.
+      if (unchecked.length < 3) {
+        for (const id of unchecked) {
+          await detachMut.mutateAsync(id);
+        }
       }
       const resp = await bulkMut.mutateAsync({
         cluster_key: card.clusterKey,
@@ -686,7 +835,7 @@ function ClusterModal({
                   value={bulkCategoryId}
                   kind={direction === 'income' ? 'income' : 'expense'}
                   options={categoryOptions}
-                  onChange={setBulkCategoryId}
+                  onChange={(id) => { setBulkCategoryId(id); setUserPickedBulkCategory(true); }}
                 />
               </ControlField>
               <ControlField label="Контрагент (необязательно)">
@@ -709,6 +858,7 @@ function ClusterModal({
                     nextCat.set(id, bulkCategoryId);
                   }
                   setPerRowCat(nextCat);
+                  setUserPickedBulkCategory(true);
                   toast.success('Категория применена ко включённым строкам');
                 }}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-bg-surface px-3 py-2 text-xs font-medium text-ink transition hover:bg-bg-surface2 disabled:opacity-60"
@@ -735,15 +885,25 @@ function ClusterModal({
               </button>
             </div>
             <p className="mt-2 text-[11px] leading-4 text-ink-3">
-              Снятая галочка отрезает строку от кластера — она уйдёт в «Требуют твоего внимания».
-              Точечные правки категории (per-row) не перезаписываются кнопкой «Применить ко всем».
-              Карандаш — детальная правка типа операции и т.п. Действия справа: разделить · отложить · исключить.
+              Снятая галочка: при 1–2 строках — выводит их из кластера в «Требуют внимания»;
+              при 3+ строках — они образуют отдельный кластер для самостоятельного разбора.
+              Точечные правки категории не перезаписываются кнопкой «Применить ко всем».
+              Карандаш — детальная правка типа операции. Действия справа: разделить · отложить · исключить.
             </p>
           </div>
 
           {/* Rows */}
           <div className="overflow-auto">
-            {visibleRowIds.length === 0 ? (
+            {/* Loading guard: preview data hasn't arrived yet — rowsById is
+                empty while the React Query fetch is in flight. Show a spinner
+                instead of the misleading "Готово N/N" state that appears when
+                isBulkEligible returns false for every row (row not found). */}
+            {visibleRowIds.length > 0 && visibleRowIds.every((id) => !rowsById.has(id)) ? (
+              <div className="flex items-center justify-center gap-2 px-5 py-10 text-xs text-ink-3">
+                <Loader2 className="size-3.5 animate-spin" />
+                Загружаем строки…
+              </div>
+            ) : visibleRowIds.length === 0 ? (
               <div className="px-5 py-10 text-center text-xs text-ink-3">
                 Все строки обработаны.
               </div>
@@ -752,8 +912,11 @@ function ClusterModal({
               const row = rowsById.get(id);
               if (!row) return null;
               const checked = checks.get(id) !== false;
-              const perCat = perRowCat.get(id) ?? bulkCategoryId;
               const nd = (row.normalized_data ?? {}) as Record<string, unknown>;
+              // Fallback chain: user's per-row pick → bulk header → already-saved
+              // nd.category_id (set e.g. via pencil editor before bulk-apply).
+              const ndCatId = nd.category_id as number | null | undefined;
+              const perCat = perRowCat.get(id) ?? bulkCategoryId ?? ndCatId ?? null;
               const date = (nd.date as string) || (row.raw_data?.date as string) || '';
               const desc = (nd.description as string) || (row.raw_data?.description as string) || '';
               const amount = (nd.amount as string | number | null) ?? row.raw_data?.amount ?? null;
@@ -763,6 +926,8 @@ function ClusterModal({
                 | string;
               const rowOp = String(nd.operation_type ?? 'regular').toLowerCase();
               const isRefund = rowOp === 'refund';
+              const splitItems = nd.split_items as import('@/types/import').ImportSplitItem[] | null | undefined;
+              const isSplit = Array.isArray(splitItems) && splitItems.length >= 2;
               const typeBadge = rowTypeBadge(nd);
               // Checkbox remains operable for all rows — bulk-apply silently
               // filters out non-regular/refund rows via isBulkEligible so
@@ -792,10 +957,16 @@ function ClusterModal({
                       ) : null}
                     </div>
                     <div className="mt-0.5 font-mono text-[10.5px] text-ink-3">
-                      #{row.row_index} · {date} · {fmtRubSigned(amount as number | string | null | undefined, rowDir)}
+                      {fmtDateTime(date)} · {fmtRubSigned(amount as number | string | null | undefined, rowDir)}
                     </div>
                   </div>
-                  {typeBadge ? (
+                  {isSplit ? (
+                    <SplitChip
+                      parts={splitItems!}
+                      categoriesById={categoryById}
+                      counterpartiesById={counterpartyById}
+                    />
+                  ) : typeBadge ? (
                     <div className="flex flex-wrap items-center gap-1.5">
                       <Chip tone={typeBadge.tone}>{typeBadge.type}</Chip>
                       {typeBadge.direction ? (
@@ -848,7 +1019,10 @@ function ClusterModal({
               row={splitFor.row}
               origin={splitFor.origin}
               options={{ categories: categoryOptions }}
-              onSuccess={() => closeOnEmpty(splitFor.row.id)}
+              // After split the row stays in the cluster with a split badge.
+              // Do NOT call closeOnEmpty — the row should remain visible so
+              // the user can see the result and confirm or adjust.
+              onSuccess={() => { setSplitFor(null); invalidate(); }}
               onClose={() => setSplitFor(null)}
             />,
             document.body,
@@ -895,8 +1069,11 @@ function RowActions({
   onPark: () => void;
   onExclude: () => void;
 }) {
-  const btn =
-    'grid size-7 place-items-center rounded-md border border-line bg-bg-surface text-ink-3 transition hover:border-ink-3 hover:bg-bg-surface2 hover:text-ink disabled:opacity-50 disabled:cursor-not-allowed';
+  const btnBase = 'grid size-7 place-items-center rounded-md border transition disabled:opacity-50 disabled:cursor-not-allowed';
+  const btnNeutral = `${btnBase} border-line bg-bg-surface text-ink-3 hover:border-ink-3 hover:bg-bg-surface2 hover:text-ink`;
+  const btnAmber  = `${btnBase} border-accent-amber/40 bg-accent-amber-soft text-accent-amber hover:bg-accent-amber/20`;
+  const btnRed    = `${btnBase} border-accent-red/40 bg-accent-red-soft text-accent-red hover:bg-accent-red/20`;
+
   return (
     <div className="flex shrink-0 items-center gap-1">
       <button
@@ -905,7 +1082,7 @@ function RowActions({
         aria-label="Редактировать"
         disabled={disabled}
         onClick={onEdit}
-        className={btn}
+        className={btnNeutral}
       >
         <Pencil className="size-3.5" />
       </button>
@@ -915,9 +1092,9 @@ function RowActions({
         aria-label="Разделить"
         disabled={disabled}
         onClick={onSplit}
-        className={btn}
+        className={btnNeutral}
       >
-        <Scissors className="size-3.5" />
+        <Split className="size-3.5" />
       </button>
       <button
         type="button"
@@ -925,7 +1102,7 @@ function RowActions({
         aria-label="Отложить"
         disabled={disabled}
         onClick={onPark}
-        className={btn}
+        className={btnAmber}
       >
         <Clock className="size-3.5" />
       </button>
@@ -935,7 +1112,7 @@ function RowActions({
         aria-label="Исключить"
         disabled={disabled}
         onClick={onExclude}
-        className={btn + ' hover:border-accent-red hover:text-accent-red'}
+        className={btnRed}
       >
         <Trash2 className="size-3.5" />
       </button>

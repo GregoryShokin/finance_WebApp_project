@@ -49,14 +49,17 @@ export function AttentionFeed({
   const singles = useMemo<ImportPreviewRow[]>(() => {
     if (!preview) return [];
     return preview.rows.filter((r) => {
+      // Ready rows belong to the «Проверено» FAB bucket, not the attention feed.
+      // Showing them here too causes double-display and reappearance after refresh.
+      if (r.status === 'ready') return false;
       if (r.status === 'committed' || r.status === 'duplicate') return false;
       // Parked / excluded rows live in their own FAB buckets.
       if (r.status === 'parked' || r.status === 'skipped') return false;
       if (inClusterRowIds.has(r.id)) return false;
-      // Both matched pairs (transfer_match_meta) and recognition-only
+      // Both matched pairs (transfer_match) and recognition-only
       // transfers (operation_type='transfer') belong to «Переводы и дубли».
       const nd = r.normalized_data as Record<string, unknown> | undefined;
-      if (nd?.transfer_match_meta) return false;
+      if (nd?.transfer_match) return false;
       if (nd?.operation_type === 'transfer') return false;
       return true;
     });
@@ -125,6 +128,7 @@ export function AttentionFeed({
           <TxRow
             key={row.id}
             row={row}
+            sessionId={sessionId}
             options={opts}
             onEditDeep={(origin) => setEditingRow({ row, origin })}
             onSplitOpen={(origin) => setSplittingRow({ row, origin })}

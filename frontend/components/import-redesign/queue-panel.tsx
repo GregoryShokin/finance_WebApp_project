@@ -19,6 +19,7 @@ import { Chip } from '@/components/ui/status-chip';
 import { AccountDialog } from '@/components/accounts/account-dialog';
 import {
   assignSessionAccount,
+  commitImport,
   deleteImportSession,
   getBulkClusters,
   getImportPreview,
@@ -41,9 +42,14 @@ type QueueStatus =
 function classifySession(s: ImportSessionListItem): QueueStatus {
   if (s.auto_preview_status === 'pending' || s.auto_preview_status === 'running') return 'parsing';
   if (s.auto_preview_status === 'failed' || s.status === 'failed') return 'error';
-  if (s.status === 'committed') return 'done_local'; // edge case: shouldn't appear
-  if (s.row_count > 0 && s.ready_count === s.row_count) return 'done_local';
-  if (s.ready_count > 0) return 'progress';
+  if (s.status === 'committed') return 'done_local';
+  // All rows decided (no unresolved warnings) → ready to commit.
+  // This includes sessions where only auto-matched transfers exist (warning_count=0).
+  if (s.row_count > 0 && s.warning_count === 0 && s.error_count === 0) return 'done_local';
+  // User has manually confirmed at least one row AND there are still unresolved
+  // warnings. Auto-preview can produce ready rows without any user interaction —
+  // in that case user_touched_rows === 0 and we stay in 'ready' ("Начать разбор").
+  if (s.ready_count > 0 && s.warning_count > 0 && (s.user_touched_rows ?? 0) > 0) return 'progress';
   return 'ready';
 }
 
@@ -93,11 +99,13 @@ export function QueuePanel({
   onClose,
   onResume,
   onOpenMapping,
+  activeSessionId,
 }: {
   origin: { x: number; y: number };
   onClose: () => void;
   onResume: (sessionId: number) => void;
   onOpenMapping: (sessionId: number) => void;
+  activeSessionId?: number | null;
 }) {
   const queryClient = useQueryClient();
   const sessionsQuery = useQuery({
@@ -131,6 +139,16 @@ export function QueuePanel({
       toast.success('Выписка удалена из очереди');
     },
     onError: (e: Error) => toast.error(e.message || 'Не удалось удалить'),
+  });
+
+  const commitMut = useMutation({
+    mutationFn: (sessionId: number) => commitImport(sessionId, true),
+    onSuccess: (res) => {
+      toast.success(`Импортировано: ${res.imported_count} операций`);
+      queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось импортировать'),
   });
 
   const summaryParts: string[] = [];
@@ -206,6 +224,7 @@ export function QueuePanel({
                   classified={classified}
                   accounts={accounts}
                   isOpen={isOpen}
+                  isActive={s.id === activeSessionId}
                   onToggle={() => setOpenId(isOpen ? null : s.id)}
                   onResume={() => {
                     onResume(s.id);
@@ -215,6 +234,8 @@ export function QueuePanel({
                     onOpenMapping(s.id);
                     onClose();
                   }}
+                  onCommit={() => commitMut.mutate(s.id)}
+                  committing={commitMut.isPending}
                   onDelete={() => deleteMut.mutate(s.id)}
                   deleting={deleteMut.isPending}
                 />
@@ -236,9 +257,12 @@ function QueueRow({
   classified,
   accounts,
   isOpen,
+  isActive,
   onToggle,
   onResume,
   onOpenMapping,
+  onCommit,
+  committing,
   onDelete,
   deleting,
 }: {
@@ -246,9 +270,12 @@ function QueueRow({
   classified: QueueStatus;
   accounts: Account[];
   isOpen: boolean;
+  isActive?: boolean;
   onToggle: () => void;
   onResume: () => void;
   onOpenMapping: () => void;
+  onCommit: () => void;
+  committing: boolean;
   onDelete: () => void;
   deleting: boolean;
 }) {
@@ -305,14 +332,45 @@ function QueueRow({
               Открыть
             </button>
           ) : classified === 'done_local' ? (
-            <button
-              type="button"
-              onClick={onResume}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-accent-green px-3.5 py-1.5 text-xs font-medium text-white transition hover:opacity-90"
-            >
-              <Check className="size-3" />
-              Импортировать
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onResume}
+                className="rounded-lg border border-line bg-bg-surface px-3 py-1.5 text-xs text-ink-2 transition hover:bg-bg-surface2"
+              >
+                Открыть
+              </button>
+              <button
+                type="button"
+                onClick={onCommit}
+                disabled={committing}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-accent-green px-3.5 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-60"
+              >
+                {committing ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />}
+                Импортировать
+              </button>
+            </div>
+          ) : classified === 'progress' ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onResume}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-ink-2"
+              >
+                <ArrowRight className="size-3" />
+                Продолжить
+              </button>
+              <button
+                type="button"
+                onClick={onCommit}
+                disabled={committing}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-accent-green px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90 disabled:opacity-60"
+                title="Импортировать уже готовые строки"
+              >
+                {committing ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />}
+                Готово
+              </button>
+            </div>
           ) : (
             <button
               type="button"
@@ -320,7 +378,7 @@ function QueueRow({
               className="inline-flex items-center gap-1.5 rounded-lg bg-ink px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-ink-2"
             >
               <ArrowRight className="size-3" />
-              {classified === 'progress' ? 'Продолжить разбор' : 'Начать разбор'}
+              {isActive ? 'Открыть' : 'Начать разбор'}
             </button>
           )}
         </div>

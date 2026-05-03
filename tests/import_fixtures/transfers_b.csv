@@ -1,0 +1,4 @@
+date;description;amount;direction;raw_type
+2026-04-12;Поступление перевода с основного;10000.00;income;transfer
+2026-04-14;Поступление перевода с основного;5000.00;income;transfer
+2026-04-16;Проценты на остаток;120.50;income;purchase

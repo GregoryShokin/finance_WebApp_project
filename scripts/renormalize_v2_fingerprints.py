@@ -1,13 +1,19 @@
-"""One-shot: re-run v2 normalization over existing ImportRow.normalized_data_json
-so rows written before `transfer_identifier` was wired into `fingerprint()`
-pick up identifier-aware hashes.
+"""One-shot: re-run v2 fingerprint computation over existing
+ImportRow.normalized_data_json so rows written before `transfer_identifier`
+was wired into `fingerprint()` pick up identifier-aware hashes.
 
 Context: rows in sessions created before the transfer-aware fingerprint code
 landed carry a single shared fingerprint for every "Внешний перевод по номеру
 телефона" row, regardless of which phone it actually was. The row-level
 tokens are fine — only the fingerprint field is stale. This script re-runs
-`_apply_v2_normalization` on each row, replacing the stored fingerprint with
-the identifier-aware one while leaving everything else untouched.
+the v2 derivation on each row, replacing the stored fingerprint with the
+identifier-aware one while leaving everything else untouched.
+
+Why we don't call import_normalization.normalize() directly: that function
+needs a raw_row + field_mapping pair (the original CSV row), which we don't
+keep on persisted ImportRow. Instead we recompute fingerprint from data
+already present on the row (description + direction + bank + account_id),
+which is exactly enough — fingerprint is a pure function of those inputs.
 
 Usage:
     docker compose exec api python -m scripts.renormalize_v2_fingerprints           # dry-run
@@ -20,10 +26,18 @@ import argparse
 from collections import Counter
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from app.core.db import SessionLocal
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
-from app.services.import_service import ImportService
+from app.services.import_normalizer_v2 import (
+    extract_tokens,
+    fingerprint as compute_fingerprint,
+    is_transfer_like,
+    normalize_skeleton,
+    pick_transfer_identifier,
+)
 
 
 # Rows in these statuses already turned into Transactions — we must not mutate
@@ -36,8 +50,82 @@ SKIPPED_ROW_STATUSES = frozenset({"committed"})
 LIVE_SESSION_STATUSES = frozenset({"uploaded", "analyzed", "preview_ready"})
 
 
-def run(*, execute: bool, session_filter: int | None) -> None:
-    with SessionLocal() as db:
+def _recompute_v2_payload(
+    *,
+    existing: dict[str, Any],
+    session: ImportSession,
+    fallback_account_id: int | None,
+    bank_code_override: str | None,
+) -> dict[str, Any]:
+    """Return a copy of `existing` with `fingerprint` (and skeleton/tokens
+    if missing) recomputed using the current v2 logic.
+
+    Mirrors `app.services.import_normalization._derive` for the fingerprint
+    inputs, but reads them from the persisted normalized_data_json so we
+    don't need the original raw row.
+    """
+    payload = dict(existing)
+    description = str(payload.get("description") or "")
+    direction = str(payload.get("direction") or "expense")
+
+    # Re-derive tokens + skeleton from description. We never trust persisted
+    # tokens for fingerprint inputs — the whole point of the migration is
+    # that the old derivation was incomplete. Rebuilding from `description`
+    # gives the canonical current view.
+    tokens = extract_tokens(description)
+    skeleton = normalize_skeleton(description, tokens)
+
+    bank = (
+        bank_code_override
+        or payload.get("bank_code")
+        or (session.mapping_json or {}).get("bank_code")
+        or "unknown"
+    )
+    account_id = (
+        session.account_id
+        or fallback_account_id
+        or 0
+    )
+
+    transfer_identifier = (
+        pick_transfer_identifier(tokens) if is_transfer_like(description) else None
+    )
+
+    new_fp = compute_fingerprint(
+        bank,
+        int(account_id),
+        direction,
+        skeleton,
+        tokens.contract,
+        transfer_identifier=transfer_identifier,
+    )
+
+    payload["fingerprint"] = new_fp
+    # Refresh skeleton too — a stale skeleton means any rule lookup keyed
+    # on it would also be off. Tokens themselves are deliberately left as
+    # the persisted dict shape (TokensV2) — the fingerprint already
+    # incorporates the freshly extracted values, so we don't need to
+    # rewrite the tokens slice on every legacy row.
+    payload["skeleton"] = skeleton
+    return payload
+
+
+def run(
+    *,
+    execute: bool,
+    session_filter: int | None,
+    db: Session | None = None,
+) -> None:
+    """Re-derive v2 fingerprints for live ImportRows.
+
+    `db` is optional for testability — when None, the script opens a
+    SessionLocal() bound to the configured Postgres DSN. Tests can pass an
+    in-memory SQLAlchemy session directly.
+    """
+    own_session = db is None
+    if own_session:
+        db = SessionLocal()
+    try:
         q = db.query(ImportSession)
         if session_filter is not None:
             q = q.filter(ImportSession.id == session_filter)
@@ -68,11 +156,10 @@ def run(*, execute: bool, session_filter: int | None) -> None:
                     s_skipped += 1
                     continue
                 old_fp = existing.get("fingerprint")
-                result = ImportService._apply_v2_normalization(
-                    normalized=existing,
+                result = _recompute_v2_payload(
+                    existing=existing,
                     session=session,
                     fallback_account_id=session.account_id,
-                    row_index=row.row_index,
                     bank_code_override=(session.mapping_json or {}).get("bank_code"),
                 )
                 new_fp = result.get("fingerprint")
@@ -109,9 +196,8 @@ def run(*, execute: bool, session_filter: int | None) -> None:
 
         # Distribution of how many unique new fingerprints the changed rows split
         # into — gives a quick "did we actually diversify?" signal per session.
-        print("Fingerprint diversity check (new unique fps per session among changed rows):")
+        print("Fingerprint diversity check (new unique fps per session among v2 rows):")
         by_session_new_fps: dict[int, Counter] = {}
-        # Re-walk only to compute diversity cheaply; tiny cost vs. the main pass.
         for session in sessions:
             rows = db.query(ImportRow).filter(ImportRow.session_id == session.id).all()
             c: Counter = Counter()
@@ -121,11 +207,10 @@ def run(*, execute: bool, session_filter: int | None) -> None:
                 existing = dict(row.normalized_data_json or {})
                 if existing.get("normalizer_version") != 2:
                     continue
-                result = ImportService._apply_v2_normalization(
-                    normalized=existing,
+                result = _recompute_v2_payload(
+                    existing=existing,
                     session=session,
                     fallback_account_id=session.account_id,
-                    row_index=row.row_index,
                     bank_code_override=(session.mapping_json or {}).get("bank_code"),
                 )
                 c[result.get("fingerprint")] += 1
@@ -137,6 +222,9 @@ def run(*, execute: bool, session_filter: int | None) -> None:
             print("\nCOMMITTED.")
         else:
             print("\nDry-run. Re-run with --execute to persist.")
+    finally:
+        if own_session:
+            db.close()
 
 
 if __name__ == "__main__":

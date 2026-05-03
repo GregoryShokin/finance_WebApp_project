@@ -11,12 +11,14 @@ export function formatMoney(value: number | string, currency = 'RUB') {
 
 export function formatDateTime(value: string | Date) {
   const date = value instanceof Date ? value : new Date(value);
-
-  return new Intl.DateTimeFormat('ru-RU', {
+  const datePart = new Intl.DateTimeFormat('ru-RU', {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
+  }).format(date);
+  const timePart = new Intl.DateTimeFormat('ru-RU', {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
+  return `${datePart} | ${timePart}`;
 }

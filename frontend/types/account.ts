@@ -1,11 +1,13 @@
 export type AccountType =
   | 'main'             // обычный дебетовый
+  | 'cash'             // наличный счёт (без банка)
   | 'marketplace'      // маркетплейсовый кошелёк
   | 'loan'             // потребительский кредит
   | 'credit_card'      // кредитная карта
   | 'installment_card' // карта рассрочки
   | 'broker'           // брокерский счёт
-  | 'savings'          // вклад / накопительный
+  | 'savings'          // вклад (срочный, с датами и капитализацией)
+  | 'savings_account'  // накопительный счёт (бессрочный, только ставка)
   | 'currency';        // валютный счёт
 
 export type Bank = {
@@ -51,7 +53,7 @@ export type CreateAccountPayload = {
   is_active: boolean;
   account_type: AccountType;
   is_credit: boolean;
-  bank_id: number;
+  bank_id?: number | null;
   credit_limit_original?: number | null;
   credit_current_amount?: number | null;
   credit_interest_rate?: number | null;

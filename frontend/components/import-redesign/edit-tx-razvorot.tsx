@@ -29,7 +29,7 @@ import {
   DebtPartnerSelect,
 } from '@/components/import/entity-selects';
 import { CreatableSelect, type CreatableOption } from '@/components/ui/creatable-select';
-import { fmtRubSigned } from './format';
+import { fmtDateTime, fmtRubSigned } from './format';
 import {
   TYPE_OPTIONS,
   CREDIT_KIND_OPTIONS,
@@ -183,11 +183,18 @@ export function EditTxRazvorot({
   // ── Save ───────────────────────────────────────────────────────────────
   const saveMut = useMutation({
     mutationFn: (payload: ImportRowUpdatePayload) => updateImportRow(row.id, payload),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success('Сохранено');
-      queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
-      queryClient.invalidateQueries({ queryKey: ['imports', 'moderation-status'] });
-      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+      // Await all refetches so that any parent cluster modal's rowsById is
+      // fresh before onClose() fires. Without await the parent sees stale
+      // normalized_data (user_confirmed_at absent, op_type='regular') and
+      // isBulkEligible incorrectly includes this row in the next bulk-apply,
+      // overwriting the just-saved debt/transfer type with 'regular'.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] }),
+        queryClient.invalidateQueries({ queryKey: ['imports', 'moderation-status'] }),
+        queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] }),
+      ]);
       onSuccess?.();
       onClose();
     },
@@ -295,7 +302,7 @@ export function EditTxRazvorot({
                 {(nd.description as string) || (row.raw_data?.description as string) || '(без описания)'}
               </div>
               <div className="mt-1 font-mono text-[11px] text-ink-3">
-                #{row.row_index} · {date} · {fmtRubSigned(totalAmount, direction)}
+                #{row.row_index} · {fmtDateTime(date)} · {fmtRubSigned(totalAmount, direction)}
               </div>
             </div>
             <button

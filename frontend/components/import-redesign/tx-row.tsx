@@ -10,8 +10,9 @@
  * type ("Долг"/"Перевод"/etc) to backend `operation_type`.
  */
 
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useAnimate } from 'framer-motion';
 import { Pencil, Split } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -24,7 +25,7 @@ import {
   DebtPartnerSelect,
 } from '@/components/import/entity-selects';
 import { CounterpartyRazvorotButton } from './counterparty-razvorot-button';
-import { fmtRubSigned } from './format';
+import { fmtDateTime, fmtRubSigned } from './format';
 import {
   TYPE_OPTIONS,
   type MainType,
@@ -40,9 +41,10 @@ import {
   investmentDirFor,
   investmentDirToOperationType,
 } from './option-sets';
-import { excludeImportRow, parkImportRow, updateImportRow } from '@/lib/api/imports';
+import { attachRowToCounterparty, excludeImportRow, parkImportRow, updateImportRow } from '@/lib/api/imports';
 import type { Account } from '@/types/account';
 import type { ImportPreviewRow, ImportRowUpdatePayload } from '@/types/import';
+import { useFlyToFab, type FlyBucket } from './fly-to-fab-context';
 
 function detectInitialType(row: ImportPreviewRow): MainType {
   const nd = row.normalized_data as Record<string, unknown>;
@@ -67,16 +69,38 @@ type TxRowOptions = {
 
 export function TxRow({
   row,
+  sessionId,
   options,
   onEditDeep,
   onSplitOpen,
 }: {
   row: ImportPreviewRow;
+  sessionId: number;
   options: TxRowOptions;
   onEditDeep: (origin: { x: number; y: number }) => void;
   onSplitOpen: (origin: { x: number; y: number }) => void;
 }) {
   const queryClient = useQueryClient();
+  const flyCtx = useFlyToFab();
+  const [rowScope, rowAnimate] = useAnimate<HTMLElement>();
+  const leavingRef = useRef(false);
+
+  const triggerFly = useCallback((bucket: FlyBucket) => {
+    if (leavingRef.current) return;
+    leavingRef.current = true;
+    const el = rowScope.current;
+    if (el && flyCtx) flyCtx.flyTo(el, bucket);
+    // Two-stage collapse: fade out first, then crush height.
+    const h = el?.getBoundingClientRect().height ?? 0;
+    if (el) {
+      el.style.overflow = 'hidden';
+      el.style.height = `${h}px`;
+    }
+    void rowAnimate(el, { opacity: 0 }, { duration: 0.1 }).then(() =>
+      rowAnimate(el, { height: 0, paddingTop: 0, paddingBottom: 0 }, { duration: 0.28, ease: [0.4, 0, 0.2, 1] }),
+    );
+  }, [flyCtx, rowScope, rowAnimate]);
+
   const nd = (row.normalized_data ?? {}) as Record<string, unknown>;
 
   const [type, setType] = useState<MainType>(detectInitialType(row));
@@ -103,7 +127,7 @@ export function TxRow({
     (nd.account_hint as string) ||
     null;
 
-  const hint = nd.transfer_match_meta || nd.refund_match;
+  const hint = nd.transfer_match || nd.refund_match;
   const aiQuestion =
     (nd.hypothesis as { follow_up_question?: string | null } | undefined)?.follow_up_question ?? null;
 
@@ -119,11 +143,24 @@ export function TxRow({
   );
 
   // ── Mutations ────────────────────────────────────────────────────────────
+
+  // Immediately creates a CounterpartyFingerprint binding when the user picks
+  // a counterparty — this is what moves the row from AttentionFeed into the
+  // counterparty group card in ClusterGrid. Selecting a counterparty is
+  // treated as a standalone action, not gated on the full confirm flow.
+  const attachMut = useMutation({
+    mutationFn: (cpId: number) => attachRowToCounterparty(sessionId, row.id, cpId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+    },
+  });
+
   const patchMut = useMutation({
     mutationFn: (payload: ImportRowUpdatePayload) => updateImportRow(row.id, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
       queryClient.invalidateQueries({ queryKey: ['imports', 'moderation-status'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
     },
     onError: (e: Error) => toast.error(e.message || 'Не удалось сохранить'),
   });
@@ -145,6 +182,26 @@ export function TxRow({
   });
 
   const handleConfirm = () => {
+    // Validate required fields before triggering animation — if validation fails
+    // the row must NOT fly away (it stays visible for the user to fix).
+    if ((type === 'regular' || type === 'refund') && !categoryId) {
+      toast.error('Сначала выбери категорию');
+      return;
+    }
+    if (type === 'debt' && (!debtPartnerId || !debtDirection)) {
+      toast.error('Заполни направление и партнёра по долгу');
+      return;
+    }
+    if (type === 'transfer' && !transferAccountId) {
+      toast.error('Выбери счёт для перевода');
+      return;
+    }
+    if (type === 'credit_operation' && (!creditKind || !creditAccountId)) {
+      toast.error('Заполни тип и счёт кредитной операции');
+      return;
+    }
+
+    triggerFly('done');
     const payload: ImportRowUpdatePayload = { action: 'confirm' };
     if (type === 'debt') {
       payload.operation_type = 'debt';
@@ -186,20 +243,17 @@ export function TxRow({
   const cpDisabled = type === 'debt' || type === 'transfer' || type === 'investment' || type === 'credit_operation';
 
   return (
-    <article className="border-t border-line bg-bg-surface px-4 py-3.5 first:border-t-0 lg:px-5">
+    <article ref={rowScope} className="border-t border-line bg-bg-surface px-4 py-3.5 first:border-t-0 lg:px-5">
       {/* Top row: date + merchant + amount + status */}
       <div className="flex items-start justify-between gap-2.5">
         <div className="flex min-w-0 items-start gap-3">
-          <span className="mt-0.5 min-w-[34px] font-mono text-[11px] text-ink-3">{date}</span>
+          <span className="mt-0.5 shrink-0 font-mono text-[11px] text-ink-3">{fmtDateTime(date)}</span>
           <div className="min-w-0">
             <div className="text-[13px] font-medium text-ink">
               <span className="break-words">{description || '(без описания)'}</span>
               {cardLast4 ? (
                 <span className="font-normal text-ink-3"> · карта {cardLast4}</span>
               ) : null}
-            </div>
-            <div className="mt-0.5 font-mono text-[10.5px] text-ink-3">
-              id ····{String(row.id).slice(-4)}
             </div>
           </div>
         </div>
@@ -315,7 +369,7 @@ export function TxRow({
           <CounterpartyRazvorotButton
             value={counterpartyId}
             options={options.counterparties}
-            onChange={setCounterpartyId}
+            onChange={(id) => { setCounterpartyId(id); attachMut.mutate(id); }}
             disabled={cpDisabled}
             compact
           />
@@ -347,12 +401,12 @@ export function TxRow({
 
           <TrafficBtn
             kind="excl"
-            onClick={() => exclMut.mutate()}
+            onClick={() => { triggerFly('excl'); exclMut.mutate(); }}
             title="Исключить из импорта"
           />
           <TrafficBtn
             kind="snooze"
-            onClick={() => parkMut.mutate()}
+            onClick={() => { triggerFly('snz'); parkMut.mutate(); }}
             title="Отложить на потом"
           />
           <TrafficBtn

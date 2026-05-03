@@ -113,6 +113,7 @@ class TransactionResponse(BaseModel):
     target_account_id: int | None
     credit_account_id: int | None
     transfer_pair_id: int | None = None
+    refund_for_transaction_id: int | None = None
     goal_id: int | None = None
     category_id: int | None
     counterparty_id: int | None

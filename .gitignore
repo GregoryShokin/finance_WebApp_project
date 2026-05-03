@@ -85,3 +85,9 @@ financeapp-vault/.obsidian/workspace.json
 
 # --- Import fixtures: raw statements stay local (contain PII) ---
 tests/fixtures/statements/raw/
+
+# --- Real bank statements (PII): stay local only ---
+Bank-extracts/
+
+# --- Claude Code local worktrees ---
+.claude/worktrees/

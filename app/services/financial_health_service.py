@@ -531,7 +531,7 @@ class FinancialHealthService:
             if len(consecutive) < 2:
                 continue
 
-            fulfillments = [row[3] for row in consecutive]
+            fulfillments = [Decimal(str(row[3])) for row in consecutive]
             first_value = fulfillments[0]
             last_value = fulfillments[-1]
             if direction.startswith("income"):
@@ -541,7 +541,7 @@ class FinancialHealthService:
                     trend = "worsening"
                 else:
                     trend = "stable"
-                severity = max(0.0, 95 - average(fulfillments)) * len(consecutive)
+                severity = max(0.0, 95 - self._average(fulfillments)) * len(consecutive)
             else:
                 if last_value < first_value - 5:
                     trend = "improving"
@@ -549,7 +549,7 @@ class FinancialHealthService:
                     trend = "worsening"
                 else:
                     trend = "stable"
-                severity = max(0.0, average(fulfillments) - 100) * len(consecutive)
+                severity = max(0.0, self._average(fulfillments) - 100) * len(consecutive)
 
             last_planned = consecutive[-1][1]
             last_actual = consecutive[-1][2]
@@ -561,7 +561,7 @@ class FinancialHealthService:
                     direction=direction,
                     direction_label=HEATMAP_DIRECTION_LABELS[direction],
                     months_count=len(consecutive),
-                    avg_fulfillment=round(average(fulfillments), 2),
+                    avg_fulfillment=round(self._average(fulfillments), 2),
                     trend=trend,
                     last_planned=float(last_planned),
                     last_actual=float(last_actual),

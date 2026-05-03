@@ -173,6 +173,13 @@ export function unexcludeImportRow(rowId: number) {
   );
 }
 
+export function unpairImportRow(rowId: number) {
+  return apiClient<{ session_id: number; row_id: number; status: string; summary: Record<string, number> }>(
+    `/imports/rows/${rowId}/unpair`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
 export function detachImportRowFromCluster(rowId: number) {
   return apiClient<{ session_id: number; row_id: number; status: string; summary: Record<string, number> }>(
     `/imports/rows/${rowId}/detach-from-cluster`,

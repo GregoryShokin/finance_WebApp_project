@@ -78,8 +78,17 @@ class AccountService:
             if "balance" in data and data.get("balance") is not None:
                 data["balance"] = Decimal(str(data["balance"]))
             data.update(_no_credit)
+        elif account_type == "savings_account":
+            # Накопительный счёт: бессрочный, только ставка — без дат и капитализации
+            data["is_credit"] = False
+            if "balance" in data and data.get("balance") is not None:
+                data["balance"] = Decimal(str(data["balance"]))
+            data.update(_no_credit)
+            data["deposit_open_date"] = None
+            data["deposit_close_date"] = None
+            data["deposit_capitalization_period"] = None
         else:
-            # main, marketplace, broker, currency — no credit or deposit params
+            # main, cash, marketplace, broker, currency — no credit or deposit params
             data["is_credit"] = False
             if "balance" in data and data.get("balance") is not None:
                 data["balance"] = Decimal(str(data["balance"]))
@@ -88,8 +97,18 @@ class AccountService:
 
         return data
 
+    def _resolve_bank_id(self, bank_id: int | None, account_type: str | None) -> int:
+        if account_type == "cash":
+            if bank_id:
+                return bank_id
+            unknown = self.bank_repo.get_by_code("unknown")
+            if unknown is None:
+                raise BankRequiredError("Банк-заглушка 'unknown' не найден в базе. Обратитесь к администратору.")
+            return unknown.id
+        return self._require_bank(bank_id)
+
     def create(self, **kwargs) -> Account:
-        kwargs["bank_id"] = self._require_bank(kwargs.get("bank_id"))
+        kwargs["bank_id"] = self._resolve_bank_id(kwargs.get("bank_id"), kwargs.get("account_type"))
         return self.repo.create(**self._normalize_credit_payload(kwargs))
 
     def list(self, *, user_id: int) -> list[Account]:
@@ -105,9 +124,11 @@ class AccountService:
         return account
 
     def update(self, *, account_id: int, user_id: int, **kwargs) -> Account:
-        if "bank_id" in kwargs:
-            kwargs["bank_id"] = self._require_bank(kwargs.get("bank_id"))
-        return self.repo.update(self.get(account_id=account_id, user_id=user_id), **self._normalize_credit_payload(kwargs))
+        account = self.get(account_id=account_id, user_id=user_id)
+        effective_type = kwargs.get("account_type") or account.account_type
+        if "bank_id" in kwargs or effective_type == "cash":
+            kwargs["bank_id"] = self._resolve_bank_id(kwargs.get("bank_id"), effective_type)
+        return self.repo.update(account, **self._normalize_credit_payload(kwargs))
 
     def delete(self, *, account_id: int, user_id: int) -> None:
         self.repo.delete(self.get(account_id=account_id, user_id=user_id))

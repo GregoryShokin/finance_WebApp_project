@@ -13,7 +13,6 @@ const ROUTE_TITLE: Record<string, string> = {
   '/planning': 'План',
   '/goals': 'Цели',
   '/import': 'Импорт выписок',
-  '/parked-queue': 'Недоразобранное',
   '/categories': 'Категории',
   '/rules': 'Правила',
   '/accounts': 'Активы',

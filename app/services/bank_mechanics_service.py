@@ -222,6 +222,33 @@ _OZON_RULES: list[tuple[_BankRule, float]] = [
         category_name=None,
         label="Озон: покупка на маркетплейсе",
     ), 0.04),
+    # Ozon debit → credit payment: expense side → transfer resolved by contract token.
+    # Ozон PDF does not put the contract in the header, but the description always
+    # contains «по договору №YYYY-MM-DD-KK …» which the normalizer extracts as
+    # tokens.contract. The third-level fallback in find_by_contract_number searches
+    # active sessions' import_rows to resolve the credit account without requiring
+    # it to be committed first.
+    (_BankRule(
+        skeleton_keywords=("погашение кредита", "погашение задолженности"),
+        direction="expense",
+        account_type_filter=("main", "savings"),
+        operation_type="transfer",
+        category_name=None,
+        label="Озон: платёж по кредитному договору → кредитка",
+        suggest_target_by_contract=True,
+    ), 0.12),
+    # Ozon credit account: incoming payment is the phantom-mirror of the debit
+    # transfer above. account_type_filter=None because Ozon credit accounts are
+    # often set up as account_type='main' (not 'credit_card') by users.
+    (_BankRule(
+        skeleton_keywords=("погашение кредита", "погашение задолженности"),
+        direction="income",
+        account_type_filter=None,
+        operation_type=None,
+        category_name=None,
+        label="Озон кредитка: поступление в счёт погашения — дубль Дебет-перевода",
+        suggest_exclude=True,
+    ), 0.12),
 ]
 
 _SBER_RULES: list[tuple[_BankRule, float]] = [
@@ -322,8 +349,9 @@ class BankMechanicsService:
                 target = self._account_repo.find_by_contract_number(
                     user_id=session.user_id,
                     contract_number=identifier_value,
+                    exclude_account_id=account.id,
                 )
-                if target is not None and target.id != account.id:
+                if target is not None:
                     resolved_target = target.id
 
         result_op = matched_rule.operation_type if matched_rule else None

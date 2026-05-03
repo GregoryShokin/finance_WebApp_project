@@ -232,6 +232,7 @@ class PreviewRowProcessor:
                 skeleton=derived.skeleton,
                 normalized_description=suggestion.normalized_description,
                 transaction_type=decision.type,
+                contract=derived.tokens.contract,
             )
             result.duplicate = duplicate
             if duplicate and skip_duplicates:
@@ -244,10 +245,22 @@ class PreviewRowProcessor:
             if suggestion.needs_manual_review and result.status == "ready":
                 result.status = "warning"
 
-            requires_category = (decision.operation_type == "regular")
+            requires_category = decision.operation_type in ("regular", "refund")
             if requires_category and not decision.category_id:
                 result.issues.append("Категория не определена — укажи вручную.")
                 if result.status == "ready":
+                    result.status = "warning"
+
+            # §9.3 / §5.2: credit-split rows always need principal + interest
+            # amounts which are user-supplied and never auto-filled at preview
+            # time. Even when the credit account is already resolved, the row
+            # cannot be "ready" without the amounts — flag it as warning so the
+            # user is prompted to open the pencil editor and fill them in.
+            if decision.requires_credit_split and result.status == "ready":
+                has_principal = normalized.get("credit_principal_amount") not in (None, "", "0", "0.00")
+                has_interest = normalized.get("credit_interest_amount") not in (None, "", "0", "0.00")
+                if not has_principal or not has_interest:
+                    result.issues.append("Укажи основной долг и проценты для кредитного платежа.")
                     result.status = "warning"
 
             result.issues.extend(suggestion.review_reasons)
