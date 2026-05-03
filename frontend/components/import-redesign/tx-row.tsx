@@ -42,6 +42,7 @@ import {
   investmentDirToOperationType,
 } from './option-sets';
 import { attachRowToCounterparty, excludeImportRow, parkImportRow, updateImportRow } from '@/lib/api/imports';
+import { OrphanTransferHint } from './orphan-transfer-hint';
 import type { Account } from '@/types/account';
 import type { ImportPreviewRow, ImportRowUpdatePayload } from '@/types/import';
 import { useFlyToFab, type FlyBucket } from './fly-to-fab-context';
@@ -287,6 +288,36 @@ export function TxRow({
         </Banner>
       ) : null}
       {aiQuestion ? <Banner tone="amber">{aiQuestion}</Banner> : null}
+
+      {/* Spec §5.2 v1.20: orphan-transfer history hint. Visible only when
+          history says this fingerprint has been a transfer ≥3 times with ≥80%
+          consistency. Confirm = create the transfer pair (mirror on closed
+          target works since spec §13 keeps closed accounts addressable). */}
+      {nd.suggested_target_account_id != null ? (
+        <OrphanTransferHint
+          hint={{
+            suggestedTargetAccountId: Number(nd.suggested_target_account_id),
+            suggestedTargetAccountName: String(nd.suggested_target_account_name ?? ''),
+            suggestedTargetIsClosed: Boolean(nd.suggested_target_is_closed),
+            suggestedReason: String(nd.suggested_reason ?? ''),
+          }}
+          isPending={patchMut.isPending}
+          onConfirm={() => {
+            patchMut.mutate({
+              action: 'confirm',
+              operation_type: 'transfer',
+              target_account_id: Number(nd.suggested_target_account_id),
+            });
+          }}
+          onReject={() => {
+            // Demote to regular; the editor clears suggested_* fields per spec §5.2.
+            patchMut.mutate({
+              action: 'confirm',
+              operation_type: 'regular',
+            });
+          }}
+        />
+      ) : null}
 
       {/* Bottom row: type-aware fields + traffic light */}
       <div className="mt-3 flex flex-wrap items-center gap-2">

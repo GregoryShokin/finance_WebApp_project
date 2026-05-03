@@ -9,6 +9,8 @@ export function AccountsList({
   onEdit,
   onDelete,
   onCancelDelete,
+  onClose,
+  onReopen,
   deletingId,
   pendingDeleteIds,
   transactions,
@@ -17,6 +19,10 @@ export function AccountsList({
   onEdit: (account: Account) => void;
   onDelete: (account: Account) => void;
   onCancelDelete: (accountId: number) => void;
+  // Spec §13 (v1.20). Optional: pages that don't surface closure
+  // controls (e.g. quick-pick lists) leave these undefined.
+  onClose?: (account: Account) => void;
+  onReopen?: (account: Account) => void;
   deletingId?: number | null;
   pendingDeleteIds?: number[];
   transactions: Transaction[];
@@ -32,6 +38,8 @@ export function AccountsList({
           onEdit={onEdit}
           onDelete={onDelete}
           onCancelDelete={onCancelDelete}
+          onClose={onClose}
+          onReopen={onReopen}
           isDeletePending={pendingSet.has(account.id)}
           isDeleting={deletingId === account.id}
           transactions={transactions}

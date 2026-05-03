@@ -393,7 +393,11 @@ function BucketPanel({
   // Lookup maps for chip rendering
   const categoriesQuery     = useQuery({ queryKey: ['categories'],     queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
-  const accountsQuery       = useQuery({ queryKey: ['accounts'],       queryFn: getAccounts });
+  // Spec §13 (v1.20): cluster modal includes closed accounts as valid targets.
+  const accountsQuery       = useQuery({
+    queryKey: ['accounts', 'with-closed'],
+    queryFn: () => getAccounts({ includeClosed: true }),
+  });
 
   const categoriesById = useMemo(() => {
     const m = new Map<number, string>();
@@ -788,7 +792,11 @@ function ParkedPanel({
   const categoriesQuery     = useQuery({ queryKey: ['categories'],     queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
   const debtPartnersQuery   = useQuery({ queryKey: ['debt-partners'],  queryFn: () => getDebtPartners() });
-  const accountsQuery       = useQuery({ queryKey: ['accounts'],       queryFn: getAccounts });
+  // Spec §13 (v1.20): cluster modal includes closed accounts as valid targets.
+  const accountsQuery       = useQuery({
+    queryKey: ['accounts', 'with-closed'],
+    queryFn: () => getAccounts({ includeClosed: true }),
+  });
 
   const opts = useMemo(() => ({
     categories:    (categoriesQuery.data ?? []).map((c) => ({ value: String(c.id), label: c.name, kind: (c.kind as 'income' | 'expense') })),

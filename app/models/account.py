@@ -14,6 +14,12 @@ class Account(Base):
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="RUB")
     balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Spec §13 (v1.20). is_closed=True is the strong "this account stopped
+    # existing on closed_at" state — kept in DB for history but hidden from
+    # active lists. Distinct from is_active=False (temporary hide). closed_at
+    # is the recorded closure date. Both are user-driven; never auto-set.
+    is_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", index=True)
+    closed_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     account_type: Mapped[str] = mapped_column(String(32), nullable=False, default="main", server_default="main", index=True)
     is_credit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false", index=True)
     credit_limit_original: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)

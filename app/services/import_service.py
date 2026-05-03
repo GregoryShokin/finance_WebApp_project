@@ -954,35 +954,14 @@ class ImportService:
         }
 
     def start_moderation(self, *, user_id: int, session_id: int) -> dict[str, Any]:
-        """Kick off an async LLM moderation run for a session.
+        """LLM moderation is disabled (decision 2026-05-03).
 
-        The actual work is a Celery task; this method just (1) marks the
-        session as "pending" so the UI can start polling, and (2) enqueues
-        the task. It returns immediately.
+        Kept as a no-op so any in-flight UI calls reach a deterministic stub
+        instead of throwing. The Celery task is no longer enqueued and the
+        endpoint returns 410 Gone — see app/api/v1/imports.py.
         """
         session = self.get_session(user_id=user_id, session_id=session_id)
-        summary = dict(session.summary_json or {})
-        moderation = dict(summary.get("moderation") or {})
-        moderation.update(
-            {
-                "status": "pending",
-                "total_clusters": moderation.get("total_clusters", 0),
-                "processed_clusters": 0,
-                "started_at": None,
-                "finished_at": None,
-                "error": None,
-            }
-        )
-        summary["moderation"] = moderation
-        session.summary_json = summary
-        self.db.add(session)
-        self.db.commit()
-
-        # Import lazily to avoid circular imports at module load.
-        from app.jobs.moderate_import_session import moderate_import_session
-
-        moderate_import_session.delay(session.id)
-        return {"session_id": session.id, "status": "pending"}
+        return {"session_id": session.id, "status": "disabled"}
 
     def park_row(self, *, user_id: int, row_id: int) -> dict[str, Any]:
         """Mark a row as parked — deferred from this import, kept in a global queue."""
@@ -1792,6 +1771,10 @@ class ImportService:
             "description": (normalized.get("description") or "")[:1000],
             # §8.1: persist skeleton on the transaction for future-import dedup.
             "skeleton": (normalized.get("skeleton") or None),
+            # Spec §13 (v1.20): denormalize fingerprint onto Transaction so the
+            # history-based orphan-transfer hint can do an indexed lookup
+            # without joining through ImportRow.
+            "fingerprint": (normalized.get("fingerprint") or None),
             "transaction_date": ImportService._to_datetime(transaction_date),
             "credit_principal_amount": normalized.get("credit_principal_amount"),
             "credit_interest_amount": normalized.get("credit_interest_amount"),

@@ -92,7 +92,11 @@ export function SplitModal({
   const desc = (nd.description as string) || (row.raw_data?.description as string) || '(без описания)';
 
   // Fetch accounts and debt partners for the new type-specific selectors.
-  const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
+  // Spec §13 (v1.20): split parts may target closed accounts.
+  const accountsQuery = useQuery({
+    queryKey: ['accounts', 'with-closed'],
+    queryFn: () => getAccounts({ includeClosed: true }),
+  });
   const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
 
   const accountOptions = useMemo<CreatableOption[]>(

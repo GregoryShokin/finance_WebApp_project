@@ -85,6 +85,8 @@ class AccountUpdateRequest(BaseModel):
     account_type: AccountType | None = None
     is_credit: bool | None = None
     bank_id: int | None = None
+    is_closed: bool | None = None
+    closed_at: date | None = None
 
     credit_limit_original: Decimal | None = None
     credit_current_amount: Decimal | None = None
@@ -97,6 +99,10 @@ class AccountUpdateRequest(BaseModel):
     deposit_capitalization_period: str | None = None
     contract_number: str | None = None
     statement_account_number: str | None = None
+
+
+class CloseAccountRequest(BaseModel):
+    closed_at: date
 
 
 class BalanceAdjustRequest(BaseModel):
@@ -115,6 +121,8 @@ class AccountResponse(BaseModel):
     currency: str
     balance: Decimal
     is_active: bool
+    is_closed: bool = False
+    closed_at: date | None = None
     account_type: AccountType
     is_credit: bool
     credit_limit_original: Decimal | None = None

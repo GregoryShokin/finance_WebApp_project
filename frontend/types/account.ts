@@ -27,6 +27,10 @@ export type Account = {
   currency: string;
   balance: string | number;
   is_active: boolean;
+  // Spec §13 (v1.20): account closure state. is_closed=true → hidden from
+  // active lists by default; visible only with include_closed=true.
+  is_closed?: boolean;
+  closed_at?: string | null;
   account_type: AccountType;
   is_credit: boolean;
   credit_limit?: string | number | null;

@@ -187,6 +187,15 @@ class ImportRowEditor:
                 normalized["user_confirmed_at"] = datetime.now(timezone.utc).isoformat()
                 normalized.pop("cluster_bulk_acked_at", None)
                 status = "ready"
+                # Spec §5.2 v1.20: clear orphan-transfer history hint metadata
+                # once the user confirms — either by accepting the suggestion
+                # (target_account_id is now set) or by rejecting it and
+                # picking something else. The hint exists only for the
+                # warning-bucket UI prompt.
+                normalized.pop("suggested_target_account_id", None)
+                normalized.pop("suggested_target_account_name", None)
+                normalized.pop("suggested_target_is_closed", None)
+                normalized.pop("suggested_reason", None)
                 # If auto-detected as transfer but has no target, revert to
                 # regular so the user can confirm without a validation blocker.
                 if (

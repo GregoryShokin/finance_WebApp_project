@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -16,6 +16,10 @@ class AccountNotFoundError(Exception):
 
 class BankRequiredError(ValueError):
     """Raised when an account create/update is missing or has an invalid bank_id."""
+
+
+class CloseAccountValidationError(ValueError):
+    """Raised when close()/reopen() validation fails (spec §13, v1.20)."""
 
 
 class AccountService:
@@ -111,11 +115,15 @@ class AccountService:
         kwargs["bank_id"] = self._resolve_bank_id(kwargs.get("bank_id"), kwargs.get("account_type"))
         return self.repo.create(**self._normalize_credit_payload(kwargs))
 
-    def list(self, *, user_id: int) -> list[Account]:
-        return self.repo.list_by_user(user_id)
+    def list(self, *, user_id: int, include_closed: bool = False) -> list[Account]:
+        return self.repo.list_by_user(user_id, include_closed=include_closed)
 
-    def list_with_last_transaction(self, *, user_id: int) -> list[Account]:
-        return self.repo.list_by_user_with_last_transaction(user_id)
+    def list_with_last_transaction(
+        self, *, user_id: int, include_closed: bool = False,
+    ) -> list[Account]:
+        return self.repo.list_by_user_with_last_transaction(
+            user_id, include_closed=include_closed,
+        )
 
     def get(self, *, account_id: int, user_id: int) -> Account:
         account = self.repo.get_by_id_and_user(account_id, user_id)
@@ -128,7 +136,66 @@ class AccountService:
         effective_type = kwargs.get("account_type") or account.account_type
         if "bank_id" in kwargs or effective_type == "cash":
             kwargs["bank_id"] = self._resolve_bank_id(kwargs.get("bank_id"), effective_type)
+        # Spec §13 — closure validation when caller updates is_closed/closed_at
+        # via the generic update path (not the dedicated close() endpoint).
+        if "is_closed" in kwargs or "closed_at" in kwargs:
+            self._validate_closure_payload(account, kwargs)
         return self.repo.update(account, **self._normalize_credit_payload(kwargs))
+
+    def _validate_closure_payload(self, account: Account, kwargs: dict) -> None:
+        is_closed = kwargs.get("is_closed", account.is_closed)
+        closed_at = kwargs.get("closed_at", account.closed_at)
+        if is_closed:
+            if closed_at is None:
+                raise CloseAccountValidationError(
+                    "Укажи дату закрытия счёта."
+                )
+            self._validate_closed_at_value(account, closed_at)
+            # Closing an account also flips is_active to False atomically.
+            kwargs.setdefault("is_active", False)
+        else:
+            # Reopening: clear closed_at unless caller explicitly preserved it
+            kwargs["closed_at"] = None
+
+    def _validate_closed_at_value(self, account: Account, closed_at: date) -> None:
+        today = datetime.now(timezone.utc).date()
+        if closed_at > today:
+            raise CloseAccountValidationError(
+                "Дата закрытия не может быть в будущем."
+            )
+        last_tx_date = self.repo.get_max_transaction_date(account.id)
+        if last_tx_date is not None:
+            last_date = last_tx_date.date() if isinstance(last_tx_date, datetime) else last_tx_date
+            if closed_at < last_date:
+                raise CloseAccountValidationError(
+                    f"Дата закрытия не может быть раньше последней транзакции "
+                    f"({last_date.isoformat()})."
+                )
+
+    def close(self, *, account_id: int, user_id: int, closed_at: date) -> Account:
+        """Mark account as closed (spec §13, v1.20)."""
+        account = self.get(account_id=account_id, user_id=user_id)
+        if account.is_closed:
+            raise CloseAccountValidationError("Счёт уже закрыт.")
+        self._validate_closed_at_value(account, closed_at)
+        return self.repo.update(
+            account,
+            is_closed=True,
+            closed_at=closed_at,
+            is_active=False,
+        )
+
+    def reopen(self, *, account_id: int, user_id: int) -> Account:
+        """Reopen a previously closed account (spec §13, v1.20)."""
+        account = self.get(account_id=account_id, user_id=user_id)
+        if not account.is_closed:
+            raise CloseAccountValidationError("Счёт не был закрыт.")
+        return self.repo.update(
+            account,
+            is_closed=False,
+            closed_at=None,
+            is_active=True,
+        )
 
     def delete(self, *, account_id: int, user_id: int) -> None:
         self.repo.delete(self.get(account_id=account_id, user_id=user_id))

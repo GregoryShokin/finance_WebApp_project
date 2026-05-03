@@ -82,6 +82,27 @@ Four services: `api` (FastAPI, port 8000), `worker` (Celery), `db` (PostgreSQL 1
 
 PostgreSQL with Alembic migrations in `alembic/versions/` (sequential numbering `0001_`…). Core models: `User`, `Account`, `Category`, `Transaction`, `Counterparty`, `DebtPartner`, `ImportSession`, `ImportRow`, `TransactionCategoryRule`.
 
+### Account states (decision 2026-05-03, spec §13)
+
+Three distinct states, two boolean flags:
+
+- **Active** (`is_active=True`, `is_closed=False`) — regular use.
+- **Temporarily hidden** (`is_active=False`, `is_closed=False`) — soft-hide, can come back.
+- **Closed** (`is_active=False`, `is_closed=True`, `closed_at=<date>`) — strong "stopped existing on closed_at". Stays in DB with all historical transactions; hidden from active lists; visible in moderator (target/source dropdowns), transaction history, and the «Закрытые счета» section on the accounts page.
+
+**Closed-account rules:**
+- Closed accounts are valid `target_account_id` for transfer pairs (e.g. orphan transfer to a card the user has since closed). Mirror tx on the closed account is created normally.
+- Cannot delete a closed account that has transactions (FK `ON DELETE RESTRICT`).
+- `closed_at` cannot be in the future or earlier than the latest transaction on the account.
+- Closing does NOT auto-zero the balance. User explicitly creates corrective transactions if needed.
+
+**API:**
+- `POST /accounts/{id}/close` `{ closed_at: date }` — close.
+- `POST /accounts/{id}/reopen` — reopen.
+- `GET /accounts?include_closed=true` — include closed in list response. Default excludes them.
+
+**Migration 0057** added `is_closed` (NOT NULL DEFAULT FALSE) and `closed_at` (DATE NULL) with `ix_accounts_is_closed`. Backfill is conservative: existing rows stay `is_closed=False`. Users explicitly mark closure via UI.
+
 ### Counterparty vs DebtPartner (decision 2026-04-24)
 
 Two disjoint entity tables, never mixed:

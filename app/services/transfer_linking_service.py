@@ -102,6 +102,7 @@ class TransferLinkingService:
         needs_review = bool(payload.get("needs_review"))
         normalized_description = self._normalize_description(description)
         skeleton = payload.get("skeleton") or None
+        fingerprint = payload.get("fingerprint") or None  # spec §13 v1.20
 
         tx_type = str(payload.get("type") or "expense")
         if tx_type == "income":
@@ -133,6 +134,7 @@ class TransferLinkingService:
             description=description,
             normalized_description=normalized_description,
             skeleton=skeleton,
+            fingerprint=fingerprint,
             transaction_date=transaction_date,
             needs_review=needs_review,
             affects_analytics=False,
@@ -150,6 +152,7 @@ class TransferLinkingService:
             description=description,
             normalized_description=normalized_description,
             skeleton=skeleton,
+            fingerprint=fingerprint,
             transaction_date=transaction_date,
             needs_review=needs_review,
             affects_analytics=False,
@@ -217,6 +220,7 @@ class TransferLinkingService:
         needs_review = bool(payload.get("needs_review"))
         normalized_description = self._normalize_description(description)
         skeleton = payload.get("skeleton") or None
+        fingerprint = payload.get("fingerprint") or None  # spec §13 v1.20
 
         active_account = self.account_repo.get_by_id_and_user_for_update(
             active_account_id, user_id,
@@ -235,6 +239,7 @@ class TransferLinkingService:
             description=description,
             normalized_description=normalized_description,
             skeleton=skeleton,
+            fingerprint=fingerprint,
             transaction_date=transaction_date,
             needs_review=needs_review,
             affects_analytics=False,

@@ -16,7 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { createAccount, deleteAccount, getAccounts, updateAccount } from '@/lib/api/accounts';
+import { closeAccount, createAccount, deleteAccount, getAccounts, reopenAccount, updateAccount } from '@/lib/api/accounts';
 import { createRealAsset, deleteRealAsset, getRealAssets, updateRealAsset } from '@/lib/api/real-assets';
 import { getTransactions } from '@/lib/api/transactions';
 import { formatMoney } from '@/lib/utils/format';
@@ -252,8 +252,10 @@ export default function AccountsPage() {
   const [assetForm, setAssetForm] = useState<{ id?: number; initial: RealAssetPayload } | null>(null);
 
   const accountsQuery = useQuery({
-    queryKey: ['accounts'],
-    queryFn: getAccounts,
+    queryKey: ['accounts', 'with-closed'],
+    // Spec §13 (v1.20): closed accounts shown in their own section below
+    // active. Default API call excludes them, so we opt in here.
+    queryFn: () => getAccounts({ includeClosed: true }),
   });
 
   const transactionsQuery = useQuery({
@@ -303,6 +305,45 @@ export default function AccountsPage() {
     },
   });
 
+  const closeMutation = useMutation({
+    mutationFn: ({ id, closedAt }: { id: number; closedAt: string }) =>
+      closeAccount(id, closedAt),
+    onSuccess: () => {
+      toast.success('Счёт закрыт');
+      queryClient.invalidateQueries({ queryKey: ['accounts'] });
+    },
+    onError: (error: Error) => toast.error(error.message || 'Не удалось закрыть счёт'),
+  });
+
+  const reopenMutation = useMutation({
+    mutationFn: reopenAccount,
+    onSuccess: () => {
+      toast.success('Счёт открыт снова');
+      queryClient.invalidateQueries({ queryKey: ['accounts'] });
+    },
+    onError: (error: Error) => toast.error(error.message || 'Не удалось открыть счёт'),
+  });
+
+  function handleCloseAccount(account: Account) {
+    const today = new Date().toISOString().slice(0, 10);
+    const input = window.prompt(
+      `Закрыть счёт «${account.name}»?\n\nДата закрытия (YYYY-MM-DD):`,
+      today,
+    );
+    if (!input) return;
+    const closedAt = input.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(closedAt)) {
+      toast.error('Дата должна быть в формате YYYY-MM-DD');
+      return;
+    }
+    closeMutation.mutate({ id: account.id, closedAt });
+  }
+
+  function handleReopenAccount(account: Account) {
+    if (!window.confirm(`Открыть счёт «${account.name}» снова?`)) return;
+    reopenMutation.mutate(account.id);
+  }
+
   const createAssetMutation = useMutation({
     mutationFn: createRealAsset,
     onSuccess: () => {
@@ -336,7 +377,12 @@ export default function AccountsPage() {
   const creditAccounts = accounts.filter((account) => account.account_type === 'loan');
 
   const accountItems = useMemo(
-    () => accounts.filter((a) => CARD_TYPES.includes(a.account_type as AccountType)),
+    () => accounts.filter((a) => CARD_TYPES.includes(a.account_type as AccountType) && !a.is_closed),
+    [accounts],
+  );
+
+  const closedAccountItems = useMemo(
+    () => accounts.filter((a) => CARD_TYPES.includes(a.account_type as AccountType) && a.is_closed),
     [accounts],
   );
 
@@ -718,11 +764,37 @@ export default function AccountsPage() {
             onEdit={openEditDialog}
             onDelete={handleDelete}
             onCancelDelete={delayedDelete.cancelDelete}
+            onClose={handleCloseAccount}
+            onReopen={handleReopenAccount}
             deletingId={deletingId}
             pendingDeleteIds={Object.keys(delayedDelete.pendingIds).map(Number)}
             transactions={transactions}
           />
         )}
+
+        {/* Spec §13 (v1.20) — closed accounts section. Folded by default
+            via <details>; user expands when reconciling history or
+            reviewing closed instruments. */}
+        {closedAccountItems.length > 0 ? (
+          <details className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <summary className="cursor-pointer text-sm font-medium text-slate-700">
+              Закрытые счета ({closedAccountItems.length})
+            </summary>
+            <div className="mt-4">
+              <AccountsList
+                accounts={closedAccountItems}
+                onEdit={openEditDialog}
+                onDelete={handleDelete}
+                onCancelDelete={delayedDelete.cancelDelete}
+                onClose={handleCloseAccount}
+                onReopen={handleReopenAccount}
+                deletingId={deletingId}
+                pendingDeleteIds={Object.keys(delayedDelete.pendingIds).map(Number)}
+                transactions={transactions}
+              />
+            </div>
+          </details>
+        ) : null}
       </div>
     );
   }

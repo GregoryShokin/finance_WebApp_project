@@ -530,6 +530,42 @@ function ClusterModal({
     card.candidateCounterpartyId,
   );
 
+  // Spec §5.2/§13 v1.20: when ALL eligible rows in this cluster carry the
+  // SAME suggested_target_account_id (orphan-transfer history hint), surface
+  // a one-click bulk-confirm button: "Подтвердить как переводы на «X»".
+  const sharedOrphanSuggestion = useMemo<{
+    targetId: number;
+    targetName: string;
+    isClosed: boolean;
+    count: number;
+  } | null>(() => {
+    let candidate: { id: number; name: string; closed: boolean } | null = null;
+    let count = 0;
+    for (const id of card.rowIds) {
+      const r = rowsById.get(id);
+      const nd = (r?.normalized_data ?? {}) as Record<string, unknown>;
+      const tid = nd.suggested_target_account_id as number | null | undefined;
+      if (tid == null) return null; // any row missing the hint → no shared bulk
+      if (candidate == null) {
+        candidate = {
+          id: Number(tid),
+          name: String(nd.suggested_target_account_name ?? ''),
+          closed: Boolean(nd.suggested_target_is_closed),
+        };
+      } else if (candidate.id !== Number(tid)) {
+        return null; // mismatched targets across the cluster
+      }
+      count += 1;
+    }
+    if (candidate == null || count === 0) return null;
+    return {
+      targetId: candidate.id,
+      targetName: candidate.name,
+      isClosed: candidate.closed,
+      count,
+    };
+  }, [card.rowIds, rowsById]);
+
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
 
@@ -826,6 +862,56 @@ function ClusterModal({
               <X className="size-3.5" />
             </button>
           </div>
+
+          {/* Spec §5.2/§13 v1.20: shared orphan-target bulk-confirm.
+              Visible only when every eligible row in the cluster suggests
+              the same target account (typically a closed account). One
+              click → bulk-apply with operation_type=transfer + target. */}
+          {sharedOrphanSuggestion ? (
+            <div className="border-b border-blue-200 bg-blue-50 px-5 py-3">
+              <div className="flex items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-medium text-blue-900">
+                    По истории — это переводы на{' '}
+                    <span className="font-semibold">
+                      «{sharedOrphanSuggestion.targetName}
+                      {sharedOrphanSuggestion.isClosed ? ' (закрыт)' : ''}»
+                    </span>
+                  </p>
+                  <p className="mt-0.5 text-[11.5px] text-blue-700">
+                    Подтвердить {sharedOrphanSuggestion.count} штук одним кликом
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={inflight}
+                  onClick={async () => {
+                    try {
+                      await bulkMut.mutateAsync({
+                        cluster_key: card.clusterKey,
+                        cluster_type: card.clusterType,
+                        updates: card.rowIds.map((id) => ({
+                          row_id: id,
+                          operation_type: 'transfer',
+                          target_account_id: sharedOrphanSuggestion.targetId,
+                        })),
+                      });
+                      toast.success(
+                        `Подтверждено ${sharedOrphanSuggestion.count} переводов`,
+                      );
+                      onClose();
+                      invalidate();
+                    } catch (e) {
+                      toast.error((e as Error).message || 'Не удалось применить');
+                    }
+                  }}
+                  className="shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                >
+                  ✓ Подтвердить {sharedOrphanSuggestion.count} шт.
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           {/* Bulk-apply controls */}
           <div className="border-b border-line bg-bg-surface px-5 py-4">

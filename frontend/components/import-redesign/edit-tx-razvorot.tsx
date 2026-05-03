@@ -91,15 +91,20 @@ export function EditTxRazvorot({
   const date = (nd.date as string) || (row.raw_data?.date as string) || '';
   const totalAmount = Number((nd.amount as string | number | null) ?? row.raw_data?.amount ?? 0) || 0;
 
-  // Self-fetched options — react-query cache dedupes against parent callers.
-  const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
+  // Spec §13 (v1.20): moderator account-selector includes closed accounts.
+  // Closed accounts are valid targets for orphan-transfer binding (e.g. user
+  // received money from a card that has since been closed).
+  const accountsQuery = useQuery({
+    queryKey: ['accounts', 'with-closed'],
+    queryFn: () => getAccounts({ includeClosed: true }),
+  });
   const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
 
   const accountOptions = useMemo<CreatableOption[]>(
     () =>
       (accountsQuery.data ?? []).map((a) => ({
         value: String(a.id),
-        label: a.name,
+        label: a.is_closed ? `${a.name} (закрыт)` : a.name,
       })),
     [accountsQuery.data],
   );

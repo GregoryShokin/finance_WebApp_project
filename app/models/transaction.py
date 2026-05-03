@@ -59,6 +59,11 @@ class Transaction(Base):
     # of the operation, independent of the specific identifier value. Enables
     # skeleton-based deduplication on re-import; see `_find_duplicate`.
     skeleton: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Spec §13 (v1.20). Denormalized from ImportRow.normalized_data.fingerprint
+    # at commit time. Indexed because the history-based orphan-transfer hint
+    # (§5.2 v1.20) does a fast lookup of "how many committed txs of this
+    # fingerprint were transfer". Manually-created tx have NULL.
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     affects_analytics: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true", index=True)

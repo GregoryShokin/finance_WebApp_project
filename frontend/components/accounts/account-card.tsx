@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { CreditCard, Pencil, RotateCcw, SlidersHorizontal, Trash2, Wallet } from 'lucide-react';
+import { Archive, ArchiveRestore, CreditCard, Pencil, RotateCcw, SlidersHorizontal, Trash2, Wallet } from 'lucide-react';
 import { BankIcon } from '@/components/ui/bank-icon';
 import { toast } from 'sonner';
 import { adjustAccountBalance } from '@/lib/api/accounts';
@@ -45,6 +45,8 @@ export function AccountCard({
   onEdit,
   onDelete,
   onCancelDelete,
+  onClose,
+  onReopen,
   isDeletePending,
   isDeleting,
   transactions,
@@ -53,6 +55,10 @@ export function AccountCard({
   onEdit: (account: Account) => void;
   onDelete: (account: Account) => void;
   onCancelDelete: (accountId: number) => void;
+  // Spec §13 (v1.20): closure controls. Optional — only provided on the
+  // accounts page where closing/reopening is exposed in the UI.
+  onClose?: (account: Account) => void;
+  onReopen?: (account: Account) => void;
   isDeletePending?: boolean;
   isDeleting?: boolean;
   transactions?: Transaction[];
@@ -109,9 +115,15 @@ export function AccountCard({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="truncate text-lg font-semibold text-slate-950">{account.name}</h3>
-                <StatusBadge tone={account.is_active ? 'success' : 'neutral'}>
-                  {account.is_active ? 'Активный' : 'Неактивный'}
-                </StatusBadge>
+                {account.is_closed ? (
+                  <StatusBadge tone="neutral">
+                    Закрыт{account.closed_at ? ` ${new Date(account.closed_at).toLocaleDateString('ru-RU')}` : ''}
+                  </StatusBadge>
+                ) : (
+                  <StatusBadge tone={account.is_active ? 'success' : 'neutral'}>
+                    {account.is_active ? 'Активный' : 'Неактивный'}
+                  </StatusBadge>
+                )}
                 {isCreditCard ? <StatusBadge tone="warning">Кредитная карта</StatusBadge> : null}
                 {account.is_credit && !isCreditCard ? <StatusBadge tone="warning">Кредит</StatusBadge> : null}
               </div>
@@ -317,6 +329,33 @@ export function AccountCard({
           <Button type="button" variant="secondary" size="icon" onClick={() => onEdit(account)} aria-label="Изменить счёт" title="Изменить">
             <Pencil className="size-4" />
           </Button>
+          {/* Spec §13 (v1.20): closure controls. Close on active, Re-open
+              on closed. Hidden when handlers not provided (e.g. quick-pick). */}
+          {account.is_closed
+            ? onReopen ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                onClick={() => onReopen(account)}
+                aria-label="Открыть счёт снова"
+                title="Открыть снова"
+              >
+                <ArchiveRestore className="size-4" />
+              </Button>
+            ) : null
+            : onClose ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                onClick={() => onClose(account)}
+                aria-label="Закрыть счёт"
+                title="Закрыть счёт"
+              >
+                <Archive className="size-4" />
+              </Button>
+            ) : null}
           {isDeletePending ? (
             <Button
               type="button"

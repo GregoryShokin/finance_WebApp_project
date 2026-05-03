@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime  # noqa: F401  (used by string forward-ref in get_max_transaction_date)
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -51,27 +53,52 @@ class AccountRepository:
             self.db.flush()
         return account
 
-    def list_by_user(self, user_id: int) -> list[Account]:
-        return self.db.query(Account).filter(Account.user_id == user_id).order_by(Account.id.desc()).all()
+    def list_by_user(self, user_id: int, *, include_closed: bool = True) -> list[Account]:
+        """List accounts for a user.
 
-    def list_by_user_with_last_transaction(self, user_id: int) -> list[Account]:
-        rows = (
+        Spec §13 (v1.20): closed accounts stay in DB but are filtered out by
+        default in the public API. Internal callers (matchers, dedup, transfer
+        linking, history lookups) need them visible — they pass
+        `include_closed=True` so the existing call-site behavior is preserved.
+        Public API endpoints opt-in to filtering via the `include_closed`
+        query param.
+        """
+        q = self.db.query(Account).filter(Account.user_id == user_id)
+        if not include_closed:
+            q = q.filter(Account.is_closed.is_(False))
+        return q.order_by(Account.id.desc()).all()
+
+    def list_by_user_with_last_transaction(
+        self, user_id: int, *, include_closed: bool = True,
+    ) -> list[Account]:
+        q = (
             self.db.query(
                 Account,
                 func.max(Transaction.transaction_date).label("last_transaction_date"),
             )
             .outerjoin(Transaction, Transaction.account_id == Account.id)
             .filter(Account.user_id == user_id)
-            .group_by(Account.id)
-            .order_by(Account.id.desc())
-            .all()
         )
+        if not include_closed:
+            q = q.filter(Account.is_closed.is_(False))
+        rows = q.group_by(Account.id).order_by(Account.id.desc()).all()
 
         accounts: list[Account] = []
         for account, last_transaction_date in rows:
             setattr(account, "last_transaction_date", last_transaction_date)
             accounts.append(account)
         return accounts
+
+    def get_max_transaction_date(self, account_id: int) -> "datetime | None":
+        """Latest committed transaction date for `account_id`, or None if no
+        transactions. Used by AccountService.close() to validate that
+        closed_at is not earlier than the most recent activity.
+        """
+        return (
+            self.db.query(func.max(Transaction.transaction_date))
+            .filter(Transaction.account_id == account_id)
+            .scalar()
+        )
 
     def find_by_contract_number(
         self,

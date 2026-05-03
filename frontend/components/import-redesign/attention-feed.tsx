@@ -68,7 +68,11 @@ export function AttentionFeed({
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
   const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
-  const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
+  // Spec §13 (v1.20): moderator includes closed accounts as valid transfer targets.
+  const accountsQuery = useQuery({
+    queryKey: ['accounts', 'with-closed'],
+    queryFn: () => getAccounts({ includeClosed: true }),
+  });
 
   const opts = useMemo(
     () => ({
