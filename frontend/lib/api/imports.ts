@@ -80,15 +80,23 @@ export function updateImportRow(rowId: number, payload: ImportRowUpdatePayload) 
   });
 }
 
-export function getModerationStatus(sessionId: number) {
-  return apiClient<ModerationStatusResponse>(`/imports/${sessionId}/moderation-status`);
+// LLM moderation removed from the import pipeline (decision 2026-05-03).
+// Stubs return immediately without hitting the backend (which now returns 410).
+// Kept so any straggler imports compile while we delete call sites.
+export async function getModerationStatus(_sessionId: number): Promise<ModerationStatusResponse> {
+  return {
+    session_id: _sessionId,
+    status: 'disabled',
+    total_clusters: 0,
+    processed_clusters: 0,
+    started_at: null,
+    finished_at: null,
+    error: null,
+  } as unknown as ModerationStatusResponse;
 }
 
-export function startModeration(sessionId: number) {
-  return apiClient<{ session_id: number; status: string }>(`/imports/${sessionId}/moderate`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
+export async function startModeration(sessionId: number) {
+  return { session_id: sessionId, status: 'disabled' };
 }
 
 export function getBulkClusters(sessionId: number) {

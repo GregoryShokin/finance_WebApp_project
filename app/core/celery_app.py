@@ -10,7 +10,7 @@ celery_app = Celery(
     # @celery_app.task decorators register their tasks in the registry.
     include=[
         "app.jobs.monthly_capital_snapshot",
-        "app.jobs.moderate_import_session",
+        # "app.jobs.moderate_import_session",  # disabled 2026-05-03 — LLM moderation removed
         "app.jobs.auto_preview_import_session",
         "app.jobs.transfer_matcher_debounced",
     ],

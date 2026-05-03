@@ -445,12 +445,14 @@ class MetricsService:
         basic_flow = self._calc_basic_flow_for_month(txns)
         full_flow = self._calc_full_flow_for_month(txns_all, liquid_ids, credit_ids)
 
-        # Free capital (свободные средства) = basic_flow − Σ(тело обязательных платежей)
+        # Free capital (свободные средства) = basic_flow − Σ(фактическое тело
+        # кредитных платежей за месяц). Decision 2026-05-03: переход с плана
+        # (monthly_payment) на факт (transfer LIQUID→CREDIT) — см. _calc_credit_body_payments.
         avg_interest_by_account = self._calc_avg_interest_per_account(
             user_id, {a.id for a in accounts["credit"]}, months=3
         )
         credit_body_payments = self._calc_credit_body_payments(
-            accounts["credit"], avg_interest_by_account
+            accounts["credit"], avg_interest_by_account, txns=txns_all,
         )
         free_capital = _round2(basic_flow - credit_body_payments)
 
@@ -566,56 +568,64 @@ class MetricsService:
         self,
         credit_accounts: list[Account],
         avg_interest_by_account: dict[int, Decimal],
+        txns: list[Transaction] | None = None,
     ) -> Decimal:
         """
-        Σ(тело обязательных платежей по всем кредитам) за месяц.
+        Σ(тело обязательных платежей по всем кредитам) за месяц — ФАКТ.
 
-        Body calculation by account type:
-        - installment_card: body = monthly_payment (0% rassrochka, проценты = 0)
-        - credit_card: body = monthly_payment (минимальный платёж ≈ тело)
-        - credit/mortgage: body = monthly_payment − avg_interest_expense;
-          если нет данных по процентам → 0.8 × monthly_payment
+        Decision 2026-05-03: считаем по фактическим транзакциям, не по
+        Account.monthly_payment. Раньше план автоматически вычитался из
+        Свободного потока даже когда платёж ещё не прошёл — пользователь
+        видел дефицит при пустых транзакциях. Теперь Свободный = факт.
+        Account.monthly_payment остаётся источником для DTI и прогноза.
+
+        Body = sum of `transfer` транзакций, направленных на любой кредитный
+        счёт (target_account_id ∈ credit_account_ids), независимо от того,
+        с какого ликвидного счёта они идут. Совпадает с тем, как Полный поток
+        считает отток LIQUID→CREDIT в _calc_full_flow_for_month.
+
+        Параметры `avg_interest_by_account` и `credit_accounts` сохранены в
+        сигнатуре для обратной совместимости — больше не используются. Будут
+        вычищены, когда пройдёт переходный период (~1 неделя).
         """
+        if not txns:
+            return Decimal("0")
+
+        credit_ids = {acc.id for acc in credit_accounts}
+        if not credit_ids:
+            return Decimal("0")
+
         total_body = Decimal("0")
-        for acc in credit_accounts:
-            mp = getattr(acc, "monthly_payment", None)
-            if mp is None:
+        for tx in txns:
+            if tx.operation_type != "transfer":
                 continue
-            mp_dec = Decimal(str(mp))
-            if mp_dec <= 0:
+            if tx.target_account_id not in credit_ids:
                 continue
-
-            acct_type = acc.account_type
-            if acct_type == "installment_card":
-                body = mp_dec
-            elif acct_type == "credit_card":
-                body = mp_dec
-            else:  # credit (включая mortgage)
-                avg_int = avg_interest_by_account.get(acc.id)
-                if avg_int is not None and avg_int > 0:
-                    body = max(mp_dec - avg_int, Decimal("0"))
-                else:
-                    body = mp_dec * Decimal("0.8")
-
-            total_body += body
-
+            total_body += Decimal(str(tx.amount))
         return total_body
 
     def calculate_free_capital(self, user_id: int, year: int, month: int) -> dict:
         """
-        Свободные средства = basic_flow − Σ(тело обязательных платежей).
+        Свободные средства = basic_flow − Σ(фактическое тело кредитных платежей).
+
+        Decision 2026-05-03: считается по транзакциям (transfer LIQUID→CREDIT),
+        не по Account.monthly_payment. См. _calc_credit_body_payments.
 
         Ref: financeapp-vault/01-Metrics/Поток.md §2.1.2 (GAP #4)
         """
         current = date(year, month, 1)
         txns = self._get_month_transactions(user_id, current)
+        # Body нужен по полным транзакциям (включая non-analytics transfer'ы).
+        txns_all = self._get_month_transactions_all(user_id, current)
         basic_flow = self._calc_basic_flow_for_month(txns)
 
         accounts = self._get_accounts_by_type(user_id)
         avg_interest_by_account = self._calc_avg_interest_per_account(
             user_id, {a.id for a in accounts["credit"]}, months=3
         )
-        body = self._calc_credit_body_payments(accounts["credit"], avg_interest_by_account)
+        body = self._calc_credit_body_payments(
+            accounts["credit"], avg_interest_by_account, txns=txns_all,
+        )
         return {
             "free_capital": _round2(basic_flow - body),
             "credit_body_payments": _round2(body),

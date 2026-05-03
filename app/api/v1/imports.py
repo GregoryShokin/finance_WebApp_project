@@ -72,43 +72,19 @@ async def upload_import_file(
 
 
 
+# LLM moderation endpoints — DISABLED (decision 2026-05-03).
+# The async LLM moderator created more friction than value: token cost without
+# meaningful confidence lift over the deterministic rule + bank_mechanics layers.
+# Endpoints return 410 Gone to surface stale frontend callers; full removal of
+# the underlying services / Celery task is tracked as a follow-up.
 @router.get("/{session_id}/moderation-status")
-def get_moderation_status(
-    session_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    service = ImportService(db)
-    try:
-        return service.get_moderation_status(user_id=current_user.id, session_id=session_id)
-    except ImportNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-
 @router.post("/{session_id}/moderate")
-def start_moderation(
-    session_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    service = ImportService(db)
-    try:
-        return service.start_moderation(user_id=current_user.id, session_id=session_id)
-    except ImportNotFoundError as exc:
-        db.rollback()
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-
 @router.get("/moderation-metrics")
-def get_moderation_metrics(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Aggregate moderator metrics across the user's sessions (Phase 6.1)."""
-    from app.services.moderation_metrics_service import ModerationMetricsService
-
-    metrics = ModerationMetricsService(db).compute_for_user(user_id=current_user.id)
-    return metrics.to_dict()
+def _moderation_disabled():
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="LLM moderation has been removed from the import pipeline.",
+    )
 
 
 @router.post("/rematch-transfers")

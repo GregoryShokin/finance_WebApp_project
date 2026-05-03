@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
-import { getImportSessions, getImportPreview, getModerationStatus, getBulkClusters } from '@/lib/api/imports';
+import { getImportSessions, getImportPreview, getBulkClusters } from '@/lib/api/imports';
 import type {
   BulkClustersResponse,
   ImportPreviewResponse,
@@ -89,11 +89,9 @@ export function useActiveImportSession() {
     enabled: activeSessionId !== null,
   });
 
-  const moderationQuery = useQuery({
-    queryKey: ['imports', 'moderation-status', activeSessionId],
-    queryFn: () => getModerationStatus(activeSessionId as number),
-    enabled: activeSessionId !== null,
-  });
+  // LLM moderation removed (decision 2026-05-03). Stub kept so the consumer
+  // signature is unchanged — `moderation` is always null.
+  const moderationQuery = { data: null as ModerationStatusResponse | null };
 
   return {
     sessions,

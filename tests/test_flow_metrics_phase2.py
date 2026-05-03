@@ -80,7 +80,14 @@ def cc_account(db, user, bank):
 
 
 def test_free_capital_subtracts_credit_body(db, user, regular_account, credit_account, interest_category):
-    """Базовый +58к, кредит monthly_payment=45к, средний процент 42к/мес → тело 3к → free = 55к."""
+    """Body = фактический transfer LIQUID→CREDIT в этом месяце.
+
+    Decision 2026-05-03: free_capital считается по факту, не по плану
+    (Account.monthly_payment больше НЕ влияет на этот расчёт).
+
+    Базовый +58k, фактический перевод тела 3k на кредитный счёт →
+    free_capital = 55k.
+    """
     # Regular income 100k
     _make_tx(db, user_id=user.id, account_id=regular_account.id,
              amount=Decimal("100000"), type="income", operation_type="regular",
@@ -89,30 +96,53 @@ def test_free_capital_subtracts_credit_body(db, user, regular_account, credit_ac
     _make_tx(db, user_id=user.id, account_id=regular_account.id,
              amount=Decimal("42000"), type="expense", operation_type="regular",
              transaction_date=_prev_month_date(0))
-    # Set monthly_payment on credit = 45k, avg interest ≈ 42k → body ≈ 3k
+
+    # Plan: monthly_payment = 45k. Должно НЕ влиять на free_capital — только на DTI.
     credit_account.monthly_payment = Decimal("45000")
     db.add(credit_account)
     db.commit()
 
-    # Interest expenses over last 3 months (42k/mo avg)
-    for n in range(1, 4):
-        _make_tx(db, user_id=user.id, account_id=regular_account.id,
-                 credit_account_id=credit_account.id,
-                 category_id=interest_category.id,
-                 amount=Decimal("42000"),
-                 type="expense", operation_type="regular",
-                 transaction_date=_prev_month_date(n))
+    # Фактический перевод тела: 3k с дебета на кредитный счёт.
+    _make_tx(db, user_id=user.id, account_id=regular_account.id,
+             target_account_id=credit_account.id,
+             amount=Decimal("3000"),
+             type="expense", operation_type="transfer",
+             transaction_date=_prev_month_date(0))
 
     from app.services.metrics_service import MetricsService
     svc = MetricsService(db)
     result = svc.calculate_flow(user.id, CURRENT_MONTH.year, CURRENT_MONTH.month)
 
-    # basic_flow = 100k - 42k = 58k
+    # basic_flow = 100k − 42k = 58k (transfer не влияет на basic_flow по §2.1.1)
     assert result["basic_flow"] == Decimal("58000.00")
-    # body = 45k - 42k (avg interest) = 3k
+    # body = 3k (фактический transfer LIQUID→CREDIT)
     assert result["credit_body_payments"] == Decimal("3000.00")
-    # free_capital = 58k - 3k = 55k
+    # free_capital = 58k − 3k = 55k
     assert result["free_capital"] == Decimal("55000.00")
+
+
+def test_free_capital_ignores_planned_monthly_payment(db, user, regular_account, credit_account):
+    """Decision 2026-05-03 regression: при наличии Account.monthly_payment
+    но БЕЗ фактических transfer'ов на кредитный счёт — credit_body_payments = 0.
+
+    До фикса: дашборд показывал минус (план вычитался даже при пустых транзакциях).
+    После: только факт.
+    """
+    _make_tx(db, user_id=user.id, account_id=regular_account.id,
+             amount=Decimal("100000"), type="income", operation_type="regular",
+             transaction_date=_prev_month_date(0))
+    # Сильное плановое обязательство, но ни одной фактической выплаты.
+    credit_account.monthly_payment = Decimal("16792")
+    db.add(credit_account)
+    db.commit()
+
+    from app.services.metrics_service import MetricsService
+    svc = MetricsService(db)
+    result = svc.calculate_flow(user.id, CURRENT_MONTH.year, CURRENT_MONTH.month)
+
+    assert result["basic_flow"] == Decimal("100000.00")
+    assert result["credit_body_payments"] == Decimal("0.00")
+    assert result["free_capital"] == Decimal("100000.00")
 
 
 def test_free_capital_zero_credits(db, user, regular_account):

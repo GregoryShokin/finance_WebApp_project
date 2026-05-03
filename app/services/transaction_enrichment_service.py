@@ -46,6 +46,10 @@ ALLOWED_OPERATION_TYPES = {
     "adjustment",
 }
 
+# DEPRECATED 2026-05-03: keyword-based category fallback removed from
+# `_resolve_category`. This mapping is no longer consulted at runtime.
+# Kept temporarily so out-of-tree callers / tests don't crash on import.
+# Safe to delete in a follow-up cleanup pass.
 CATEGORY_KEYWORD_LIBRARY: dict[str, tuple[str, ...]] = {
     'продукт': (
         "pyaterochka", 'пятерочка', "magnit", 'магнит', "perekrestok", 'перекресток', 'лента',
@@ -632,36 +636,19 @@ class TransactionEnrichmentService:
         if history_based is not None:
             return history_based
 
-        best_category: Category | None = None
-        best_score = 0.0
-        description_tokens = self._tokenize(normalized_description)
-        for category in categories:
-            if category.kind != transaction_type:
-                continue
-            keywords = self._build_category_keywords(category)
-            if not keywords:
-                continue
-            hits = sum(1 for keyword in keywords if keyword in normalized_description)
-            token_hits = sum(1 for token in description_tokens if token in keywords)
-            score = hits * 1.2 + token_hits * 0.6
-            if score > best_score:
-                best_score = score
-                best_category = category
-
-        if best_category is not None and best_score >= 1.2:
-            confidence = 0.8 if best_score >= 2.4 else 0.72
-            return best_category.id, confidence, 'Категория найдена по ключевым словам и названию операции'
-        if not skip_llm and self.llm_service.is_enabled:
-            llm_category_id, llm_confidence, llm_reason = self.llm_service.classify_transaction_category(
-                description=description or "",
-                amount=None,
-                transaction_type=transaction_type,
-                categories=categories,
-                counterparty=counterparty or None,
-            )
-            if llm_category_id is not None:
-                return llm_category_id, llm_confidence, llm_reason
-
+        # Decision 2026-05-03: keyword-based category fallback removed.
+        # Раньше CATEGORY_KEYWORD_LIBRARY (e.g. 'продукт' → "market", "grocery")
+        # автоматически назначал категорию по совпадению одного токена в описании
+        # — например YANDEX*5399*MARKET → "Продукты" из-за подстроки "market".
+        # Это создавало иллюзию "LLM-модерации" даже после её отключения и
+        # приводило к ложным категориям, которые пользователь должен был переучивать.
+        # Категория теперь резолвится только из:
+        #   - явных правил (transaction_category_rules)
+        #   - истории транзакций пользователя (Counter по counterparty)
+        #   - истории по нормализованному описанию (_resolve_category_from_description_history)
+        #   - системных категорий ("Проценты по кредитам") по точному keyword-маркеру
+        # Если ничего не нашли — None, строка идёт в attention для ручного выбора.
+        # LLM-fallback также удалён — модерация выключена в imports API (см. 2026-05-03).
         return None, 0.0, ""
 
     def _resolve_category_from_description_history(
@@ -828,6 +815,9 @@ class TransactionEnrichmentService:
         return tokens
 
     def _build_category_keywords(self, category: Category) -> set[str]:
+        """DEPRECATED 2026-05-03 — see CATEGORY_KEYWORD_LIBRARY note. No longer
+        called from `_resolve_category`. Kept to avoid breaking external callers.
+        """
         normalized_name = self.normalize_description(category.name) or ""
         tokens = self._tokenize(normalized_name)
         keywords = set(tokens)
