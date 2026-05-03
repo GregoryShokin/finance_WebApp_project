@@ -462,6 +462,58 @@ class PdfExtractor(BaseExtractor):
             },
         )
 
+    # Sber-statement page footer / header markers. When a transaction is the
+    # last on a page, its description "wraps" into the next page's header/
+    # footer text — those bleed into `description` and produce noise like
+    # «Продолжение на следующей странице ... ПАО Сбербанк ... 40601D00...».
+    # Any continuation line containing one of these substrings is skipped
+    # outright.
+    _SBER_FOOTER_MARKERS = (
+        "продолжение на следующей странице",
+        "выписка по счёту",
+        "выписка по счету",
+        "выписка по карте",
+        "страница ",
+        "дата операции",
+        "дата обработки",
+        "сумма в валюте",
+        "остаток средств",
+        "пао сбербанк",
+        "генеральная лицензия банка россии",
+        "дата формирования документа",
+        "согласно статье",
+        "электронные документы",
+        "квалифицированной электронной подписью",
+        "квалифицированной электронной подписи",
+        "проверить подпись",
+        "сбербанк онлайн",
+        "по курсу банка",
+        "финансовой операции",
+        "обработанные в заданном",
+        "срок обработки операций",
+    )
+
+    @staticmethod
+    def _is_sber_footer_line(line: str) -> bool:
+        lowered = line.lower()
+        if any(marker in lowered for marker in PdfExtractor._SBER_FOOTER_MARKERS):
+            return True
+        # Bare uppercase column-header lines: "КАТЕГОРИЯ", "ОПИСАНИЕ ОПЕРАЦИИ", …
+        # Sber emits the column row ALL-CAPS Cyrillic with no digits/punct of
+        # interest. If a line is mostly uppercase Cyrillic and short — skip.
+        compact = line.replace(" ", "").replace(" ", "")
+        if compact and len(compact) <= 50:
+            cyr_upper = sum(1 for c in compact if "А" <= c <= "Я" or c == "Ё")
+            cyr_lower = sum(1 for c in compact if "а" <= c <= "я" or c == "ё")
+            if cyr_upper >= 4 and cyr_upper > cyr_lower * 3:
+                return True
+        # Document-id hash blobs that appear in the footer signature block,
+        # e.g. "40601D00C08FCE2CD999F93A68651986". 16+ uppercase hex with no
+        # surrounding context = footer noise, never a description fragment.
+        if re.match(r'^\*?\s*[0-9A-F]{16,}\s*$', line.strip()):
+            return True
+        return False
+
     @staticmethod
     def _parse_sber_rows(
         raw_lines: list[str],
@@ -473,7 +525,11 @@ class PdfExtractor(BaseExtractor):
           Row 2 — processing date, 6-digit auth code, human-readable description.
 
         Description may wrap onto additional lines (no date prefix); those are
-        appended to the preceding description.
+        appended to the preceding description. Footer/header continuations
+        (page numbers, "Продолжение на следующей странице", legal disclaimers,
+        document IDs) are filtered via `_is_sber_footer_line` — without that,
+        the last operation on a page absorbs all noise from the next page's
+        header into its description.
 
         Direction: amount prefixed with '+' → income; no sign → expense.
         """
@@ -545,9 +601,22 @@ class PdfExtractor(BaseExtractor):
                 p_desc = m2.group(3).strip()
                 continue
 
-            # Continuation of a description (wrapped line with no date prefix)
+            # Continuation of a description (wrapped line with no date prefix).
+            # Skip footer/header continuations: when a transaction is the last
+            # on a page, the next page's header/footer (page numbers, legal
+            # disclaimers, document IDs, "Продолжение на следующей странице")
+            # would otherwise bleed into description. Once we hit a footer
+            # marker we also flush — the current transaction is complete and
+            # any subsequent non-date line on the next page should not extend
+            # this description even if it doesn't itself match a marker.
             if p_date is not None and p_desc is not None:
                 if not re.match(r'^\d{2}\.\d{2}\.\d{4}', line):
+                    if PdfExtractor._is_sber_footer_line(line):
+                        # Hit page boundary — emit the transaction now so any
+                        # later prose (e.g. raw merchant text on the next page
+                        # before the next row-1) doesn't get mis-attached.
+                        _emit()
+                        continue
                     p_desc += " " + line
                     continue
 
