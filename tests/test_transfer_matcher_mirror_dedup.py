@@ -111,15 +111,29 @@ YANDEX_SKELETON = "входящий перевод сбп <PERSON> ш <PHONE> т
 
 
 class TestMirrorDedupDifferentSkeletons:
-    def test_mirror_match_different_skeletons_marked_duplicate(
+    def test_phantom_income_with_different_skeleton_marked_duplicate(
         self, db, user, tinkoff_account, yandex_account, matcher,
     ):
-        """New import row on Яндекс Дебет must be marked duplicate when a
-        committed transfer from Тинькоф Дебет already covers the same money,
-        even though the two banks describe the operation with different text.
+        """Spec §8.5 branch B (v1.20).
+
+        When user commits Tinkoff→Yandex transfer, `_create_transfer_pair`
+        creates BOTH halves: real expense on Tinkoff AND phantom income on
+        Yandex (both physical Transaction records). Phantom inherits the
+        sender-bank skeleton.
+
+        Later, user imports the Yandex statement. The income row has
+        Yandex-bank skeleton (different wording). It must still be marked
+        duplicate via branch B (same-account phantom-transfer-income),
+        because skeleton check is intentionally suppressed for phantom
+        income (skeletons differ by design across banks).
         """
-        # Committed expense on Тинькоф side (already imported earlier).
-        make_transaction(
+        # Committed expense on Тинькоф (sender side) AND phantom income on
+        # Яндекс — real `_create_transfer_pair` would create both, linked
+        # via `transfer_pair_id`. Without the link, the main matcher would
+        # pick them as orphan candidates and pair the new import row to the
+        # phantom income via cross_session match before _detect_committed_
+        # duplicates gets a chance to run branch B.
+        tx_expense = make_transaction(
             db,
             user_id=user.id,
             account_id=tinkoff_account.id,
@@ -133,6 +147,23 @@ class TestMirrorDedupDifferentSkeletons:
             skeleton=TINKOFF_SKELETON,
             transaction_date=WHEN,
         )
+        tx_income = make_transaction(
+            db,
+            user_id=user.id,
+            account_id=yandex_account.id,
+            target_account_id=tinkoff_account.id,
+            amount=AMOUNT,
+            currency="RUB",
+            type="income",
+            operation_type="transfer",
+            description="Внешний перевод по номеру телефона +79222624977",
+            normalized_description="внешний перевод по номеру телефона +79222624977",
+            skeleton=TINKOFF_SKELETON,
+            transaction_date=WHEN,
+        )
+        tx_expense.transfer_pair_id = tx_income.id
+        tx_income.transfer_pair_id = tx_expense.id
+        db.add(tx_expense); db.add(tx_income); db.commit()
 
         # New import session for Яндекс Дебет — the receiving side.
         sess_y = _session(db, user, yandex_account)
@@ -149,13 +180,16 @@ class TestMirrorDedupDifferentSkeletons:
 
         db.refresh(income_row)
         assert income_row.status == "duplicate", (
-            "Mirror match with different skeletons must be detected as duplicate. "
-            "The committed tx's skeleton belongs to the sender's bank — the receiver's "
-            "bank always uses different wording for the same SBP transfer."
+            "Branch B: phantom transfer-income on the same account must be "
+            "detected as duplicate even when the row's skeleton differs from "
+            "the phantom's (skeleton check is suppressed for phantom branch)."
         )
         tm = (income_row.normalized_data_json or {}).get("transfer_match", {})
-        assert tm.get("is_secondary") is True
+        # Branch B is same-account, so is_secondary must be False
+        # (UI shows «Дубль · другая сессия», not a self-loop pairLabel).
+        assert tm.get("is_secondary") is False
         assert tm.get("match_source") == "committed_tx_duplicate"
+        assert tm.get("match_branch") == "B"
 
     def test_same_account_different_skeletons_not_duplicate(
         self, db, user, yandex_account, matcher,
@@ -203,18 +237,22 @@ class TestMirrorDedupDifferentSkeletons:
 
 
 class TestCreditAccountRepaymentDedup:
-    """Credit account repayments appear as expense in the bank statement
-    (debt decreases = credit limit consumed → returned), while the transfer
-    model creates a phantom income on the receiving account.
+    """Spec §8.5 branch D + §8.9 (v1.20).
 
-    Real case: Яндекс Дебет commits expense→Яндекс Сплит (credit account).
-    When Яндекс Сплит statement is imported, «Погашение основного долга»
-    is classified as expense (not income). Without the both-direction mirror
-    fix, the key (credit_account, expense, amount) would not find the mirror
-    entry (credit_account, income, amount) and the row stays as non-duplicate.
+    Credit account repayments appear as expense in the bank statement
+    (debt decreases = credit limit consumed → returned), while the
+    transfer model creates a phantom income on the receiving account.
+
+    Real case: Tinkoff Дебет commits expense→Yandex Сплит (credit_card).
+    When Yandex Сплит statement is imported, «Погашение основного долга»
+    is classified as expense (not income). Branch D activates ONLY when:
+      • target account_type ∈ {credit_card, installment_card, loan}
+      • row.description contains a credit-keyword
+      • identifier-mismatch absent (or no shared identifier type)
+      • anti-transfer keyword absent
     """
 
-    def test_credit_repayment_marked_duplicate_despite_direction_mismatch(
+    def test_credit_repayment_marked_duplicate_via_branch_D(
         self, db, user, tinkoff_account, yandex_account, matcher,
     ):
         """Committed debit→credit transfer must detect the credit statement's
@@ -224,13 +262,19 @@ class TestCreditAccountRepaymentDedup:
         AMOUNT = Decimal("20000.00")
         WHEN = datetime(2025, 12, 12, 17, 28, tzinfo=timezone.utc)
 
-        # Committed expense on Яндекс Дебет (already imported & committed).
-        # Represents: user paid 20 000 from debit to credit account.
-        make_transaction(
+        # Promote yandex_account to credit_card so branch D activates.
+        yandex_account.account_type = "credit_card"
+        db.add(yandex_account)
+        db.commit()
+
+        # Committed transfer pair: expense on Tinkoff Дебет + phantom income
+        # on Yandex Сплит (credit). Real `_create_transfer_pair` links both
+        # via `transfer_pair_id`.
+        tx_expense = make_transaction(
             db,
             user_id=user.id,
             account_id=tinkoff_account.id,        # debit account
-            target_account_id=yandex_account.id,  # credit account
+            target_account_id=yandex_account.id,  # credit account (credit_card)
             amount=AMOUNT,
             currency="RUB",
             type="expense",
@@ -240,6 +284,23 @@ class TestCreditAccountRepaymentDedup:
             skeleton="погашение основного долга договор <CONTRACT>",
             transaction_date=WHEN,
         )
+        tx_phantom = make_transaction(
+            db,
+            user_id=user.id,
+            account_id=yandex_account.id,
+            target_account_id=tinkoff_account.id,
+            amount=AMOUNT,
+            currency="RUB",
+            type="income",
+            operation_type="transfer",
+            description="Погашение основного долга по договору №КС20251126483806054311",
+            normalized_description="погашение основного долга по договору кс20251126483806054311",
+            skeleton="погашение основного долга договор <CONTRACT>",
+            transaction_date=WHEN,
+        )
+        tx_expense.transfer_pair_id = tx_phantom.id
+        tx_phantom.transfer_pair_id = tx_expense.id
+        db.add(tx_expense); db.add(tx_phantom); db.commit()
 
         # New import of the credit account statement.
         # The bank classifies repayment as EXPENSE (debt reduction = credit used → returned).
@@ -249,16 +310,18 @@ class TestCreditAccountRepaymentDedup:
             direction="expense",   # ← credit bank's perspective: expense
             amount=AMOUNT,
             when=WHEN,
-            description="Погашение основного долга по договору",
-            skeleton="погашение основного долга договор",
+            description="Погашение основного долга по договору №КС20251126483806054311",
+            skeleton="погашение основного долга договор <CONTRACT>",
         )
 
         matcher.match_transfers_for_user(user_id=user.id)
 
         db.refresh(repayment_row)
         assert repayment_row.status == "duplicate", (
-            "Credit account repayment (direction=expense in bank statement) must be "
-            "detected as duplicate of the committed debit→credit transfer. "
-            "The both-direction mirror fix ensures (credit_account, expense, amount) "
-            "is also indexed alongside the standard (credit_account, income, amount)."
+            "Branch D: mirror-expense for credit-target with credit-keyword "
+            "must mark this row as duplicate of the committed debit→credit transfer."
         )
+        tm = (repayment_row.normalized_data_json or {}).get("transfer_match", {})
+        assert tm.get("match_branch") == "D"
+        assert tm.get("is_secondary") is True
+        assert tm.get("match_source") == "committed_tx_duplicate"

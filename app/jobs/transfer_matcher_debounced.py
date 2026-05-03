@@ -115,6 +115,14 @@ def match_transfers_for_user_debounced(user_id: int, token: str) -> dict[str, An
         try:
             TransferMatcherService(db).match_transfers_for_user(user_id=user_id)
             db.commit()
+            # spec §8.10 — Fee-aware suspect-pair second pass on leftovers.
+            try:
+                from app.services.fee_matcher_service import FeeMatcherService
+                FeeMatcherService(db).detect_for_user(user_id=user_id)
+                db.commit()
+            except Exception:
+                logger.exception("FeeMatcherService failed for user %s", user_id)
+                db.rollback()
             _mark_sessions_status(db, user_id, status="ready", finished=True)
             db.commit()
         except Exception as exc:

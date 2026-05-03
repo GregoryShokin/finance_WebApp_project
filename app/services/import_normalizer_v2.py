@@ -207,6 +207,18 @@ ANTI_TRANSFER_KEYWORDS: frozenset[str] = frozenset({
     "netflix",
     "apple",
     "google",
+    # Снятие наличных и банкоматные операции — физическая операция со счётом,
+    # никогда не зеркало transfer-пары (spec §8.5 / §8.9, v1.20). Без них
+    # ATM-снятие на ту же сумму, что и недавний transfer на счёт, ложно
+    # сматчивалось как cross-session pair или mirror duplicate.
+    "atm",
+    "банкомат",
+    "cash withdrawal",
+    "снятие наличных",
+    "снятие денежных средств",
+    "выдача наличных",
+    "inkasso",
+    "инкассация",
 })
 
 # Backward-compat alias — kept while clusterer / import_service migrate to

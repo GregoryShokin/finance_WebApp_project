@@ -224,30 +224,35 @@ class TransferMatcherService:
         if touched:
             self.db.flush()
 
+    # Spec §5.2 (v1.20): history-based orphan-transfer hint thresholds.
+    _ORPHAN_HISTORY_MIN = 3       # need at least N committed tx of this fingerprint
+    _ORPHAN_HISTORY_RATIO = 0.8   # ≥80% of those must be operation_type='transfer'
+    _ORPHAN_HISTORY_LIMIT = 20    # how many recent tx to inspect
+
     def _escalate_orphan_transfers(self, *, user_id: int) -> None:
-        """Demote post-matcher orphan transfers to `regular`.
+        """Resolve post-matcher orphan transfers (spec §5.2 v1.20).
 
         A row qualifies if:
-          * status IN ('ready', 'warning')  (not committed/duplicate/excluded)
+          * status IN ('ready', 'warning', 'error')
           * operation_type == 'transfer'
-          * target_account_id is None (or empty)
+          * target_account_id is None
+          * user_confirmed_at is None (user hasn't manually committed to it)
 
-        v1.9 — semantics flip vs v1.0–v1.8: previously we promoted such rows
-        to `error` (§5.2 trigger 6). UX feedback (2026-04-26): «Внешний
-        перевод по номеру телефона …» without a matched pair is almost
-        always a regular outflow (gift / debt / payment to a person), NOT
-        an inter-account transfer. Showing it as a transfer with «Куда
-        перевод…» empty selector forced the user to either fix the row or
-        live with an error — neither matches the actual semantic.
+        New flow (v1.20) — BEFORE demoting, check history by fingerprint:
 
-        Now: switch operation_type → 'regular', clear transfer-side fields,
-        flag `was_orphan_transfer=true` so the user can flip it back to
-        transfer manually if it really was inter-account, set status to
-        warning (because category_id is almost always null at this point
-        and the user must pick one). The original §12.1 invariant — a
-        transfer must have both accounts known — is still enforced for
-        rows the user *explicitly* keeps as transfer (handled in the
-        moderator's apply-time validation, not here).
+          1. Load up to N recent committed tx with the same fingerprint.
+          2. If ≥3 of them and ≥80% have operation_type='transfer' →
+             keep `operation_type='transfer'`, surface a `suggested_target_*`
+             hint into normalized_data so the moderator UI can prompt the
+             user with "history says this is a transfer to X". One click
+             confirms; backend creates the pair (mirror tx on the suggested
+             account, even if it's closed per §13).
+          3. Otherwise — fall through to the v1.9 demote path:
+             operation_type → 'regular', flag `was_orphan_transfer=true`.
+
+        The original §12.1 invariant — a transfer must have both accounts
+        known — is still enforced at apply-time for rows the user *explicitly*
+        keeps as transfer.
         """
         rows = (
             self.db.query(ImportRow)
@@ -266,16 +271,75 @@ class TransferMatcherService:
                 continue
             if nd.get("target_account_id") not in (None, "", 0):
                 continue
-            # Skip rows the user already touched — once they've picked
-            # transfer + a counter-account explicitly, we shouldn't undo it.
-            # If user_confirmed_at is set with operation_type=transfer and
-            # no target, that's a manual choice we honor (the apply-time
-            # validator catches it separately).
             if nd.get("user_confirmed_at"):
                 continue
+
+            # Spec §5.2 v1.20 — history-based hint BEFORE demoting.
+            fingerprint = nd.get("fingerprint")
+            kept_as_transfer = False
+            if fingerprint:
+                history = self._load_history_by_fingerprint(
+                    user_id=user_id, fingerprint=str(fingerprint),
+                    limit=self._ORPHAN_HISTORY_LIMIT,
+                )
+                if len(history) >= self._ORPHAN_HISTORY_MIN:
+                    transfer_history = [
+                        t for t in history
+                        if str(t.operation_type or "") == "transfer"
+                    ]
+                    transfer_ratio = len(transfer_history) / len(history)
+                    if transfer_ratio >= self._ORPHAN_HISTORY_RATIO:
+                        # History strongly says "this is a transfer". Keep
+                        # operation_type=transfer, attach suggested target.
+                        target_counter: dict[int, int] = {}
+                        for t in transfer_history:
+                            if t.target_account_id is not None:
+                                target_counter[t.target_account_id] = (
+                                    target_counter.get(t.target_account_id, 0) + 1
+                                )
+                        if target_counter:
+                            most_common_target_id, count = max(
+                                target_counter.items(), key=lambda kv: kv[1],
+                            )
+                            target_acc = (
+                                self.db.query(AccountModel)
+                                .filter(
+                                    AccountModel.id == most_common_target_id,
+                                    AccountModel.user_id == user_id,
+                                )
+                                .first()
+                            )
+                            if target_acc is not None:
+                                nd["suggested_target_account_id"] = int(target_acc.id)
+                                nd["suggested_target_account_name"] = target_acc.name
+                                nd["suggested_target_is_closed"] = bool(target_acc.is_closed)
+                                nd["suggested_reason"] = (
+                                    f"transfer-history {count}/{len(history)}"
+                                )
+                        # operation_type stays 'transfer'; status=warning so
+                        # the moderator UI knows it needs explicit user
+                        # confirmation. error_message is cleared so the row
+                        # doesn't carry stale «orphan transfer» error.
+                        row.normalized_data_json = nd
+                        row.error_message = None
+                        row.status = "warning"
+                        self.db.add(row)
+                        touched += 1
+                        kept_as_transfer = True
+
+            if kept_as_transfer:
+                continue
+
+            # Fall-through: original v1.9 demote path — clear transfer-side
+            # fields, mark was_orphan_transfer so moderator UI can offer to
+            # flip back, set status=warning for category pickup.
             nd["operation_type"] = "regular"
             nd["was_orphan_transfer"] = True
             nd.pop("transfer_match", None)
+            nd.pop("suggested_target_account_id", None)
+            nd.pop("suggested_target_account_name", None)
+            nd.pop("suggested_target_is_closed", None)
+            nd.pop("suggested_reason", None)
             row.normalized_data_json = nd
             row.error_message = None
             row.status = "warning"
@@ -283,6 +347,27 @@ class TransferMatcherService:
             touched += 1
         if touched:
             self.db.flush()
+
+    def _load_history_by_fingerprint(
+        self, *, user_id: int, fingerprint: str, limit: int,
+    ) -> list[TransactionModel]:
+        """Recent committed transactions sharing the given fingerprint.
+
+        Spec §5.2 v1.20: relies on `Transaction.fingerprint` denormalization
+        (migration 0058). For pre-denormalization rows, fingerprint is NULL
+        and they're invisible to this lookup — acceptable, history-based
+        hints kick in only after enough committed history accumulates.
+        """
+        return (
+            self.db.query(TransactionModel)
+            .filter(
+                TransactionModel.user_id == user_id,
+                TransactionModel.fingerprint == fingerprint,
+            )
+            .order_by(TransactionModel.transaction_date.desc())
+            .limit(limit)
+            .all()
+        )
 
     # ------------------------------------------------------------------
     # Loading
@@ -736,8 +821,33 @@ class TransferMatcherService:
         self.db.flush()
 
     # ------------------------------------------------------------------
-    # Same-account duplicate detection
+    # Same-account duplicate detection — четырёхветочная модель (spec §8.5, v1.20)
     # ------------------------------------------------------------------
+
+    # §8.9 — credit-target keywords для активации mirror-expense ветки.
+    # Любая фраза из этого списка в description row'а — необходимое (но не
+    # достаточное) условие для того, чтобы expense-row на credit-target счёте
+    # рассматривалась как зеркало уже-committed transfer'а на тот же счёт.
+    _CREDIT_REPAYMENT_KEYWORDS = frozenset({
+        "погашение",
+        "погашение основного долга",
+        "погашение тела",
+        "погашение процентов",
+        "проценты по кредиту",
+        "проценты пользование",
+        "уплата процентов",
+        "досрочное погашение",
+        "закрытие договора",
+        "плановый платёж по кредиту",
+        "плановый платеж по кредиту",
+        "ежемесячный платёж по кредиту",
+        "ежемесячный платеж по кредиту",
+        "оплата по кредиту",
+        "оплата кредита",
+    })
+
+    # account_type'ы, для которых ветка D (mirror+expense) разрешена.
+    _CREDIT_TARGET_ACCOUNT_TYPES = frozenset({"credit_card", "installment_card", "loan"})
 
     def _detect_committed_duplicates(
         self,
@@ -748,20 +858,37 @@ class TransferMatcherService:
         date_to: datetime,
         skip_row_ids: set[int],
     ) -> None:
-        """Mark import rows as 'duplicate' when a committed transaction on the
-        SAME account covers the same amount + direction within ±2 days.
+        """Mark import rows as 'duplicate' against committed transactions.
 
-        This handles the common case where the other side of a cross-account
-        transfer was already committed (e.g. account A sent money to account B;
-        when account B's statement is imported, those income rows are duplicates
-        of the phantom income transaction created during account A's import).
+        Implements the four-branch model from spec §8.5 (v1.20):
+
+          A. Same-account real-duplicate (regular re-import).
+             • tx.account_id == row.account_id, tx is NOT phantom transfer-income.
+             • Skeleton-match (equal or Jaccard ≥ 0.8) confirms duplicate.
+             • Identifier-mismatch one-type → reject.
+
+          B. Same-account phantom-transfer-income.
+             • tx.account_id == row.account_id, tx.type='income' AND op='transfer'.
+             • Skeleton NOT checked (phantom inherits sender-bank skeleton).
+             • Contract guard: row.contract != phantom.contract → reject.
+
+          C. Mirror INCOME — never a duplicate (income lands on one specific account).
+
+          D. Mirror EXPENSE — only for credit-target with credit-keyword (§8.9).
+             • tx.account_id != row.account_id, tx.target_account_id == row.account_id.
+             • target.account_type ∈ {credit_card, installment_card, loan}.
+             • row.description contains credit-keyword.
+             • Identifier guard + anti-transfer guard.
+
+        Greedy 1-to-1 assignment: candidates sorted by
+            (closest |diff_seconds|, identifier-match-score DESC, skeleton-similarity DESC)
+        with `used_tx_ids` set so each committed-tx is partner for at most one row.
         """
         from datetime import timezone as _tz
         buffer = timedelta(days=2)
         df_aware = date_from.replace(tzinfo=_tz.utc) if date_from.tzinfo is None else date_from
         dt_aware = (date_to + buffer).replace(tzinfo=_tz.utc) if (date_to + buffer).tzinfo is None else (date_to + buffer)
 
-        # Load ALL committed transactions in the date range, including already-paired ones.
         all_txs = (
             self.db.query(TransactionModel)
             .filter(
@@ -772,143 +899,255 @@ class TransferMatcherService:
             .all()
         )
 
-        # Build a lookup: (account_id, direction, amount) → list of (tx, parsed_date)
-        #
-        # Mirror entry for transfers: a single committed `transfer` row
-        # represents BOTH sides of the operation (account_id sends, target
-        # receives). The bank issues two statement lines for the same
-        # operation — one in each account's statement. Without the mirror
-        # the receiving-side input row would never match the committed
-        # transfer (lookup key (target_acc, opposite_direction, amount)
-        # would not exist in the index), and a duplicate transfer would
-        # be created. Observed in sessions 235/236 where Тинькоф and
-        # Тинькоф Дебет statements both arrived after one side had already
-        # been committed earlier.
-        committed_index: dict[tuple, list[tuple[TransactionModel, datetime]]] = {}
+        # Index for branches A/B: (account_id, direction, amount) → committed-tx
+        # PHYSICALLY on this account.
+        same_account_index: dict[tuple, list[tuple[TransactionModel, datetime]]] = {}
+        # Index for branch D: (target_account_id, expense, amount) → committed
+        # transfer-tx whose target is THIS account. Only `expense` direction is
+        # indexed — branch C (mirror income) is unconditionally rejected.
+        mirror_expense_index: dict[tuple, list[tuple[TransactionModel, datetime]]] = {}
+
         for tx in all_txs:
             parsed = self._parse_datetime(tx.transaction_date)
             if parsed is None:
                 continue
             direction = "income" if tx.type == "income" else "expense"
-            key = (tx.account_id, direction, tx.amount)
-            committed_index.setdefault(key, []).append((tx, parsed))
+            same_account_index.setdefault(
+                (tx.account_id, direction, tx.amount), []
+            ).append((tx, parsed))
+
             if (
                 str(tx.operation_type or "") == "transfer"
                 and tx.target_account_id is not None
+                and tx.type == "expense"
             ):
-                # Both-direction mirror: a committed transfer between two of
-                # the user's own accounts must be found from the target side
-                # regardless of how the OTHER bank classifies the operation.
-                # Real case: Дебет → Сплит (credit). The debit bank booked
-                # the move as `expense`. When the Сплит statement is later
-                # imported, that bank classifies «Погашение основного долга»
-                # as ALSO `expense` (debt reduction = credit used → returned),
-                # which is the opposite of what the transfer model expects on
-                # the target side (`income` = phantom credit). Indexing both
-                # directions ensures the row is detected as a duplicate of
-                # the already-committed transfer instead of being left as a
-                # fresh row that would double the spend.
-                for mirror_direction in ("income", "expense"):
-                    mirror_key = (tx.target_account_id, mirror_direction, tx.amount)
-                    committed_index.setdefault(mirror_key, []).append((tx, parsed))
+                # Only expense-transfers participate in branch D (Сплит/Дебет
+                # case). The phantom income on target_account_id is already
+                # indexed in same_account_index above (branch B handles it).
+                mirror_expense_index.setdefault(
+                    (tx.target_account_id, "expense", tx.amount), []
+                ).append((tx, parsed))
 
-        # Match each active candidate against same-account committed txs.
-        # §8.1: дедуп-ключ обязан включать skeleton — без него matcher
-        # ложно склеивал две независимые операции, случайно совпавшие по
-        # (account_id, direction, amount, ±2 дня). Например, СБП-приход
-        # 5000₽ от внешнего отправителя и внутрибанковский перевод
-        # 5000₽ с другой карты в тот же день — суммы совпали, но это
-        # разные операции. Skeleton'ы у них разные («входящий перевод
-        # сбп <PERSON>» vs «внутренний перевод на договор <CONTRACT>»),
-        # и совпадение skeleton'а — то, что отличает повторный импорт
-        # от случайной коллизии сумм.
-        active_row_skeletons = {
-            cand.row_id: (cand.row_skeleton or "").strip()
-            for cand in active_candidates
-            if cand.row_id is not None
-        }
-        rows_to_mark: dict[int, TransactionModel] = {}
+        # Preload account types for branch D activation (target.account_type).
+        accounts = {acc.id: acc for acc in self.account_repo.list_by_user(user_id)}
+
+        # Pre-extract row tokens (avoid re-parsing description per candidate).
+        from app.services.import_normalizer_v2 import (
+            extract_tokens as _extract_tokens_tms,
+        )
+
+        row_tokens: dict[int, Any] = {}
         for cand in active_candidates:
+            if cand.row_id is None:
+                continue
+            row_tokens[cand.row_id] = _extract_tokens_tms(cand.description or "")
+
+        # Cache for tx token extraction.
+        tx_tokens_cache: dict[int, Any] = {}
+
+        def _tx_tokens(tx: TransactionModel) -> Any:
+            cached = tx_tokens_cache.get(tx.id)
+            if cached is None:
+                cached = _extract_tokens_tms(tx.description or "")
+                tx_tokens_cache[tx.id] = cached
+            return cached
+
+        def _identifier_mismatch(row_t: Any, tx_t: Any, *, include_phone: bool = True) -> bool:
+            """True if row and tx have one-type identifier with DIFFERENT values.
+
+            `include_phone` controls whether phone counts as a mismatch signal:
+              • True — for branch A (same-account real-duplicate). Same bank
+                phrasing should produce same phone; mismatch = different op.
+              • False — for branches B/D (cross-bank phantom/mirror). Sender's
+                bank statement shows recipient's phone; receiver's statement
+                shows sender's phone — same operation, different phones by
+                design. Phone mismatch alone must NOT reject.
+
+            Contract and IBAN are operation-stable across banks (the bank's
+            internal contract number, the recipient's IBAN are referenced by
+            both sides), so they always count as reject signals.
+            """
+            attrs = ["contract", "iban"]
+            if include_phone:
+                attrs.append("phone")
+            for attr in attrs:
+                row_v = getattr(row_t, attr, None)
+                tx_v = getattr(tx_t, attr, None)
+                if row_v and tx_v:
+                    # Case-insensitive compare: row description is lowercased
+                    # by `_load_active_row_candidates`, tx description from DB
+                    # preserves original casing. For phone numbers the case
+                    # check is a no-op, but for contract / IBAN it matters
+                    # (e.g. КС... vs кс...).
+                    if str(row_v).lower() != str(tx_v).lower():
+                        return True
+            return False
+
+        def _identifier_match_score(row_t: Any, tx_t: Any) -> int:
+            """Higher = more identifier-match strength. For greedy sort tiebreak."""
+            score = 0
+            for attr in ("contract", "phone", "iban"):
+                row_v = getattr(row_t, attr, None)
+                tx_v = getattr(tx_t, attr, None)
+                if row_v and tx_v and row_v == tx_v:
+                    score += 1
+            return score
+
+        def _skeleton_jaccard(a: str, b: str) -> float:
+            """Token-set Jaccard similarity; 1.0 for equal, 0.0 for disjoint."""
+            if not a or not b:
+                return 0.0
+            a_tokens = set(a.lower().split())
+            b_tokens = set(b.lower().split())
+            if not a_tokens or not b_tokens:
+                return 0.0
+            inter = len(a_tokens & b_tokens)
+            union = len(a_tokens | b_tokens)
+            return inter / union if union else 0.0
+
+        def _has_keyword(text: str | None, keywords: frozenset[str]) -> bool:
+            if not text:
+                return False
+            lowered = text.lower()
+            return any(kw in lowered for kw in keywords)
+
+        def _has_anti_transfer(description: str | None) -> bool:
+            # Reuse the single source of truth (spec §7.7).
+            return _has_keyword(description, _ANTI_TRANSFER_KEYWORDS)
+
+        def _has_credit_keyword(description: str | None) -> bool:
+            return _has_keyword(description, self._CREDIT_REPAYMENT_KEYWORDS)
+
+        # Build per-row candidate lists from both indices.
+        # Each candidate is (tx, tx_date, branch, score-tuple-for-sort).
+        rows_to_mark: dict[int, tuple[TransactionModel, str]] = {}
+        used_tx_ids: set[int] = set()
+
+        # Pre-build assignment proposals so we can do globally-best greedy 1-to-1.
+        proposals: list[tuple[float, int, int, int, _Candidate, TransactionModel, datetime, str]] = []
+        # tuple: (sort_key_diff_seconds, neg_id_score, neg_skel_jaccard,
+        #         tie_unique, cand, tx, tx_date, branch_label)
+
+        for idx, cand in enumerate(active_candidates):
             if cand.row_id is None or cand.row_id in skip_row_ids:
                 continue
-            key = (cand.account_id, cand.direction, cand.amount)
-            committed_matches = committed_index.get(key, [])
-            row_skel = active_row_skeletons.get(cand.row_id, "")
-            for tx, tx_date in committed_matches:
+
+            row_t = row_tokens.get(cand.row_id)
+            row_skel = (cand.row_skeleton or "").strip()
+            row_desc = cand.description or ""
+
+            # ---------- Branches A & B (same-account) ----------
+            for tx, tx_date in same_account_index.get(
+                (cand.account_id, cand.direction, cand.amount), []
+            ):
                 diff_seconds = abs((cand.date - tx_date).total_seconds())
                 if diff_seconds > buffer.total_seconds():
                     continue
-                tx_skel = (tx.skeleton or "").strip()
-                # Mirror match: committed tx живёт на ЧУЖОМ счёте — попал в
-                # индекс через зеркальную запись (target_account_id).
-                # Его skeleton отражает описание банка-ОТПРАВИТЕЛЯ, а не
-                # банка-ПОЛУЧАТЕЛЯ. Два разных банка никогда не описывают
-                # один СБП/внутренний перевод одинаковыми словами, поэтому
-                # skeleton guard здесь неприменим — он заблокировал бы все
-                # легитимные mirror-дубли (кейс: Тинькоф expense committed,
-                # потом импортируется Яндекс Дебет со своим описанием той же
-                # операции). Оставляем только time-window проверку.
-                #
-                # Для same-account re-import (is_mirror=False) skeleton guard
-                # остаётся: он защищает от ложных склеек двух разных операций
-                # на одном счёте с совпавшими суммой+датой (§8.6).
-                is_mirror = tx.account_id != cand.account_id
-                # Income-операция может поступить только на один конкретный
-                # счёт. Если committed income живёт на счёте A, а import row
-                # тоже income, но на счёте B — это разные операции, не дубли.
-                # Зеркальный ключ (target_account_id, income) был добавлен
-                # для edge-case расхождений направления у кредитных погашений,
-                # но для income-строк всегда даёт false-positive.
-                if is_mirror and cand.direction == "income":
-                    continue
-                # Фантомный transfer-income: committed tx живёт на ТОМ ЖЕ
-                # счёте, что и import row (is_mirror=False), но был создан
-                # автоматически через _create_transfer_pair при коммите
-                # противоположной стороны (дебетовый счёт → Ozon кредитка).
-                # Такой phantom наследует skeleton дебетовой стороны, а не
-                # описание получателя, поэтому skeleton'ы всегда различны
-                # даже для одной и той же операции. Признаки phantom income:
-                #   • type=income (это принимающая сторона)
-                #   • operation_type=transfer (создан как пара перевода)
-                # Для таких строк снимаем skeleton guard — time-window + ключ
-                # (account_id, income, amount) достаточно для корректного матча.
-                # Остаточный риск false-positive закрыт contract guard'ом ниже:
-                # повторные переводы одной суммы с разных договоров разделяются
-                # по contract token'у в описании.
+
+                tx_t = _tx_tokens(tx)
+
                 is_phantom_transfer_income = (
-                    not is_mirror
+                    cand.direction == "income"
                     and str(tx.type or "") == "income"
                     and str(tx.operation_type or "") == "transfer"
                 )
-                if (
-                    not is_mirror
-                    and not is_phantom_transfer_income
-                    and row_skel
-                    and tx_skel
-                    and row_skel != tx_skel
+
+                # Identifier-mismatch reject: full set (incl. phone) for
+                # branch A (same bank wording stable); contract/IBAN only
+                # for branch B (phantom from sender bank, phone naturally
+                # differs across statement banks, see §8.5/8.6 v1.20).
+                if _identifier_mismatch(
+                    row_t, tx_t,
+                    include_phone=not is_phantom_transfer_income,
                 ):
                     continue
-                # Contract guard for intrabank phantom income: two transfers
-                # of the same amount to the same account within ±2 days (e.g.
-                # repeated 100 000 ₽ transfers from different source contracts)
-                # produce identical skeletons. Extract the contract token from
-                # both descriptions — when both carry a contract and they
-                # differ, this is a different transfer, not a duplicate.
+
                 if is_phantom_transfer_income:
-                    from app.services.import_normalizer_v2 import (
-                        extract_tokens as _extract_tokens_tms,
-                    )
-                    row_contract = _extract_tokens_tms(
-                        cand.description or ""
-                    ).contract
-                    if row_contract:
-                        phantom_contract = _extract_tokens_tms(
-                            tx.description or ""
-                        ).contract
-                        if phantom_contract and phantom_contract != row_contract:
+                    # Branch B: skeleton NOT checked, contract-mismatch was
+                    # caught above by _identifier_mismatch already (which
+                    # covers contract/phone/iban). Time + amount + direction
+                    # + same-account is enough.
+                    branch = "B"
+                    skel_jaccard = _skeleton_jaccard(row_skel, (tx.skeleton or "").strip())
+                else:
+                    # Branch A: skeleton-match (equal OR Jaccard ≥ 0.8) confirms.
+                    tx_skel = (tx.skeleton or "").strip()
+                    skel_jaccard = _skeleton_jaccard(row_skel, tx_skel)
+                    skel_equal = bool(row_skel) and row_skel == tx_skel
+                    if not skel_equal and skel_jaccard < 0.8:
+                        # Fall back to normalized_description equality if
+                        # skeleton missing on either side (preserves §8.6 v1.11
+                        # legacy fallback for pre-v2 normalizer rows).
+                        if row_skel and tx_skel:
                             continue
-                rows_to_mark[cand.row_id] = tx
-                break
+                    branch = "A"
+
+                id_score = _identifier_match_score(row_t, tx_t)
+                proposals.append((
+                    diff_seconds,
+                    -id_score,
+                    -skel_jaccard,
+                    idx,
+                    cand,
+                    tx,
+                    tx_date,
+                    branch,
+                ))
+
+            # ---------- Branch D (mirror expense, narrow activation) ----------
+            if cand.direction != "expense":
+                # Branch C: mirror income — unconditionally rejected.
+                continue
+
+            target_acc = accounts.get(cand.account_id)
+            if target_acc is None:
+                continue
+            if str(target_acc.account_type or "") not in self._CREDIT_TARGET_ACCOUNT_TYPES:
+                continue
+            if not _has_credit_keyword(row_desc):
+                continue
+            if _has_anti_transfer(row_desc):
+                continue
+
+            for tx, tx_date in mirror_expense_index.get(
+                (cand.account_id, "expense", cand.amount), []
+            ):
+                diff_seconds = abs((cand.date - tx_date).total_seconds())
+                if diff_seconds > buffer.total_seconds():
+                    continue
+
+                tx_t = _tx_tokens(tx)
+                # Branch D (mirror expense): contract/IBAN mismatch reject;
+                # phone mismatch ignored (cross-bank phone wording differs).
+                if _identifier_mismatch(row_t, tx_t, include_phone=False):
+                    continue
+
+                tx_skel = (tx.skeleton or "").strip()
+                skel_jaccard = _skeleton_jaccard(row_skel, tx_skel)
+                id_score = _identifier_match_score(row_t, tx_t)
+
+                proposals.append((
+                    diff_seconds,
+                    -id_score,
+                    -skel_jaccard,
+                    idx,
+                    cand,
+                    tx,
+                    tx_date,
+                    "D",
+                ))
+
+        # Greedy 1-to-1 assignment: best (smallest diff, then highest id_score,
+        # then highest skeleton-similarity) wins, with used_tx_ids deduplication
+        # so one committed-tx is at most one row's partner. Closes bug 16210/16212.
+        proposals.sort(key=lambda p: (p[0], p[1], p[2], p[3]))
+        for diff_seconds, neg_id_score, neg_skel_jaccard, _idx, cand, tx, tx_date, branch in proposals:
+            if cand.row_id in rows_to_mark:
+                continue
+            if tx.id in used_tx_ids:
+                continue
+            rows_to_mark[cand.row_id] = (tx, branch)
+            used_tx_ids.add(tx.id)
 
         if not rows_to_mark:
             return
@@ -918,34 +1157,18 @@ class TransferMatcherService:
             .filter(ImportRow.id.in_(rows_to_mark.keys()))
             .all()
         )
-        accounts = {acc.id: acc for acc in self.account_repo.list_by_user(user_id)}
 
         for row in rows:
             if str(row.status or "") in ("committed", "skipped", "parked"):
                 continue
-            tx = rows_to_mark[row.id]
+            tx, branch = rows_to_mark[row.id]
             nd: dict = dict(row.normalized_data_json or {})
 
-            # Различаем два типа совпадения:
-            #   - mirror match: committed tx живёт на ЧУЖОМ счёте, в наш
-            #     индекс попала через target_account_id (зеркало transfer'a).
-            #     Это вторая сторона уже-committed пары — is_secondary=True,
-            #     partner = tx.account_id (другой счёт, не наш).
-            #   - real-duplicate match: committed tx живёт на НАШЕМ счёте
-            #     (повторный импорт той же выписки или phantom income из
-            #     `_create_transfer_pair_record`). Это «настоящий» дубликат,
-            #     UI показывает как «Дубль · другая сессия». is_secondary=False
-            #     (иначе UI ошибочно рисует pairLabel и получает self-loop).
-            nd_account_id = nd.get("account_id")
-            try:
-                row_account_id = int(nd_account_id) if nd_account_id is not None else None
-            except (TypeError, ValueError):
-                row_account_id = None
-            is_mirror = (
-                row_account_id is not None
-                and tx.account_id != row_account_id
-            )
-            if is_mirror:
+            # is_secondary: True only for branch D (cross-account mirror).
+            # Branches A and B are same-account real-duplicates → False
+            # (UI rendering: «Дубль · другая сессия», no self-loop pairLabel).
+            is_secondary = branch == "D"
+            if is_secondary:
                 partner_account_id = tx.account_id
             else:
                 partner_account_id = tx.target_account_id
@@ -962,7 +1185,8 @@ class TransferMatcherService:
                 "matched_account_name": partner_account.name if partner_account else None,
                 "match_confidence": 0.95,
                 "match_source": "committed_tx_duplicate",
-                "is_secondary": is_mirror,
+                "match_branch": branch,  # diagnostic; UI may surface this
+                "is_secondary": is_secondary,
             }
             row.normalized_data_json = nd
             row.status = "duplicate"
