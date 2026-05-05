@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     # the limiter without ripping decorators off routes.
     RATE_LIMIT_ENABLED: bool = True
 
+    # E2E suite test endpoints (`/api/v1/_test/*`). MUST be False in production.
+    # Three-layer defence (see app/api/v1/test_utils.py + app/main.py):
+    #   1. router is registered only when this is True
+    #   2. each endpoint re-checks the flag and returns 404 otherwise
+    #   3. main.py refuses to start if APP_ENV=prod AND this is True
+    # Reason for separate flag (not derived from APP_ENV): APP_ENV gates many
+    # other behaviors (logs, CORS, Sentry); a single env flip would silently
+    # enable seed/cleanup endpoints with catastrophic blast radius. Keep
+    # explicit so the deploy story is obvious in code review.
+    ENABLE_TEST_ENDPOINTS: bool = False
+
     @field_validator("BACKEND_CORS_ORIGINS", "TRUSTED_HOSTS", "TRUSTED_PROXIES", mode="before")
     @classmethod
     def _parse_str_list(cls, value: Any) -> list[str] | Any:

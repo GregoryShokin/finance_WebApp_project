@@ -65,20 +65,20 @@ export function LoginForm() {
   });
 
   return (
-    <form className="space-y-4" onSubmit={handleSubmit((values) => mutation.mutate(values))}>
+    <form className="space-y-4" data-testid="login-form" onSubmit={handleSubmit((values) => mutation.mutate(values))}>
       <div>
         <Label htmlFor="email">Email</Label>
-        <Input id="email" type="email" placeholder="mail@example.com" {...register('email')} />
-        {errors.email && <p className="mt-1 text-sm text-danger">{errors.email.message}</p>}
+        <Input id="email" type="email" placeholder="mail@example.com" data-testid="login-email-input" {...register('email')} />
+        {errors.email && <p className="mt-1 text-sm text-danger" data-testid="login-email-error">{errors.email.message}</p>}
       </div>
 
       <div>
         <Label htmlFor="password">Пароль</Label>
-        <Input id="password" type="password" placeholder="••••••••" {...register('password')} />
-        {errors.password && <p className="mt-1 text-sm text-danger">{errors.password.message}</p>}
+        <Input id="password" type="password" placeholder="••••••••" data-testid="login-password-input" {...register('password')} />
+        {errors.password && <p className="mt-1 text-sm text-danger" data-testid="login-password-error">{errors.password.message}</p>}
       </div>
 
-      <Button className="w-full" type="submit" disabled={mutation.isPending}>
+      <Button className="w-full" type="submit" data-testid="login-submit" disabled={mutation.isPending}>
         {mutation.isPending ? 'Входим...' : 'Войти'}
       </Button>
 

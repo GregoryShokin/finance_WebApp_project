@@ -1,0 +1,18 @@
+node_modules/
+reports/
+test-results/
+playwright-report/
+.tmp/
+
+# Local env (copied from .env.example)
+.env
+
+# Real anonymized statements live in repo-root Bank-extracts/ and are gitignored
+# at the repo level (see ../.gitignore). The e2e suite consumes them via a
+# symlink fixtures/statements -> ../../Bank-extracts. We ignore the symlink
+# itself so it never gets committed.
+fixtures/statements/
+
+# Synthetic adversarial fixtures: keep README and committed files, ignore
+# anything generated locally
+fixtures/adversarial/*.tmp

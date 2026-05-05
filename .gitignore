@@ -91,3 +91,13 @@ Bank-extracts/
 
 # --- Claude Code local worktrees ---
 .claude/worktrees/
+
+# --- E2E suite (Playwright) ---
+e2e/node_modules/
+e2e/reports/
+e2e/test-results/
+e2e/playwright-report/
+e2e/.tmp/
+e2e/.env
+e2e/fixtures/statements
+e2e/fixtures/statements/

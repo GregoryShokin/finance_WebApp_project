@@ -63,32 +63,32 @@ export function RegisterForm() {
   });
 
   return (
-    <form className="space-y-4" onSubmit={handleSubmit((values) => mutation.mutate(values))}>
+    <form className="space-y-4" data-testid="register-form" onSubmit={handleSubmit((values) => mutation.mutate(values))}>
       <div>
         <Label htmlFor="full_name">Имя</Label>
-        <Input id="full_name" placeholder="Григорий" {...register('full_name')} />
+        <Input id="full_name" placeholder="Григорий" data-testid="register-full-name-input" {...register('full_name')} />
         {errors.full_name && <p className="mt-1 text-sm text-danger">{errors.full_name.message}</p>}
       </div>
 
       <div>
         <Label htmlFor="email">Email</Label>
-        <Input id="email" type="email" placeholder="mail@example.com" {...register('email')} />
-        {errors.email && <p className="mt-1 text-sm text-danger">{errors.email.message}</p>}
+        <Input id="email" type="email" placeholder="mail@example.com" data-testid="register-email-input" {...register('email')} />
+        {errors.email && <p className="mt-1 text-sm text-danger" data-testid="register-email-error">{errors.email.message}</p>}
       </div>
 
       <div>
         <Label htmlFor="password">Пароль</Label>
-        <Input id="password" type="password" placeholder="••••••••" {...register('password')} />
+        <Input id="password" type="password" placeholder="••••••••" data-testid="register-password-input" {...register('password')} />
         {errors.password && <p className="mt-1 text-sm text-danger">{errors.password.message}</p>}
       </div>
 
       <div>
         <Label htmlFor="confirmPassword">Подтверждение пароля</Label>
-        <Input id="confirmPassword" type="password" placeholder="••••••••" {...register('confirmPassword')} />
+        <Input id="confirmPassword" type="password" placeholder="••••••••" data-testid="register-confirm-password-input" {...register('confirmPassword')} />
         {errors.confirmPassword && <p className="mt-1 text-sm text-danger">{errors.confirmPassword.message}</p>}
       </div>
 
-      <Button className="w-full" type="submit" disabled={mutation.isPending}>
+      <Button className="w-full" type="submit" data-testid="register-submit" disabled={mutation.isPending}>
         {mutation.isPending ? 'Создаем аккаунт...' : 'Создать аккаунт'}
       </Button>
 

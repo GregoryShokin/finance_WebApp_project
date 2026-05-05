@@ -1,0 +1,21 @@
+{
+  "name": "finance-webapp-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "E2E smoke suite (Playwright + TypeScript) for FinanceApp MVP. See E2E_SMOKE_TZ.md.",
+  "scripts": {
+    "test:smoke": "playwright test",
+    "test:smoke:headed": "playwright test --headed",
+    "test:smoke:ui": "playwright test --ui",
+    "test:smoke:report": "playwright show-report reports",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "dotenv": "^16.4.7",
+    "pg": "^8.13.1",
+    "typescript": "^5.7.2"
+  }
+}

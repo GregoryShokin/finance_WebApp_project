@@ -28,6 +28,7 @@ from app.api.v1.transactions import router as transactions_router
 from app.api.v1.installment_purchases import router as installment_purchases_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.school import router as school_router
+from app.api.v1.test_utils import router as test_utils_router
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.middleware import MaxBodySizeMiddleware, SecurityHeadersMiddleware
@@ -35,6 +36,15 @@ from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from app.services.bank_service import BankService
+
+# Defence-in-depth: refuse to start if test endpoints are enabled in production.
+# Layers 1+2 are in test_utils.py + the conditional include below; this is the
+# last-ditch guard against a misconfigured deploy. See E2E_SMOKE_TZ.md §5.3.
+if settings.is_production and settings.ENABLE_TEST_ENDPOINTS:
+    raise RuntimeError(
+        "ENABLE_TEST_ENDPOINTS=true with APP_ENV=production. Test seed/cleanup "
+        "endpoints must never be live in production. Refusing to start."
+    )
 
 app = FastAPI(title=settings.APP_NAME, version="0.3.0", debug=settings.DEBUG)
 
@@ -93,6 +103,17 @@ app.include_router(category_rules_router, prefix=settings.API_V1_PREFIX)
 app.include_router(installment_purchases_router, prefix=settings.API_V1_PREFIX)
 app.include_router(analytics_router, prefix=settings.API_V1_PREFIX)
 app.include_router(school_router, prefix=settings.API_V1_PREFIX)
+
+# E2E test endpoints — registered only when explicitly enabled (defence layer 1).
+# In production this branch never runs. Layer 2: every route in test_utils.py
+# re-checks the flag via Depends(require_test_endpoints_enabled). Layer 3: the
+# RuntimeError above aborts startup when APP_ENV=production AND flag is True.
+if settings.ENABLE_TEST_ENDPOINTS:
+    import logging
+    logging.getLogger(__name__).warning(
+        "TEST ENDPOINTS ENABLED at /api/v1/_test/* — must remain false in production."
+    )
+    app.include_router(test_utils_router, prefix=settings.API_V1_PREFIX)
 
 
 @app.on_event("startup")
