@@ -1,9 +1,12 @@
-from __future__ import annotations
-
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
+from app.api.v1._upload_helpers import validate_and_read_upload
+from app.core.config import settings
+from app.core.keys import user_or_ip_key
+from app.core.rate_limit import limiter
 from app.models.user import User
 from app.schemas.imports import (
     AttachRowToClusterRequest,
@@ -24,7 +27,13 @@ from app.schemas.imports import (
     ImportSessionResponse,
     ImportUploadResponse,
 )
-from app.services.import_service import ImportNotFoundError, ImportService, ImportValidationError
+from app.services.import_service import (
+    BankUnsupportedError,
+    ImportNotFoundError,
+    ImportService,
+    ImportValidationError,
+)
+from app.services.upload_validator import UnsupportedUploadTypeError, UploadTooLargeError
 
 router = APIRouter(prefix="/imports", tags=["Imports"])
 
@@ -48,21 +57,55 @@ def list_import_sessions(
     return service.list_active_sessions(user_id=current_user.id)
 
 
-@router.post("/upload", response_model=ImportUploadResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/upload", status_code=status.HTTP_201_CREATED)
+@limiter.limit(settings.RATE_LIMIT_UPLOAD, key_func=user_or_ip_key)
 async def upload_import_file(
+    request: Request,
     file: UploadFile = File(...),
     delimiter: str = ",",
+    force_new: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # response_model intentionally omitted — JSONResponse from validation
+    # rejects bypasses Pydantic serialization, and ImportUploadResponse on the
+    # success path is documented at the function level instead.
+    #
+    # `force_new=true` (Этап 0.5) bypasses file_hash deduplication and creates
+    # a new parallel session even if a duplicate exists. The frontend sends
+    # this after the user picks "Перезаписать" / "Загрузить как новую" in
+    # the duplicate-detection modal.
+    try:
+        raw_bytes, _detected = await validate_and_read_upload(file)
+    except UploadTooLargeError as exc:
+        return JSONResponse(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content=exc.to_payload())
+    except UnsupportedUploadTypeError as exc:
+        return JSONResponse(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, content=exc.to_payload())
+
     service = ImportService(db)
     try:
-        raw_bytes = await file.read()
         return service.upload_source(
             user_id=current_user.id,
             filename=file.filename or "import_file",
             raw_bytes=raw_bytes,
             delimiter=delimiter,
+            force_new=force_new,
+        )
+    except BankUnsupportedError as exc:
+        # 415 (not 400) — same family as upload_validator's
+        # `extension_content_mismatch` / `unsupported_upload_type`. The frontend
+        # branches on `code`, so the status code is informational; we keep it
+        # within the "uploaded media is wrong shape" semantic group.
+        db.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            content={
+                "code": "bank_unsupported",
+                "bank_id": exc.bank_id,
+                "bank_name": exc.bank_name,
+                "extractor_status": exc.extractor_status,
+                "detail": str(exc),
+            },
         )
     except ImportValidationError as exc:
         db.rollback()

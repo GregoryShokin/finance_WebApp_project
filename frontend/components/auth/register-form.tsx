@@ -8,7 +8,9 @@ import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 import { register as registerRequest, login } from '@/lib/api/auth';
-import { setAccessToken } from '@/lib/auth/token';
+import { ApiError } from '@/lib/api/client';
+import { formatRateLimitErrorAuth, isRateLimitError } from '@/lib/api/rate-limit-error';
+import { setTokenPair } from '@/lib/auth/token';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -47,11 +49,15 @@ export function RegisterForm() {
       return login({ email: values.email, password: values.password });
     },
     onSuccess: (data) => {
-      setAccessToken(data.access_token);
+      setTokenPair(data);
       toast.success('Аккаунт создан');
       router.replace('/dashboard');
     },
     onError: (error: Error) => {
+      if (error instanceof ApiError && isRateLimitError(error.status, error.payload)) {
+        toast.error(formatRateLimitErrorAuth(error.payload));
+        return;
+      }
       toast.error(error.message || 'Не удалось зарегистрироваться');
     },
   });

@@ -17,7 +17,13 @@ from app.repositories.account_repository import AccountRepository
 from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
 from app.repositories.transaction_repository import TransactionRepository
-from app.schemas.imports import ImportMappingRequest, ImportPreviewSummary, ImportRowUpdateRequest
+from app.schemas.imports import (
+    DuplicateAction,
+    ExistingProgress,
+    ImportMappingRequest,
+    ImportPreviewSummary,
+    ImportRowUpdateRequest,
+)
 from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
 from app.services.counterparty_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
@@ -85,6 +91,28 @@ class ImportNotFoundError(Exception):
     pass
 
 
+class BankUnsupportedError(Exception):
+    """Upload was matched to an account whose bank has no tested extractor.
+
+    Etap 1 Step 1.6 guard. Carries enough fields for the route to render a
+    structured 415 response that the frontend uses to surface the
+    "Запросить поддержку банка" modal pre-filled with this bank.
+
+    `extractor_status` is included so the UI can distinguish
+    `pending` (whitelist candidate) from `in_review` ("скоро") and
+    `broken` ("временно не работает") and copy-tweak the error accordingly.
+    """
+
+    def __init__(self, *, bank_id: int, bank_name: str, extractor_status: str) -> None:
+        self.bank_id = bank_id
+        self.bank_name = bank_name
+        self.extractor_status = extractor_status
+        super().__init__(
+            f"Импорт из банка «{bank_name}» пока не поддерживается "
+            f"(статус: {extractor_status})."
+        )
+
+
 class ImportService:
     def __init__(self, db: Session):
         self.db = db
@@ -117,6 +145,7 @@ class ImportService:
         raw_bytes: bytes,
         delimiter: str | None = None,
         has_header: bool = True,
+        force_new: bool = False,
     ) -> dict[str, Any]:
         return self.upload_file(
             user_id=user_id,
@@ -124,6 +153,7 @@ class ImportService:
             raw_bytes=raw_bytes,
             delimiter=delimiter,
             has_header=has_header,
+            force_new=force_new,
         )
 
     def upload_file(
@@ -134,11 +164,64 @@ class ImportService:
         raw_bytes: bytes,
         delimiter: str | None = None,
         has_header: bool = True,
+        force_new: bool = False,
     ) -> dict[str, Any]:
+        """Upload a bank statement file.
+
+        Этап 0.5: explicit duplicate-detection signal in the response.
+            * If an UNCOMMITTED session with the same `file_hash` exists,
+              return `action_required="choose"` with progress counters so the
+              UI can show "Открыть существующую / Перезаписать / Отмена".
+            * If only a COMMITTED session exists with the same hash, return
+              `action_required="warn"` with no `session_id` — the UI shows a
+              soft "уже импортирована" banner with `[Загрузить как новую] /
+              [Отмена]`.
+            * `force_new=True` bypasses both checks and creates a new
+              parallel session — used after the user picks "Перезаписать"
+              or "Загрузить как новую" in the modal.
+
+        "Перезаписать" is intentionally NON-destructive: the existing
+        session is preserved and lives in the queue. The user reconciles
+        in the queue UI which session to keep.
+        """
         file_hash = hashlib.sha256(raw_bytes).hexdigest()
-        existing = self.import_repo.find_active_by_file_hash(user_id=user_id, file_hash=file_hash)
-        if existing is not None:
-            return self._session_to_upload_response(existing)
+
+        if not force_new:
+            duplicates = self.import_repo.find_by_file_hash(
+                user_id=user_id, file_hash=file_hash, include_committed=True,
+            )
+            active_dups = [s for s in duplicates if s.status != "committed"]
+            committed_dups = [s for s in duplicates if s.status == "committed"]
+            if len(active_dups) > 1:
+                # Race-condition signal: two parallel upload tabs both passed
+                # the duplicate check, both created sessions. Log so we can
+                # decide later if a partial UNIQUE INDEX is worth a migration.
+                logger.warning(
+                    "multiple uncommitted sessions for one file_hash — possible race",
+                    extra={
+                        "user_id": user_id,
+                        "file_hash": file_hash,
+                        "count": len(active_dups),
+                        "session_ids": [s.id for s in active_dups],
+                    },
+                )
+            if active_dups:
+                existing = active_dups[0]
+                return self._session_to_upload_response(
+                    existing,
+                    action_required=DuplicateAction.CHOOSE,
+                    existing_progress=self._count_existing_progress(existing.id),
+                    existing_status=existing.status,
+                    existing_created_at=existing.created_at,
+                )
+            if committed_dups:
+                existing = committed_dups[0]
+                return self._session_to_upload_response(
+                    existing,
+                    action_required=DuplicateAction.WARN,
+                    existing_status=existing.status,
+                    existing_created_at=existing.created_at,
+                )
 
         extension = self._detect_extension(filename)
         extractor = self.extractors.get(extension)
@@ -182,6 +265,31 @@ class ImportService:
             )
             if matched_account:
                 suggested_account_id = matched_account.id
+
+        # Этап 1 Шаг 1.6 — bank-supported guard. Fires only when the upload
+        # auto-matched an account (via contract_number / statement_account_number)
+        # AND that account's bank lacks a tested extractor. Three reasons to
+        # gate here, not earlier:
+        #   1. We need extraction.meta to know which account matched — there's
+        #      no cheaper way to detect the bank for a generic CSV.
+        #   2. Uploads that DON'T auto-match (no contract on file, brand-new
+        #      bank, manual-only flow) fall through — the user assigns an
+        #      account in the queue, and the frontend disclaimer at /import
+        #      catches unsupported-bank intent BEFORE upload click.
+        #   3. Sessions for unsupported banks are NEVER created in the DB,
+        #      so the dedup check above can't ever match an unsupported
+        #      session — bank guard before/after dedup is moot semantically.
+        if suggested_account_id is not None:
+            matched = self.account_repo.get_by_id_and_user(
+                account_id=suggested_account_id, user_id=user_id,
+            )
+            bank = matched.bank if matched is not None else None
+            if bank is not None and bank.extractor_status != "supported":
+                raise BankUnsupportedError(
+                    bank_id=bank.id,
+                    bank_name=bank.name,
+                    extractor_status=bank.extractor_status,
+                )
 
         storage_payload = self._encode_source(raw_bytes=raw_bytes, source_type=extension)
         parse_settings = {
@@ -251,6 +359,14 @@ class ImportService:
             "statement_account_number": statement_account_number,
             "statement_account_match_reason": statement_account_match_reason,
             "statement_account_match_confidence": statement_account_match_confidence,
+            # Этап 0.5 — duplicate-detection signals. Always None on the
+            # fresh-upload path (we only got here because no duplicate matched).
+            # Kept aligned with `_session_to_upload_response` so the response
+            # contract is uniform regardless of which branch produced it.
+            "action_required": None,
+            "existing_progress": None,
+            "existing_status": None,
+            "existing_created_at": None,
         }
 
     def get_session(self, *, user_id: int, session_id: int) -> ImportSession:
@@ -1917,7 +2033,15 @@ class ImportService:
             return datetime.fromisoformat(value)
         raise TypeError('Некорректный формат даты транзакции.')
 
-    def _session_to_upload_response(self, session: ImportSession) -> dict[str, Any]:
+    def _session_to_upload_response(
+        self,
+        session: ImportSession,
+        *,
+        action_required: DuplicateAction | None = None,
+        existing_progress: ExistingProgress | None = None,
+        existing_status: str | None = None,
+        existing_created_at: datetime | None = None,
+    ) -> dict[str, Any]:
         ps = session.parse_settings or {}
         detection = session.mapping_json or ps.get("detection", {})
         extraction_meta = ps.get("extraction", {})
@@ -1953,6 +2077,74 @@ class ImportService:
             "statement_account_number": ps.get("statement_account_number"),
             "statement_account_match_reason": None,
             "statement_account_match_confidence": None,
+            # Этап 0.5 — duplicate-detection signals. All None on a fresh upload.
+            "action_required": action_required,
+            "existing_progress": existing_progress,
+            "existing_status": existing_status,
+            "existing_created_at": existing_created_at,
+        }
+
+    def _count_existing_progress(self, session_id: int) -> ExistingProgress:
+        """Project `ImportRepository.count_session_progress` into the schema type.
+
+        The aggregation lives in the repository (proper layer for SQL); this
+        thin wrapper exists so the upload flow doesn't have to know dict-key
+        names or rebuild the Pydantic model. Field rename
+        `user_actions_count` → `user_actions` is intentional — the schema
+        contract uses the shorter name in the JSON payload.
+        """
+        counts = self.import_repo.count_session_progress(session_id=session_id)
+        return ExistingProgress(
+            committed_rows=counts["committed_rows"],
+            user_actions=counts["user_actions_count"],
+            total_rows=counts["total_rows"],
+        )
+
+    def _duplicate_choose_response(
+        self, action: DuplicateAction, session: ImportSession,
+    ) -> dict[str, Any]:
+        """Fields to overlay on `_session_to_upload_response` for an active
+        duplicate (`action_required="choose"`). Computes the progress snapshot
+        once so the UI's [Перезаписать] button can show 'в существующей: 47
+        действий, 12 закоммиченных' without an extra round-trip.
+        """
+        return {
+            "action_required": action,
+            "existing_progress": self._count_existing_progress(session.id),
+            "existing_status": session.status,
+            "existing_created_at": session.created_at,
+        }
+
+    def _duplicate_warn_response(
+        self, session: ImportSession,
+    ) -> dict[str, Any]:
+        """Response shape for `action_required="warn"` — only existing match
+        is COMMITTED. There's no active session to "open"; the UI shows a soft
+        "уже импортирована N дней назад" banner with [Загрузить как новую] /
+        [Отмена]. `session_id` points at the committed session so the UI can
+        deep-link to its history if needed.
+        """
+        return {
+            "session_id": session.id,
+            "filename": session.filename,
+            "source_type": session.source_type,
+            "status": session.status,
+            "detected_columns": [],
+            "sample_rows": [],
+            "total_rows": 0,
+            "extraction": {},
+            "detection": {},
+            "suggested_account_id": session.account_id,
+            "contract_number": None,
+            "contract_match_reason": None,
+            "contract_match_confidence": None,
+            "statement_account_number": None,
+            "statement_account_match_reason": None,
+            "statement_account_match_confidence": None,
+            "action_required": DuplicateAction.WARN,
+            "existing_progress": None,
+            "existing_status": session.status,
+            "existing_created_at": session.created_at,
         }
 
     @staticmethod

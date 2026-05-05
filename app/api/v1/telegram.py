@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import hmac
 import secrets
@@ -7,14 +5,23 @@ import string
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
+from app.api.v1._upload_helpers import validate_and_read_upload
 from app.core.config import settings
+from app.core.keys import ip_key
+from app.core.rate_limit import limiter
 from app.models.user import User
-from app.services.import_service import ImportService, ImportValidationError
+from app.services.import_service import (
+    BankUnsupportedError,
+    ImportService,
+    ImportValidationError,
+)
+from app.services.upload_validator import UnsupportedUploadTypeError, UploadTooLargeError
 
 router = APIRouter(prefix="/telegram", tags=["Telegram"])
 
@@ -81,6 +88,13 @@ class TelegramBotUploadResponse(BaseModel):
     session_id: int
     filename: str
     status: str
+    # Этап 0.5 — duplicate-detection signal forwarded from ImportService.
+    # `None` on a fresh upload, `"choose"` if an active duplicate already
+    # exists, `"warn"` if only committed duplicates exist. The bot reads this
+    # to render a text reply instead of just "загружено" (the user has no
+    # modal in Telegram, so we explain what happened in plain Russian).
+    action_required: str | None = None
+    bot_message: str | None = None
 
 
 def _now_utc() -> datetime:
@@ -313,35 +327,105 @@ def connect_telegram_via_code(
     )
 
 
-@router.post("/bot/upload", response_model=TelegramBotUploadResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/bot/upload", status_code=status.HTTP_201_CREATED)
+@limiter.limit(settings.RATE_LIMIT_BOT_UPLOAD, key_func=ip_key)
 async def upload_import_from_telegram(
+    request: Request,
     telegram_id: int = Form(...),
     file: UploadFile = File(...),
     delimiter: str = Form(","),
     db: Session = Depends(get_db),
     _: None = Depends(require_bot_token),
 ):
-    """Внутренний endpoint для бота — загрузить выписку сразу в импорт-сессию пользователя."""
+    """Внутренний endpoint для бота — загрузить выписку сразу в импорт-сессию пользователя.
+
+    `response_model` опущен — ветки с 413/415 возвращают `JSONResponse`
+    напрямую, success-ответ имеет ту же форму, что и `TelegramBotUploadResponse`.
+    """
     user = db.query(User).filter(User.telegram_id == telegram_id).first()
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Telegram аккаунт не привязан.")
 
+    try:
+        raw_bytes, _detected = await validate_and_read_upload(file)
+    except UploadTooLargeError as exc:
+        return JSONResponse(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content=exc.to_payload())
+    except UnsupportedUploadTypeError as exc:
+        return JSONResponse(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, content=exc.to_payload())
+
     service = ImportService(db)
     try:
-        raw_bytes = await file.read()
         result = service.upload_source(
             user_id=user.id,
             filename=file.filename or "import_file",
             raw_bytes=raw_bytes,
             delimiter=delimiter,
         )
+    except BankUnsupportedError as exc:
+        # Bot has no modal UI, so we render a plain Russian message that the
+        # bot reads and replies in chat. Same JSON shape as the web route
+        # (`bank_unsupported` code + bank_id + extractor_status), so the
+        # backend contract stays uniform between web and bot.
+        db.rollback()
+        return JSONResponse(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            content={
+                "code": "bank_unsupported",
+                "bank_id": exc.bank_id,
+                "bank_name": exc.bank_name,
+                "extractor_status": exc.extractor_status,
+                "detail": str(exc),
+                "bot_message": (
+                    f"Импорт из банка «{exc.bank_name}» пока не поддерживается. "
+                    "Открой /import в веб-версии и нажми «Запросить поддержку банка», "
+                    "если хочешь, чтобы он появился в whitelist."
+                ),
+            },
+        )
     except ImportValidationError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # Этап 0.5 — duplicate detection. Bot has no modal UI, so we render a
+    # plain Russian message that points the user back to /import for any
+    # decisions (force_new is web-only — too easy to mis-trigger from chat).
+    action_required = result.get("action_required")
+    bot_message = _format_bot_duplicate_message(action_required, result)
 
     return TelegramBotUploadResponse(
         ok=True,
         session_id=result["session_id"],
         filename=result["filename"],
         status=result["status"],
+        action_required=action_required.value if action_required else None,
+        bot_message=bot_message,
     )
+
+
+def _format_bot_duplicate_message(action_required, result: dict) -> str | None:
+    """Plain-Russian text reply for duplicate-detected uploads via bot.
+
+    Returns None on a fresh upload (no message needed — bot just confirms
+    "загружено" through its own template). Date is formatted server-side so
+    bot and web both see the same wording.
+    """
+    if action_required is None:
+        return None
+    created_at = result.get("existing_created_at")
+    when = ""
+    if created_at is not None:
+        try:
+            when = f" (загружена {created_at.strftime('%d.%m.%Y')})"
+        except AttributeError:
+            when = ""
+    if action_required.value == "choose":
+        return (
+            f"Эта выписка уже в работе{when}. "
+            "Открой /import в веб-версии чтобы продолжить или удалить старую сессию."
+        )
+    if action_required.value == "warn":
+        return (
+            f"Эта выписка уже импортирована{when}. "
+            "Если нужно перезагрузить — открой /import в веб-версии."
+        )
+    return None

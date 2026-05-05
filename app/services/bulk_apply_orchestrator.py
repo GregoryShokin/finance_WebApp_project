@@ -139,7 +139,21 @@ class BulkApplyOrchestrator:
                 or normalized.get("description")
             )
             if fp and update.category_id is not None and normalized_desc:
-                by_rule_key.setdefault((fp, int(update.category_id)), []).append({
+                # Этап 2: bucket key includes operation_type. A mixed cluster
+                # (e.g. user splits 50 rows into 30 regular + 20 debt) used to
+                # collapse into one rule that learned only the category.
+                # Now each (fp, cat, op_type) combination upserts its own rule
+                # so the op_type signal is preserved per learned shape. UI is
+                # unchanged — the user still sees one cluster; the backend
+                # silently materializes 1..N rules.
+                bucket_op_type = (
+                    str(update.operation_type).strip()
+                    if update.operation_type is not None
+                    else None
+                ) or None
+                by_rule_key.setdefault(
+                    (fp, int(update.category_id), bucket_op_type), [],
+                ).append({
                     "normalized_description": normalized_desc,
                     "original_description": original_desc,
                 })
@@ -184,7 +198,7 @@ class BulkApplyOrchestrator:
         # accounted for, pass through without touching strength counters".
         rules_affected = 0
         strength_svc = RuleStrengthService(self.db, settings)
-        for (_fp, category_id), rows_for_rule in by_rule_key.items():
+        for (_fp, category_id, bucket_op_type), rows_for_rule in by_rule_key.items():
             if not rows_for_rule:
                 continue
             sample = rows_for_rule[0]
@@ -195,6 +209,7 @@ class BulkApplyOrchestrator:
                 category_id=category_id,
                 confirms_delta=len(rows_for_rule),
                 original_description=sample["original_description"],
+                operation_type=bucket_op_type,
             )
             strength_svc.on_confirmed(rule.id, confirms_delta=bulk_weight)
             rules_affected += 1

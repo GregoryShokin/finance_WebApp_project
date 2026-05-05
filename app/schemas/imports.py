@@ -40,6 +40,35 @@ class ImportSourceType(str, Enum):
     pdf = "pdf"
 
 
+class DuplicateAction(str, Enum):
+    """Signal in `ImportUploadResponse` telling the frontend how to react to
+    a duplicate-file detection (Этап 0.5).
+
+    `CHOOSE` — uncommitted session with the same file_hash exists. Frontend
+        opens a 3-button modal: open existing / upload as new (force_new) / cancel.
+    `WARN`   — only committed sessions with this file_hash exist. Frontend
+        shows a soft 2-button warning: upload as new / cancel.
+
+    Absence of the field (None) means no duplicate detected — proceed normally.
+    """
+
+    CHOOSE = "choose"
+    WARN = "warn"
+
+
+class ExistingProgress(BaseModel):
+    """Progress snapshot of a duplicate-detected session, attached to
+    `ImportUploadResponse.existing_progress` ONLY when action_required=CHOOSE.
+    Lets the user judge "how much work would I lose by uploading as new" via
+    the modal sub-text. Counts come from a single FILTER-aggregation query —
+    see `ImportService._count_existing_progress`.
+    """
+
+    committed_rows: int
+    user_actions: int
+    total_rows: int
+
+
 class ImportTableInfo(BaseModel):
     name: str
     columns: list[str]
@@ -77,6 +106,13 @@ class ImportUploadResponse(BaseModel):
     statement_account_number: str | None = None
     statement_account_match_reason: str | None = None
     statement_account_match_confidence: float | None = None
+    # Duplicate-detection signals (Этап 0.5). All None on a fresh upload.
+    # `session_id` itself points to the existing session when action_required is set,
+    # so the frontend can `setActive(session_id)` on the [Open existing] action.
+    action_required: DuplicateAction | None = None
+    existing_progress: ExistingProgress | None = None
+    existing_status: ImportSessionStatus | None = None
+    existing_created_at: datetime | None = None
 
 
 class ImportMappingRequest(BaseModel):

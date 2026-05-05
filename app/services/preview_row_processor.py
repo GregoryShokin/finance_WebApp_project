@@ -168,9 +168,18 @@ class PreviewRowProcessor:
             )
 
             # Phase 3 — rule lookup.
+            # Этап 2: `want_op_type=True` runs a two-pass search — rules
+            # with explicit operation_type win over legacy NULL rules at
+            # equal-or-lower confirms. The result drives BOTH the category
+            # AND the operation_type decision in apply_decisions (single
+            # repo round-trip per row).
             norm_desc = suggestion.normalized_description or ""
             cat_rule = (
-                self.category_rule_repo.get_best_rule(user_id=user_id, normalized_description=norm_desc)
+                self.category_rule_repo.get_best_rule(
+                    user_id=user_id,
+                    normalized_description=norm_desc,
+                    want_op_type=True,
+                )
                 if norm_desc
                 else None
             )
@@ -265,6 +274,11 @@ class PreviewRowProcessor:
 
             result.issues.extend(suggestion.review_reasons)
             result.issues.extend(suggestion.assignment_reasons)
+            # Этап 2: rule-based decisions (e.g. operation_type from a learned
+            # rule) emit their own reasons in DecisionRow.assignment_reasons.
+            # Surface them so the audit log and UI explain WHY the row was
+            # classified that way.
+            result.issues.extend(decision.assignment_reasons)
             result.normalized = normalized
 
         except (

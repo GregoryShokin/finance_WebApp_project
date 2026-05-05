@@ -119,6 +119,25 @@ export type ImportDetection = {
   unresolved_fields: string[];
 };
 
+// Этап 0.5: duplicate-detection signal in upload response.
+// `choose` — uncommitted session with the same file_hash exists; UI shows
+//   3-button modal [Открыть] / [Перезаписать] / [Отмена].
+// `warn`   — only committed sessions with this file_hash exist; UI shows
+//   2-button warning [Загрузить как новую] / [Отмена].
+// Absence (null) — no duplicate; proceed normally.
+export type DuplicateAction = 'choose' | 'warn';
+
+// Mirrors backend `ExistingProgress` Pydantic model. Counts come from a
+// single SQL aggregation in `ImportRepository.count_session_progress`.
+// `user_actions` uses a status-based proxy (status NOT IN ready/error)
+// because labels live in JSON. On a fresh upload (rows not yet created)
+// all three are 0 — UI should treat 0/0/0 as "Сессия в стадии загрузки".
+export type ExistingProgress = {
+  committed_rows: number;
+  user_actions: number;
+  total_rows: number;
+};
+
 export type ImportUploadResponse = {
   session_id: number;
   filename: string;
@@ -136,6 +155,13 @@ export type ImportUploadResponse = {
   statement_account_number: string | null;
   statement_account_match_reason: string | null;
   statement_account_match_confidence: number | null;
+  // Этап 0.5: all four are null on a fresh upload (no duplicate).
+  // When action_required != null, `session_id` points at the existing
+  // session (so the UI can `setActive(session_id)` on [Открыть]).
+  action_required?: DuplicateAction | null;
+  existing_progress?: ExistingProgress | null;
+  existing_status?: ImportSessionStatus | null;
+  existing_created_at?: string | null;  // ISO string from backend datetime
 };
 
 export type ImportSessionResponse = {

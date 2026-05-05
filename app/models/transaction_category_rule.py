@@ -4,7 +4,7 @@ from datetime import datetime
 
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -39,8 +39,23 @@ RULE_IDENTIFIER_KEYS: frozenset[str] = frozenset(
 
 class TransactionCategoryRule(Base):
     __tablename__ = "transaction_category_rules"
+    # UNIQUE on (user_id, normalized_description, category_id, operation_type)
+    # is declared here so SQLite test fixtures (which use Base.metadata.create_all)
+    # see the same index name. In Postgres the migration 0062 creates the
+    # *same* index but with `NULLS NOT DISTINCT` — SQLite already treats NULLs
+    # as equal in UNIQUE, so the two engines converge on the same semantics.
+    # The shared index name (`uq_tx_cat_rule_user_desc_cat_optype`) is what
+    # `bulk_upsert` / `upsert` target via `INSERT ... ON CONFLICT (...)`.
     __table_args__ = (
-        UniqueConstraint("user_id", "normalized_description", "category_id", name="uq_tx_cat_rule_user_desc_category"),
+        Index(
+            "uq_tx_cat_rule_user_desc_cat_optype",
+            "user_id",
+            "normalized_description",
+            "category_id",
+            "operation_type",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
@@ -49,6 +64,17 @@ class TransactionCategoryRule(Base):
     original_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     user_label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Этап 2: learned operation_type. NULL means the rule was created before
+    # Этап 2 (legacy) or by a code path that doesn't supply op_type. NULL
+    # rules never participate in the op_type-suggestion path of enrichment;
+    # they continue to drive category-suggestion exactly as before.
+    # NOTE: indexed via partial PG index `ix_rules_operation_type`
+    # (operation_type IS NOT NULL only) — see migration 0062. Don't add
+    # `index=True` here — would duplicate the index on every row including
+    # legacy NULL rows. UNIQUE on (user_id, normalized_description,
+    # category_id, operation_type) lives as a NULLS NOT DISTINCT index in
+    # the same migration.
+    operation_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # Strength counters (И-08 Phase 2, §10.2). Numeric so `warning` bulk-ack
     # confirmations can weigh 0.5 while `ready` confirmations weigh 1.0.

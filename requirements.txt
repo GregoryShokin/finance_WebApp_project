@@ -12,6 +12,7 @@ python-multipart==0.0.19
 redis==5.2.1
 celery==5.4.0
 email-validator==2.2.0
+slowapi>=0.1.9,<0.2
 
 openpyxl==3.1.5
 pypdf==5.3.1
@@ -22,4 +23,5 @@ anthropic>=0.50.0
 pytest>=9.0
 pytest-asyncio>=1.0
 httpx>=0.28
+freezegun>=1.5
 

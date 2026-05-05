@@ -275,7 +275,10 @@ def apply_decisions(
     """Produce DecisionRow from parsed facts + derived signals + enrichment hints.
 
     operation_type priority ladder (highest → lowest):
-      1. [reserved] Rule.operation_type — TransactionCategoryRule has no field yet
+      1. Rule.operation_type — learned via Этап 2 once `confirms >=
+         RULE_ACTIVATE_CONFIRMS` AND `rejections == 0`. The rule is a
+         direct statement of user intent ("каждый раз помечал debt") and
+         outranks every keyword/raw_type signal below.
       2. derived.requires_credit_split_hint → "transfer" (raw_type-based)
       3. parsed.raw_type in RAW_TYPE_TO_OPERATION_TYPE → mapped value
       4. derived.is_refund_like → "refund"
@@ -285,10 +288,65 @@ def apply_decisions(
       7. Description/skeleton keyword credit-split detection (only when op=transfer)
     """
 
-    # --- (2) Credit split from raw_type ---
+    # --- (1) Rule-learned operation_type (Этап 2) ---
+    decision_reasons: list[str] = []
+    rule_op_type: str | None = None
+    rule_id_for_audit: int | None = None
+    if category_rule is not None:
+        rule_op_type_raw = getattr(category_rule, "operation_type", None)
+        rule_confirms = getattr(category_rule, "confirms", None)
+        rule_is_active = getattr(category_rule, "is_active", False)
+        if rule_op_type_raw and rule_is_active:
+            # Local import keeps test-time mocking + circular-import-free.
+            from app.core.config import settings as _settings
+            try:
+                threshold = Decimal(str(_settings.RULE_ACTIVATE_CONFIRMS))
+            except Exception:  # noqa: BLE001 — settings shape oddity, fail open
+                threshold = Decimal("3")
+            try:
+                confirms_decimal = (
+                    rule_confirms if isinstance(rule_confirms, Decimal)
+                    else Decimal(str(rule_confirms or 0))
+                )
+            except Exception:  # noqa: BLE001 — non-numeric mock or stub; rule never wins
+                confirms_decimal = Decimal("0")
+            if confirms_decimal >= threshold:
+                rule_op_type = str(rule_op_type_raw).strip()
+                rule_id_for_audit = getattr(category_rule, "id", None)
+
     requires_credit_split = derived.requires_credit_split_hint
-    if requires_credit_split:
-        operation_type: str = "transfer"
+    operation_type: str
+
+    if rule_op_type:
+        operation_type = rule_op_type
+        decision_reasons.append(
+            f"operation_type из обученного правила #{rule_id_for_audit}"
+            if rule_id_for_audit is not None
+            else "operation_type из обученного правила"
+        )
+        # Diagnostic: if a keyword signal points the other way, log so we can
+        # spot rules that learned the wrong thing (e.g. "Возврат от Иван"
+        # was 5× confirmed as debt — rule wins, but the conflict deserves
+        # eyeballs in logs). Not user-facing.
+        keyword_signal: str | None = None
+        if derived.is_refund_like and rule_op_type != "refund":
+            keyword_signal = "refund"
+        elif derived.is_transfer_like and rule_op_type != "transfer":
+            keyword_signal = "transfer"
+        if keyword_signal is not None:
+            logger.debug(
+                "rule-keyword op_type conflict",
+                extra={
+                    "rule_id": rule_id_for_audit,
+                    "rule_op_type": rule_op_type,
+                    "keyword_signal": keyword_signal,
+                    "skeleton": derived.skeleton[:80],
+                },
+            )
+
+    # --- (2) Credit split from raw_type ---
+    elif requires_credit_split:
+        operation_type = "transfer"
 
     # --- (3) raw_type mapping ---
     elif (parsed.raw_type or "").strip().lower() in RAW_TYPE_TO_OPERATION_TYPE:
@@ -371,4 +429,5 @@ def apply_decisions(
         applied_rule_id=applied_rule_id,
         applied_rule_category_id=applied_rule_category_id,
         decision_source=decision_source,
+        assignment_reasons=decision_reasons,
     )

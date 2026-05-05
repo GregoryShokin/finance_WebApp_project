@@ -8,7 +8,10 @@ import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 import { login } from '@/lib/api/auth';
-import { setAccessToken } from '@/lib/auth/token';
+import { ApiError } from '@/lib/api/client';
+import { formatRateLimitErrorAuth, isRateLimitError } from '@/lib/api/rate-limit-error';
+import { setTokenPair } from '@/lib/auth/token';
+import { RETURN_TO_KEY } from '@/lib/auth/constants';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -38,12 +41,25 @@ export function LoginForm() {
   const mutation = useMutation({
     mutationFn: login,
     onSuccess: async (data) => {
-      setAccessToken(data.access_token);
+      setTokenPair(data);
       await queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
       toast.success('Вход выполнен');
-      router.replace('/dashboard');
+      let returnTo: string | null = null;
+      if (typeof window !== 'undefined') {
+        try {
+          returnTo = window.sessionStorage.getItem(RETURN_TO_KEY);
+          window.sessionStorage.removeItem(RETURN_TO_KEY);
+        } catch {
+          returnTo = null;
+        }
+      }
+      router.replace(returnTo && returnTo.startsWith('/') ? returnTo : '/dashboard');
     },
     onError: (error: Error) => {
+      if (error instanceof ApiError && isRateLimitError(error.status, error.payload)) {
+        toast.error(formatRateLimitErrorAuth(error.payload));
+        return;
+      }
       toast.error(error.message || 'Не удалось войти');
     },
   });

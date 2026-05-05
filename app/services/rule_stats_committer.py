@@ -108,6 +108,7 @@ class RuleStatsCommitter:
                     normalized_description=norm_desc,
                     category_id=final_cat,
                     original_description=orig_desc or None,
+                    operation_type=operation_type,
                 )
             return
 
@@ -120,11 +121,15 @@ class RuleStatsCommitter:
                 pass  # nothing to reject — old rule gone
 
         # Case C upsert + Case D upsert share the same body.
+        # Этап 2: operation_type joins the upsert key — one description+category
+        # can host multiple rules differentiated by op_type (e.g. "Перевод от
+        # Иван" + Зарплата + regular vs same description + Долги + debt).
         new_rule = self.category_rule_repo.upsert(
             user_id=user_id,
             normalized_description=norm_desc,
             category_id=final_cat,
             original_description=orig_desc or None,
+            operation_type=operation_type,
         )
         # `upsert` creates new rules with confirms=1.0 by default. Warning-row
         # commits should land at 0.5 instead — adjust if so.

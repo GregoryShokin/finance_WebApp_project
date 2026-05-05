@@ -12,6 +12,7 @@ Adding a model? Import it here.
 """
 from app.models.account import Account
 from app.models.bank import Bank
+from app.models.bank_support_request import BankSupportRequest
 from app.models.base import Base
 from app.models.global_pattern import GlobalPattern, GlobalPatternVote
 from app.models.budget import Budget
@@ -28,6 +29,7 @@ from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
 from app.models.installment_purchase import InstallmentPurchase
 from app.models.real_asset import RealAsset
+from app.models.refresh_token import RefreshToken
 from app.models.transaction import Transaction
 from app.models.transaction_category_rule import TransactionCategoryRule
 from app.models.user import User
@@ -35,6 +37,7 @@ from app.models.user import User
 __all__ = [
     "Account",
     "Bank",
+    "BankSupportRequest",
     "Base",
     "GlobalPattern",
     "GlobalPatternVote",
@@ -52,6 +55,7 @@ __all__ = [
     "ImportSession",
     "InstallmentPurchase",
     "RealAsset",
+    "RefreshToken",
     "Transaction",
     "TransactionCategoryRule",
     "User",

@@ -14,17 +14,23 @@
  */
 
 import { useRef, useMemo, useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { useAuth } from '@/hooks/use-auth';
+import { getAccounts } from '@/lib/api/accounts';
 import {
   commitImport,
   unexcludeImportRow,
   unparkImportRow,
   uploadImportFile,
 } from '@/lib/api/imports';
+import { ApiError } from '@/lib/api/client';
+import { formatRateLimitErrorUpload } from '@/lib/api/rate-limit-error';
+import { validateUploadSize } from '@/lib/upload/limits';
+import { BankSupportRequestModal } from '@/components/accounts/bank-support-request-form';
+import { Button } from '@/components/ui/button';
 
 import { ImportActionsBar } from './import-actions-bar';
 import { ImportStatusCard } from './import-status-card';
@@ -33,9 +39,12 @@ import { AttentionFeed } from './attention-feed';
 import { ImportFabCluster } from './import-fab-cluster';
 import { QueuePanel } from './queue-panel';
 import { MappingModal } from './mapping-modal';
+import { DuplicateModal } from './duplicate-modal';
 import { useActiveImportSession } from './use-active-session';
 import { FlyToFabProvider } from './fly-to-fab-context';
 import { fmtRubAbs } from './format';
+import type { ImportUploadResponse } from '@/types/import';
+import type { Bank, ExtractorStatus } from '@/types/account';
 
 export function ImportPage() {
   useAuth(); // keep auth hook mounted (token refresh side effects)
@@ -54,15 +63,127 @@ export function ImportPage() {
   const [queueOpen, setQueueOpen] = useState<{ x: number; y: number } | null>(null);
   const [mappingSessionId, setMappingSessionId] = useState<number | null>(null);
 
+  // Этап 0.5: duplicate-statement detection state.
+  // `pendingFile` is needed because the user may pick "Загрузить как новую"
+  // in the modal — at that point we have to re-fire the upload with
+  // forceNew=true, but the original `File` object is no longer in the
+  // mutation's variables (mutate() was called once and resolved).
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [duplicateState, setDuplicateState] = useState<ImportUploadResponse | null>(null);
+  // Этап 1 Шаг 1.6: bank-unsupported intercept on upload error.
+  // When the backend rejects with `code='bank_unsupported'`, we open the
+  // BankSupportRequestModal pre-filled with the bank that was matched —
+  // skipping the generic toast so the user lands directly on the action
+  // (request support) instead of just seeing «не поддерживается» and
+  // wondering what to do.
+  const [unsupportedBank, setUnsupportedBank] = useState<Bank | null>(null);
+
+  const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
+  const hasSupportedAccount = useMemo(() => {
+    const accounts = accountsQuery.data ?? [];
+    if (accounts.length === 0) return null;
+    return accounts.some((a) => a.bank?.extractor_status === 'supported');
+  }, [accountsQuery.data]);
+  // Этап 1 Шаг 1.6 — pre-upload disclaimer. Distinct from EmptyState's
+  // "no supported account at all" branch: this fires when the user has
+  // BOTH supported and unsupported-bank accounts. Without the warning,
+  // a user with e.g. Сбер + Альфа might upload an Альфа statement and
+  // see a 415 only AFTER picking the file — frustrating in production
+  // when the upload is 25 MB.
+  const unsupportedAccountBanks = useMemo(() => {
+    const accounts = accountsQuery.data ?? [];
+    const seen = new Map<number, { id: number; name: string }>();
+    for (const a of accounts) {
+      if (a.bank && a.bank.extractor_status !== 'supported' && !seen.has(a.bank.id)) {
+        seen.set(a.bank.id, { id: a.bank.id, name: a.bank.name });
+      }
+    }
+    return Array.from(seen.values());
+  }, [accountsQuery.data]);
+
   const uploadMut = useMutation({
-    mutationFn: (file: File) => uploadImportFile({ file, delimiter: ',' }),
+    mutationFn: ({ file, forceNew }: { file: File; forceNew?: boolean }) =>
+      uploadImportFile({ file, delimiter: ',', forceNew }),
     onSuccess: async (res) => {
+      // Этап 0.5: duplicate detection. Don't auto-setActive on a `choose` /
+      // `warn` response — surface the modal first so the user picks the
+      // resolution. `force_new=true` retry path skips this branch because
+      // backend never returns action_required when force_new is set.
+      if (res.action_required === 'choose' || res.action_required === 'warn') {
+        setDuplicateState(res);
+        return;
+      }
       toast.success(`Загружено: ${res.filename}`);
       await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
       setActive(res.session_id);
+      setPendingFile(null);
     },
-    onError: (e: Error) => toast.error(e.message || 'Не удалось загрузить файл'),
+    onError: (e: Error) => {
+      setPendingFile(null);
+      // Bank-unsupported branch: open the request-support modal instead of
+      // a toast. The modal pre-fills the bank fields so the user only types
+      // an optional note. Other errors fall through to formatUploadError.
+      if (e instanceof ApiError && e.payload?.code === 'bank_unsupported') {
+        const bankId = typeof e.payload.bank_id === 'number' ? e.payload.bank_id : null;
+        const bankName = typeof e.payload.bank_name === 'string' ? e.payload.bank_name : '';
+        const status: ExtractorStatus =
+          (typeof e.payload.extractor_status === 'string' &&
+            (e.payload.extractor_status === 'pending' ||
+              e.payload.extractor_status === 'in_review' ||
+              e.payload.extractor_status === 'broken'))
+            ? e.payload.extractor_status
+            : 'pending';
+        if (bankId !== null) {
+          setUnsupportedBank({
+            id: bankId,
+            name: bankName,
+            code: '',
+            bik: null,
+            is_popular: false,
+            extractor_status: status,
+            extractor_last_tested_at: null,
+            extractor_notes: null,
+          });
+          return;
+        }
+      }
+      toast.error(formatUploadError(e));
+    },
   });
+
+  // Pre-upload guard: bounce oversized or wrong-extension files before they
+  // hit the network. Backend has the same check (defense-in-depth) — this is
+  // purely UX so the user doesn't wait on a 25 MB upload to be told «too big».
+  function handleSelectFile(file: File) {
+    const result = validateUploadSize(file);
+    if (!result.ok) {
+      toast.error(result.message);
+      return;
+    }
+    setPendingFile(file);
+    uploadMut.mutate({ file });
+  }
+
+  function handleDuplicateOpenExisting() {
+    if (duplicateState?.session_id) {
+      setActive(duplicateState.session_id);
+    }
+    setDuplicateState(null);
+    setPendingFile(null);
+  }
+
+  function handleDuplicateForceNew() {
+    if (pendingFile) {
+      uploadMut.mutate({ file: pendingFile, forceNew: true });
+    }
+    setDuplicateState(null);
+    // pendingFile cleared in onSuccess of the retry mutation
+  }
+
+  function handleDuplicateCancel() {
+    setDuplicateState(null);
+    setPendingFile(null);
+  }
 
   const commitMut = useMutation({
     mutationFn: (sessionId: number) => commitImport(sessionId, true),
@@ -158,7 +279,7 @@ export function ImportPage() {
         committing={commitMut.isPending}
         resetting={resetMut.isPending}
         resetEnabled={activeSessionId !== null && !!preview}
-        onUpload={(file) => uploadMut.mutate(file)}
+        onUpload={handleSelectFile}
         onOpenQueue={openQueueAtPill}
         onCommit={() => activeSessionId && commitMut.mutate(activeSessionId)}
         onReset={() => {
@@ -173,9 +294,27 @@ export function ImportPage() {
         readySum={readySum}
       />
 
+      {hasSupportedAccount && unsupportedAccountBanks.length > 0 && (
+        <UnsupportedBankBanner
+          banks={unsupportedAccountBanks}
+          onRequestSupport={(bank) =>
+            setUnsupportedBank({
+              id: bank.id,
+              name: bank.name,
+              code: '',
+              bik: null,
+              is_popular: false,
+              extractor_status: 'pending',
+              extractor_last_tested_at: null,
+              extractor_notes: null,
+            })
+          }
+        />
+      )}
+
       <div className="mt-5 space-y-3.5">
         {activeSessionId === null ? (
-          <EmptyState />
+          <EmptyState hasSupportedAccount={hasSupportedAccount} />
         ) : isLoadingPreview && !preview ? (
           <div className="surface-card grid h-48 place-items-center text-xs text-ink-3">
             <Loader2 className="size-4 animate-spin" />
@@ -211,12 +350,105 @@ export function ImportPage() {
       {mappingSessionId !== null ? (
         <MappingModal sessionId={mappingSessionId} onClose={() => setMappingSessionId(null)} />
       ) : null}
+
+      {duplicateState && duplicateState.action_required === 'choose' && (
+        <DuplicateModal
+          open
+          action="choose"
+          existingSessionId={duplicateState.session_id}
+          existingProgress={duplicateState.existing_progress ?? null}
+          existingStatus={duplicateState.existing_status ?? null}
+          existingCreatedAt={duplicateState.existing_created_at ?? null}
+          filename={duplicateState.filename}
+          onOpenExisting={handleDuplicateOpenExisting}
+          onForceNew={handleDuplicateForceNew}
+          onCancel={handleDuplicateCancel}
+        />
+      )}
+      {duplicateState && duplicateState.action_required === 'warn' && (
+        <DuplicateModal
+          open
+          action="warn"
+          existingSessionId={duplicateState.session_id}
+          existingStatus={duplicateState.existing_status ?? null}
+          existingCreatedAt={duplicateState.existing_created_at ?? null}
+          filename={duplicateState.filename}
+          onForceNew={handleDuplicateForceNew}
+          onCancel={handleDuplicateCancel}
+        />
+      )}
+      {unsupportedBank && (
+        <BankSupportRequestModal
+          bank={unsupportedBank}
+          onClose={() => setUnsupportedBank(null)}
+        />
+      )}
     </div>
     </FlyToFabProvider>
   );
 }
 
-function EmptyState() {
+function UnsupportedBankBanner({
+  banks,
+  onRequestSupport,
+}: {
+  banks: { id: number; name: string }[];
+  onRequestSupport: (bank: { id: number; name: string }) => void;
+}) {
+  // Soft warning above the import area. The list is short — one row per
+  // unsupported bank the user has an account for. Click → opens the same
+  // BankSupportRequestModal as the post-error path, pre-filled with the
+  // bank id, so the user can jump straight to filing a support request
+  // without first attempting (and failing) an upload.
+  const heading = banks.length === 1
+    ? `Импорт из «${banks[0].name}» пока не поддерживается`
+    : 'Несколько твоих банков пока не поддерживают импорт';
+  return (
+    <div className="mt-3 rounded-md border border-amber-300/60 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+      <p className="font-medium">{heading}</p>
+      <p className="mt-1 text-amber-800">
+        Загрузка выписки из этих банков будет отклонена. Запроси поддержку — мы добавим формат, когда сможем.
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {banks.map((b) => (
+          <button
+            key={b.id}
+            type="button"
+            onClick={() => onRequestSupport(b)}
+            className="rounded-md border border-amber-400/70 bg-white px-2 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
+          >
+            Запросить поддержку «{b.name}»
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ hasSupportedAccount }: { hasSupportedAccount: boolean | null }) {
+  const [requestOpen, setRequestOpen] = useState(false);
+
+  // hasSupportedAccount === false → user has accounts but none of their banks
+  // are in the import whitelist. Don't tell them to "upload a statement" —
+  // the upload would be rejected by the backend guard. Surface the gap and
+  // route them to the bank-support request flow.
+  if (hasSupportedAccount === false) {
+    return (
+      <>
+        <section className="surface-card flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+          <p className="font-serif text-2xl text-ink">Импорт пока не поддерживается ни для одного твоего счёта</p>
+          <p className="max-w-md text-sm text-ink-2">
+            Сейчас выписки распознаются у Сбера, Т-Банка, Озон Банка и Яндекс Банка. Если работаешь с другим банком —
+            напиши нам, какой формат добавить, мы расширим поддержку.
+          </p>
+          <Button type="button" onClick={() => setRequestOpen(true)} className="mt-2">
+            Запросить поддержку банка
+          </Button>
+        </section>
+        {requestOpen && <BankSupportRequestModal onClose={() => setRequestOpen(false)} />}
+      </>
+    );
+  }
   return (
     <section className="surface-card flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
       <p className="font-serif text-2xl text-ink">Загрузи первую выписку</p>
@@ -226,4 +458,59 @@ function EmptyState() {
       </p>
     </section>
   );
+}
+
+/**
+ * Map a backend upload error into a user-facing string. The validator emits
+ * structured payloads (see `app/services/upload_validator.py:to_payload()`)
+ * with a `code` field and per-code extras; surface those numbers when present
+ * so the toast says «47 МБ при лимите 25», not generic «too large».
+ */
+function formatUploadError(err: Error): string {
+  if (!(err instanceof ApiError)) {
+    return err.message || 'Не удалось загрузить файл';
+  }
+  const p = err.payload ?? {};
+  const code = typeof p.code === 'string' ? p.code : undefined;
+  const detail = typeof p.detail === 'string' ? p.detail : err.detail;
+
+  // MUST stay first: 429 rate_limit_exceeded uses a different payload shape
+  // (retry_after_seconds, no max_size_mb) than the upload-validator codes
+  // below. Reorder and the generic fallback at the bottom will swallow it.
+  if (err.status === 429 && code === 'rate_limit_exceeded') {
+    return formatRateLimitErrorUpload(p);
+  }
+  if (code === 'global_body_size_exceeded' || code === 'upload_too_large') {
+    const max = typeof p.max_size_mb === 'number' ? p.max_size_mb : undefined;
+    const actual = typeof p.actual_size_mb === 'number' ? p.actual_size_mb : undefined;
+    if (max !== undefined && actual !== undefined) {
+      return `Файл ${actual} МБ превышает лимит ${max} МБ.`;
+    }
+  }
+  if (code === 'xlsx_decompression_too_large') {
+    const max = typeof p.max_decompressed_mb === 'number' ? p.max_decompressed_mb : undefined;
+    const actual = typeof p.actual_decompressed_mb === 'number' ? p.actual_decompressed_mb : undefined;
+    if (max !== undefined && actual !== undefined) {
+      return `XLSX распаковывается в ${actual} МБ при лимите ${max} МБ — возможный zip-bomb.`;
+    }
+  }
+  if (code === 'extension_content_mismatch') {
+    return 'Содержимое файла не совпадает с расширением.';
+  }
+  if (code === 'empty_file') {
+    return 'Файл пустой.';
+  }
+  if (code === 'unsupported_upload_type') {
+    return 'Формат файла не поддерживается. Загрузи CSV, XLSX или PDF.';
+  }
+  if (code === 'xlsx_missing_manifest' || code === 'xlsx_invalid_archive') {
+    return 'Файл с расширением .xlsx не похож на корректную таблицу Excel.';
+  }
+  if (code === 'bank_unsupported') {
+    // Reached only if onError can't open the modal (missing bank_id).
+    // The happy path is intercepted earlier in `uploadMut.onError`.
+    const name = typeof p.bank_name === 'string' ? p.bank_name : 'этого банка';
+    return `Импорт из «${name}» пока не поддерживается.`;
+  }
+  return detail || 'Не удалось загрузить файл';
 }

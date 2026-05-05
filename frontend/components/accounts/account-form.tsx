@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { BankPicker } from '@/components/accounts/bank-picker';
+import { BankSupportRequestModal } from '@/components/accounts/bank-support-request-form';
 import type { Account, AccountType, Bank, CreateAccountPayload } from '@/types/account';
 
 type TypeOption = { value: AccountType; label: string };
@@ -71,6 +72,7 @@ export function AccountForm({
   const [accountType, setAccountType] = useState<AccountTypeValue>('main');
   const [selectedBank, setSelectedBank] = useState<Bank | null>(null);
   const [bankError, setBankError] = useState<string | null>(null);
+  const [supportRequestOpen, setSupportRequestOpen] = useState(false);
 
   useEffect(() => {
     const resolvedAccountType =
@@ -197,6 +199,21 @@ export function AccountForm({
           />
           {bankError ? (
             <p className="mt-1 text-sm text-danger">{bankError}</p>
+          ) : selectedBank && selectedBank.extractor_status !== 'supported' ? (
+            <div className="mt-1 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800 ring-1 ring-amber-200">
+              <p>
+                {selectedBank.extractor_status === 'broken'
+                  ? 'Импорт для этого банка временно не работает — формат выписки изменился, чиним.'
+                  : 'Импорт выписок этого банка пока не поддерживается. Транзакции придётся вводить вручную.'}
+              </p>
+              <button
+                type="button"
+                onClick={() => setSupportRequestOpen(true)}
+                className="mt-1 font-medium text-amber-900 underline hover:no-underline"
+              >
+                Запросить поддержку
+              </button>
+            </div>
           ) : (
             <p className="mt-1 text-xs text-slate-400">Помогает правильно распознавать выписки и связывать счета</p>
           )}
@@ -385,6 +402,13 @@ export function AccountForm({
           {isSubmitting ? 'Сохраняем...' : initialData ? 'Сохранить изменения' : 'Создать счёт'}
         </Button>
       </div>
+
+      {supportRequestOpen && (
+        <BankSupportRequestModal
+          bank={selectedBank}
+          onClose={() => setSupportRequestOpen(false)}
+        />
+      )}
     </form>
   );
 }

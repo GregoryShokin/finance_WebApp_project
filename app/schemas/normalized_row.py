@@ -109,6 +109,14 @@ class DecisionRow:
     applied_rule_id: int | None            # for reject-tracking on commit
     applied_rule_category_id: int | None
     decision_source: str                   # "rule"|"enrichment"|"credit_split_hint"|"user_edit"|"bulk_apply"|"moderator"
+    # Reasons added by apply_decisions itself (e.g. "operation_type из правила
+    # #42"). Distinct from EnrichmentSuggestion.assignment_reasons which
+    # carries enrichment-stage reasoning. Both lists are concatenated by
+    # preview_row_processor before surfacing to the UI / audit log — empty
+    # by default so existing call sites that build DecisionRow without this
+    # field don't break. Defaulted last so dataclass ordering allows the
+    # field to be optional at construction time.
+    assignment_reasons: list[str] = field(default_factory=list)
 
     # Set by TransferMatcherService (collection phase — not per-row):
     transfer_match: dict | None = None

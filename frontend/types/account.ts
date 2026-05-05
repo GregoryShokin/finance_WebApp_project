@@ -10,12 +10,17 @@ export type AccountType =
   | 'savings_account'  // накопительный счёт (бессрочный, только ставка)
   | 'currency';        // валютный счёт
 
+export type ExtractorStatus = 'supported' | 'in_review' | 'pending' | 'broken';
+
 export type Bank = {
   id: number;
   name: string;
   code: string;
   bik: string | null;
   is_popular: boolean;
+  extractor_status: ExtractorStatus;
+  extractor_last_tested_at: string | null;
+  extractor_notes: string | null;
 };
 
 export type Account = {

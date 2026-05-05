@@ -6,18 +6,22 @@ class BankRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def list_all(self) -> list[Bank]:
-        return self.db.query(Bank).order_by(Bank.is_popular.desc(), Bank.name).all()
+    def list_all(self, *, supported_only: bool = False) -> list[Bank]:
+        query = self.db.query(Bank)
+        if supported_only:
+            query = query.filter(Bank.extractor_status == "supported")
+        return query.order_by(Bank.is_popular.desc(), Bank.name).all()
 
     def list_popular(self) -> list[Bank]:
         return self.db.query(Bank).filter(Bank.is_popular.is_(True)).order_by(Bank.name).all()
 
-    def search(self, query: str) -> list[Bank]:
+    def search(self, query: str, *, supported_only: bool = False) -> list[Bank]:
         q = f"%{query.strip().lower()}%"
+        builder = self.db.query(Bank).filter(Bank.name.ilike(q))
+        if supported_only:
+            builder = builder.filter(Bank.extractor_status == "supported")
         return (
-            self.db.query(Bank)
-            .filter(Bank.name.ilike(q))
-            .order_by(Bank.is_popular.desc(), Bank.name)
+            builder.order_by(Bank.is_popular.desc(), Bank.name)
             .limit(20)
             .all()
         )

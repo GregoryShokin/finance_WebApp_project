@@ -210,13 +210,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
 
         if upload_resp.status_code == 201:
-            await safe_reply(
-                update,
-                "Выписка загружена.\n\n"
-                f"Файл: {filename}\n"
-                "Проверь и подтверди транзакции в приложении.\n\n"
-                f"{APP_IMPORT_URL}",
-            )
+            payload = upload_resp.json()
+            # Этап 0.5 — duplicate-detection text reply. Backend formats the
+            # Russian message (one source of truth for date format / wording);
+            # bot just forwards it. Falls back to the standard "загружено"
+            # reply when no duplicate was detected.
+            bot_message = payload.get("bot_message")
+            if bot_message:
+                await safe_reply(update, bot_message)
+            else:
+                await safe_reply(
+                    update,
+                    "Выписка загружена.\n\n"
+                    f"Файл: {filename}\n"
+                    "Проверь и подтверди транзакции в приложении.\n\n"
+                    f"{APP_IMPORT_URL}",
+                )
         else:
             detail = (
                 upload_resp.json().get("detail")

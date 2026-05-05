@@ -60,17 +60,73 @@ class ImportRepository:
             .all()
         )
 
-    def find_active_by_file_hash(self, *, user_id: int, file_hash: str) -> ImportSession | None:
-        return (
-            self.db.query(ImportSession)
-            .filter(
-                ImportSession.user_id == user_id,
-                ImportSession.file_hash == file_hash,
-                ImportSession.status != "committed",
-            )
-            .order_by(ImportSession.created_at.desc())
-            .first()
+    def find_by_file_hash(
+        self,
+        *,
+        user_id: int,
+        file_hash: str,
+        include_committed: bool = False,
+    ) -> list[ImportSession]:
+        """All sessions for this (user, file_hash), newest first.
+
+        Caller post-filters into uncommitted/committed buckets (Этап 0.5):
+        a single query is cheaper than two, and it lets the service flag
+        the race-condition signal (multiple uncommitted matches) in one place.
+
+        `include_committed=False` keeps the legacy semantics for any caller
+        that only cares about active duplicates.
+        """
+        query = self.db.query(ImportSession).filter(
+            ImportSession.user_id == user_id,
+            ImportSession.file_hash == file_hash,
         )
+        if not include_committed:
+            query = query.filter(ImportSession.status != "committed")
+        return query.order_by(ImportSession.created_at.desc()).all()
+
+    def count_session_progress(
+        self,
+        *,
+        session_id: int,
+    ) -> dict[str, int]:
+        """Aggregate per-row counters for the duplicate-detection UX (Этап 0.5).
+
+        Returns:
+            total_rows         — every ImportRow in the session
+            committed_rows     — rows already turned into Transactions
+            user_actions_count — rows the user touched (parked/skipped/excluded/
+                                 committed) — proxy for "work invested"
+
+        `user_actions_count` uses a status-based proxy because labels live in
+        `ImportRow.normalized_data_json` (JSON) and JSON-path filters aren't
+        portable between Postgres and the SQLite test fixture. `ready` and
+        `error` are "untouched"; everything else implies the user (or
+        moderator orchestrator) acted on the row.
+
+        Single SELECT with three CASE aggregates, cheaper than three separate
+        COUNTs. CASE WHEN (not FILTER) for SQLite compatibility — Postgres
+        handles both.
+        """
+        from sqlalchemy import case, func
+
+        row = (
+            self.db.query(
+                func.count(ImportRow.id).label("total_rows"),
+                func.count(case((ImportRow.status == "committed", 1))).label(
+                    "committed_rows"
+                ),
+                func.count(
+                    case((ImportRow.status.notin_(("ready", "error")), 1))
+                ).label("user_actions_count"),
+            )
+            .filter(ImportRow.session_id == session_id)
+            .one()
+        )
+        return {
+            "total_rows": int(row.total_rows or 0),
+            "committed_rows": int(row.committed_rows or 0),
+            "user_actions_count": int(row.user_actions_count or 0),
+        }
 
     def delete_session(self, session: ImportSession) -> None:
         self.db.delete(session)

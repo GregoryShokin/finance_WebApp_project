@@ -7,7 +7,6 @@ import { ChevronDown, LogOut, Settings, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 import { cn } from '@/lib/utils/cn';
-import { removeAccessToken } from '@/lib/auth/token';
 import { useAuth } from '@/hooks/use-auth';
 import { isNavGroup, navItems, type NavGroup, type NavLeaf } from './nav-items';
 
@@ -94,11 +93,11 @@ type SidebarProps = {
 
 export function Sidebar({ isMobileOpen = false, onMobileClose }: SidebarProps = {}) {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const pathname = usePathname();
 
-  function handleLogout() {
-    removeAccessToken();
+  async function handleLogout() {
+    await logout();
     router.replace('/login');
   }
 

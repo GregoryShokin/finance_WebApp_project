@@ -1,9 +1,15 @@
+import logging
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
+
+from app.core.client_ip import get_client_ip
 
 
 DOCS_PATH_PREFIXES = ("/docs", "/redoc", "/openapi.json")
+
+logger = logging.getLogger(__name__)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -41,3 +47,56 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             )
 
         return response
+
+
+class MaxBodySizeMiddleware(BaseHTTPMiddleware):
+    """Defense-in-depth cap on request body size.
+
+    Header-only check: if `Content-Length` is present and exceeds the cap,
+    we reject with 413 BEFORE the multipart parser allocates anything. If
+    the header is missing (chunked transfer encoding, HTTP/2) we fall through
+    to the route — `app/services/upload_validator.py` enforces the per-type
+    limit on the streaming read, so a hostile client lying about the size
+    still gets caught on the second 64 KB chunk.
+
+    Registered LAST in `main.py` so FastAPI's reverse-order middleware
+    application runs it FIRST on every request (before CORS preflight, before
+    SecurityHeadersMiddleware), making rejections cheap.
+    """
+
+    def __init__(self, app, *, max_size_mb: int):
+        super().__init__(app)
+        self.max_size_bytes = max_size_mb * 1024 * 1024
+        self.max_size_mb = max_size_mb
+
+    async def dispatch(self, request: Request, call_next):
+        raw = request.headers.get("content-length")
+        if raw is not None:
+            try:
+                declared = int(raw)
+            except ValueError:
+                # Malformed header — let Starlette / the route handle it.
+                # Either it'll be rejected at parse time, or treated as missing.
+                declared = None
+            # Negative Content-Length is nonsense; treat as missing rather than
+            # signing off on it (Starlette/uvicorn usually rejects upstream, but
+            # belt-and-braces).
+            if declared is not None and declared >= 0 and declared > self.max_size_bytes:
+                # `get_client_ip` honors `TRUSTED_PROXIES` so behind nginx/ALB
+                # we log the real client, not the proxy. Same resolver is used
+                # by the rate-limit key functions — keeps logs and rate-limit
+                # buckets aligned on the same identity.
+                client_ip = get_client_ip(request)
+                logger.warning(
+                    "MaxBodySizeMiddleware blocked request: "
+                    "client_ip=%s path=%s content_length=%s cap=%s",
+                    client_ip, request.url.path, declared, self.max_size_bytes,
+                )
+                payload = {
+                    "detail": "Размер запроса превышает глобальный лимит.",
+                    "code": "global_body_size_exceeded",
+                    "max_size_mb": self.max_size_mb,
+                    "actual_size_mb": round(declared / 1024 / 1024, 2),
+                }
+                return JSONResponse(status_code=413, content=payload)
+        return await call_next(request)

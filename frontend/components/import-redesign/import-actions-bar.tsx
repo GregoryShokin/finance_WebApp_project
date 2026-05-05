@@ -9,6 +9,7 @@
 import { type ChangeEvent, useRef } from 'react';
 import { ChevronRight, Check, FileText, RotateCcw, Upload } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
+import { UPLOAD_ACCEPT_ATTR } from '@/lib/upload/limits';
 
 export function ImportActionsBar({
   onUpload,
@@ -67,7 +68,7 @@ export function ImportActionsBar({
         <input
           ref={fileInputRef}
           type="file"
-          accept=".csv,.xlsx,.pdf"
+          accept={UPLOAD_ACCEPT_ATTR}
           className="hidden"
           onChange={handleFile}
         />

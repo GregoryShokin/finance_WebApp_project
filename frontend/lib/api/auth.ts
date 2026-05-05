@@ -17,6 +17,22 @@ export function register(payload: RegisterPayload) {
   });
 }
 
+export function refresh(refreshToken: string) {
+  return apiClient<TokenResponse>('/auth/refresh', {
+    method: 'POST',
+    auth: false,
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+}
+
+export function logout(refreshToken: string) {
+  return apiClient<void>('/auth/logout', {
+    method: 'POST',
+    auth: false,
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+}
+
 export function getMe() {
   return apiClient<User>('/auth/me');
 }

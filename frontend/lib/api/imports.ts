@@ -17,12 +17,26 @@ import type {
   ParkedQueueResponse,
 } from '@/types/import';
 
-export function uploadImportFile(payload: { file: File; delimiter: string }) {
+export function uploadImportFile(payload: {
+  file: File;
+  delimiter: string;
+  // Этап 0.5: bypass duplicate-file detection. Set after the user picks
+  // [Перезаписать] (active duplicate) or [Загрузить как новую] (committed
+  // duplicate) in DuplicateStatementModal. Backend creates a new parallel
+  // session; the existing one is preserved.
+  forceNew?: boolean;
+}) {
   const formData = new FormData();
   formData.set('file', payload.file);
   formData.set('delimiter', payload.delimiter);
 
-  return apiClient<ImportUploadResponse>('/imports/upload', {
+  // Backend reads `force_new` as a query parameter (FastAPI query param
+  // semantics — easier than a multipart string field for a boolean flag).
+  const url = payload.forceNew
+    ? '/imports/upload?force_new=true'
+    : '/imports/upload';
+
+  return apiClient<ImportUploadResponse>(url, {
     method: 'POST',
     body: formData,
   });

@@ -13,6 +13,7 @@ celery_app = Celery(
         # "app.jobs.moderate_import_session",  # disabled 2026-05-03 — LLM moderation removed
         "app.jobs.auto_preview_import_session",
         "app.jobs.transfer_matcher_debounced",
+        "app.jobs.prune_refresh_tokens",
     ],
 )
 celery_app.conf.update(
@@ -27,5 +28,9 @@ celery_app.conf.beat_schedule = {
     "monthly-capital-snapshot": {
         "task": "monthly_capital_snapshot",
         "schedule": crontab(day_of_month="1", hour="3", minute="0"),
+    },
+    "prune-refresh-tokens": {
+        "task": "prune_refresh_tokens",
+        "schedule": crontab(hour="4", minute="30"),
     },
 }

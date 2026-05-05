@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.models.base import Base
 # Import all models so SQLAlchemy can resolve relationships before create_all
@@ -34,11 +35,43 @@ except Exception:
     pass
 
 
+@pytest.fixture(autouse=True)
+def _disable_rate_limit_by_default(monkeypatch):
+    """Suite-wide default: rate limiter OFF.
+
+    The slowapi `Limiter` singleton defaults to `enabled=True` (production
+    behavior, backed by Redis). Most tests don't care about rate-limit
+    counters, but they DO share the singleton — without this fixture, a
+    /imports/upload test that runs after rate-limit-specific tests inherits
+    a polluted Redis bucket and starts seeing 429s instead of 413/415.
+
+    Rate-limit-specific tests (test_rate_limit_*.py) MUST re-enable the
+    limiter via `monkeypatch.setattr(limiter, "enabled", True)` AND swap
+    `_storage` + `_limiter` to a fresh `MemoryStorage` so they don't write
+    to production Redis. monkeypatch reverts after the test, so this
+    autouse default is restored. If you're debugging a flaky rate-limit
+    test a year from now, check that the test fixture still does both
+    swaps — without `_limiter` rebuild, enforcement still hits Redis even
+    after `_storage` swap (the strategy captures the storage ref at
+    `Limiter.__init__`).
+    """
+    try:
+        from app.core.rate_limit import limiter
+        from app.core.config import settings
+        monkeypatch.setattr(limiter, "enabled", False)
+        monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", False)
+    except Exception:
+        # Imports may fail in minimal envs; tests not touching the limiter
+        # don't need this defense.
+        pass
+
+
 @pytest.fixture(scope="function")
 def db():
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     # SQLite doesn't support all PostgreSQL features, but is sufficient for logic tests.
     Base.metadata.create_all(engine)
