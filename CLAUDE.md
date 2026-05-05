@@ -19,8 +19,16 @@ alembic upgrade head
 # or inside Docker:
 docker compose exec api alembic upgrade head
 
-# Create new migration
-alembic revision --autogenerate -m "description"
+# Create new migration — ALWAYS pass --rev-id to keep numeric naming.
+# Auto-generated hashes (e.g. b71eef23124e) break the project's 00XX
+# convention; subsequent rename is a manual chore. Check alembic/versions/
+# for the next available number.
+alembic revision --autogenerate -m "description" --rev-id 00XX
+
+# Merge revisions for parallel feature branches:
+alembic merge -m "merge X and Y chains" <head_a> <head_b> --rev-id 00XX
+# Note: alembic downgrade -1 from a merge revision raises "Ambiguous walk"
+# (two parents). Use explicit target: `alembic downgrade <revision>`.
 
 # Run backend manually (without Docker)
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

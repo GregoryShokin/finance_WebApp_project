@@ -88,6 +88,46 @@ class BankSupportRequest(Base):
 
 ---
 
+## MVP scope (2026-05-03 решение)
+
+- **Запрос поддержки:** только `bank_id`/`bank_name` + `note`. Sample-файлы — пост-MVP (PII / encryption / cleanup не вписываются в MVP).
+- **Уведомления о добавлении:** pull-модель — юзер видит статус в `GET /bank-support/requests`. Email/Telegram push — пост-MVP.
+- **Регрессионные fixtures:** maintainer кладёт вручную в `tests/fixtures/statements/raw/`, не через user-facing API.
+- **`notify_user_on_add`:** не реализовано — нет канала уведомлений в MVP.
+- **Storage образцов:** пропущено целиком — открытые вопросы про Fernet-шифрование, cleanup-cron, Docker-volume снимаются вместе с самой фичей upload'а.
+
+## Реализация Этапа 1 (2026-05-03)
+
+- **Backend:** миграции `0060` (колонки `extractor_status` / `extractor_last_tested_at` / `extractor_notes` на `banks` + CHECK) и `0061` (таблица `bank_support_requests`). Идемпотентный baseline в `app/services/bank_service.py` синхронизирует supported-коды на старте FastAPI; ручные статусы (`in_review`, `broken`) защищены.
+- **API:** `GET /banks?supported_only=` + расширенный `BankResponse`; изолированный роутер `app/api/v1/bank_support.py` с `POST /bank-support/request` и `GET /bank-support/requests` (idempotent по open-request на банк, fallback по `bank_name` для freetext).
+- **Frontend:** BankPicker разбит на две секции с бейджами «Скоро» / «Временно не работает», disclaimer + CTA «Запросить поддержку» в account-form, отдельный EmptyState на /import для юзеров без supported-счетов, форма `BankSupportRequestModal`.
+- **Спека:** §21 в `Спецификация — Пайплайн импорта.md`.
+- **Тестовое покрытие:** 17 тестов (baseline 6 + repo filter 4 + bank_support 7).
+- **Шаг 6 (guard на upload):** ждёт мержа Этапа 0.5 (конфликт по `import_service.upload_file`).
+- **Шаг 7 (regression fixtures):** infrastructure в [tests/fixtures/statements/](tests/fixtures/statements/) уже готова, ждёт реальных анонимизированных образцов от maintainer'а.
+
+## Alembic merge — инструкция при мерже Этапа 0.1
+
+После того как 0059 (refresh_tokens) приземлится в master:
+
+```bash
+alembic heads                    # должны увидеть 0059, 0061
+pytest                           # тесты должны быть зелёные на ветке с обеими миграциями
+alembic merge -m "merge refresh_tokens and bank whitelist" 0059 0061
+# создаст 0062_<auto>.py — пустая миграция-точка-схождения
+alembic upgrade head             # обе цепочки применятся, схема сходится в один head
+```
+
+Подводные камни:
+- `alembic merge` создаёт пустую миграцию, не объединяет содержимое — это нормально, схемы независимые.
+- Перед merge запусти `pytest` — если что-то падает на двух головах, зачем сводить?
+- Если `alembic upgrade` падает — проверь `down_revision` каждой миграции вручную (0059 → 0058, 0060 → 0058, 0061 → 0060, 0062_merge → [0059, 0061]).
+
+## Известные ограничения / backlog
+
+- **Уведомление юзеру при смене статуса банка.** Когда банк переводится из `supported` в `pending` / `broken` (например, изменился формат выписки), юзеры с аккаунтами на этом банке узнают только при следующем upload'е. В MVP это OK — мягкий disclaimer на форме счёта при выборе банка отрабатывает. Через год накопления — рассмотреть push-уведомление.
+- **Pre-upload disclaimer на /import (для Шага 6).** После реализации серверного guard'а — добавить до-upload-сообщение «эта возможность недоступна для вашего банка» вместо ошибки после загрузки. Иначе юзер тратит время на upload → получает 400. Пометка в карточку Шага 6.
+
 ## Связанные документы
 
 - [[Спецификация — Пайплайн импорта]] — основной спек, в §15 будет добавлено упоминание.
