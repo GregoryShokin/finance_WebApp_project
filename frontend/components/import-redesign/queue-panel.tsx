@@ -28,9 +28,10 @@ import {
 import { createAccount, getAccounts } from '@/lib/api/accounts';
 import { fmtPeriod } from './format';
 import type {
-  Account, CreateAccountPayload,
+  Account, Bank, CreateAccountPayload,
 } from '@/types/account';
-import type { ImportSessionListItem, BulkClustersResponse, ImportPreviewResponse } from '@/types/import';
+import type { ImportSessionListItem, BulkClustersResponse, ImportPreviewResponse, ImportUploadResponse } from '@/types/import';
+import { getBanks } from '@/lib/api/banks';
 
 type QueueStatus =
   | 'parsing'      // auto_preview running
@@ -99,12 +100,17 @@ export function QueuePanel({
   onClose,
   onResume,
   onOpenMapping,
+  onOpenCustomCreate,
   activeSessionId,
 }: {
   origin: { x: number; y: number };
   onClose: () => void;
   onResume: (sessionId: number) => void;
   onOpenMapping: (sessionId: number) => void;
+  // Шаг 4: invoked when user picks «Нет» on the inline account-type prompt.
+  // The synthetic payload mirrors ImportUploadResponse — parent opens
+  // CreateAccountFromImportModal with pre-filled bank + contract.
+  onOpenCustomCreate?: (synthetic: ImportUploadResponse) => void;
   activeSessionId?: number | null;
 }) {
   const queryClient = useQueryClient();
@@ -117,9 +123,17 @@ export function QueuePanel({
     refetchInterval: 2000,
   });
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
+  // Banks for the inline account-type prompt — render the bank's display
+  // name when the session has bank_code but no attached account yet.
+  const banksQuery = useQuery({
+    queryKey: ['banks', { supportedOnly: false }],
+    queryFn: () => getBanks(undefined, { supportedOnly: false }),
+    staleTime: 60_000,
+  });
 
   const sessions = sessionsQuery.data?.sessions ?? [];
   const accounts = accountsQuery.data ?? [];
+  const banks = banksQuery.data ?? [];
 
   const [openId, setOpenId] = useState<number | null>(null);
 
@@ -223,6 +237,7 @@ export function QueuePanel({
                   session={s}
                   classified={classified}
                   accounts={accounts}
+                  banks={banks}
                   isOpen={isOpen}
                   isActive={s.id === activeSessionId}
                   onToggle={() => setOpenId(isOpen ? null : s.id)}
@@ -234,6 +249,7 @@ export function QueuePanel({
                     onOpenMapping(s.id);
                     onClose();
                   }}
+                  onOpenCustomCreate={onOpenCustomCreate}
                   onCommit={() => commitMut.mutate(s.id)}
                   committing={commitMut.isPending}
                   onDelete={() => deleteMut.mutate(s.id)}
@@ -256,11 +272,13 @@ function QueueRow({
   session,
   classified,
   accounts,
+  banks,
   isOpen,
   isActive,
   onToggle,
   onResume,
   onOpenMapping,
+  onOpenCustomCreate,
   onCommit,
   committing,
   onDelete,
@@ -269,24 +287,43 @@ function QueueRow({
   session: ImportSessionListItem;
   classified: QueueStatus;
   accounts: Account[];
+  banks: Bank[];
   isOpen: boolean;
   isActive?: boolean;
   onToggle: () => void;
   onResume: () => void;
   onOpenMapping: () => void;
+  onOpenCustomCreate?: (synthetic: ImportUploadResponse) => void;
   onCommit: () => void;
   committing: boolean;
   onDelete: () => void;
   deleting: boolean;
 }) {
   // Prefer bank info from the assigned account (always reliable when set);
-  // fall back to filename heuristic for sessions that haven't been assigned.
+  // fall back first to the extractor's detection (Шаг 4 — bank_code on the
+  // session), then to filename heuristic for legacy uploads. Detection is
+  // strictly stronger than filename.
   const accountForSession = session.account_id != null
     ? accounts.find((a) => a.id === session.account_id) ?? null
     : null;
+  const detectedBank = session.bank_code && session.bank_code !== 'unknown'
+    ? banks.find((b) => b.code === session.bank_code) ?? null
+    : null;
   const fromFilename = bankFromFilename(session.filename);
-  const bankCode = accountForSession?.bank?.code ?? fromFilename.code ?? null;
-  const bankName = accountForSession?.bank?.name ?? fromFilename.name;
+  const bankCode = accountForSession?.bank?.code ?? detectedBank?.code ?? fromFilename.code ?? null;
+  const bankName = accountForSession?.bank?.name ?? detectedBank?.name ?? fromFilename.name;
+
+  // Шаг 4 — inline account-type prompt for unattached sessions where the
+  // extractor recognised the bank. Hidden when:
+  //   • account already attached (skip prompt entirely),
+  //   • parsing in progress (waste to ask before extraction settles),
+  //   • bank_code is null/unknown (нет «<Bank> <Type>» формулировки).
+  const showInlinePrompt =
+    session.account_id == null
+    && classified !== 'parsing'
+    && classified !== 'error'
+    && session.suggested_bank_id != null;
+  const noAccount = session.account_id == null;
 
   return (
     <div
@@ -330,6 +367,29 @@ function QueueRow({
               className="rounded-lg bg-accent-red px-3.5 py-1.5 text-xs font-medium text-white transition hover:opacity-90"
             >
               Открыть
+            </button>
+          ) : showInlinePrompt ? (
+            // Шаг 4 — inline confirm. Renders entirely inside the action slot
+            // until the user picks Да/Нет. Once a choice is made the session
+            // gets account_id and the row re-renders with the regular CTA.
+            <InlineAccountPrompt
+              session={session}
+              banks={banks}
+              onCustomize={onOpenCustomCreate}
+            />
+          ) : noAccount ? (
+            // Bank not detected at all (bank_code='unknown' or legacy upload):
+            // show a single «Указать вручную» that opens the full form.
+            <button
+              type="button"
+              onClick={() => {
+                if (onOpenCustomCreate) {
+                  onOpenCustomCreate(synthesizeUploadResponse(session, null));
+                }
+              }}
+              className="rounded-lg border border-line bg-bg-surface px-3 py-1.5 text-xs text-ink-2 transition hover:bg-bg-surface2"
+            >
+              Указать счёт вручную
             </button>
           ) : classified === 'done_local' ? (
             <div className="flex items-center gap-2">
@@ -747,4 +807,198 @@ function aggregateCounterparties(
   }
 
   return Array.from(buckets.values()).sort((a, b) => b.count - a.count);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Шаг 4 — inline account-type prompt + synthesise helper
+// ──────────────────────────────────────────────────────────────────────────
+
+const INLINE_TYPE_LABEL: Record<string, string> = {
+  main: 'Дебетовая карта',
+  credit_card: 'Кредитная карта',
+  installment_card: 'Карта рассрочки',
+  loan: 'Кредит',
+  savings: 'Вклад',
+  savings_account: 'Накопительный счёт',
+  cash: 'Наличные',
+  marketplace: 'Маркетплейс',
+  broker: 'Брокерский',
+  currency: 'Валютный',
+};
+
+/**
+ * Inline prompt rendered in the queue row's action slot when the session
+ * has no account_id but the extractor identified a bank+type.
+ *
+ * Two states:
+ *   • initial   — show «Это <Bank> <Type>?» with [Да] [Нет] buttons.
+ *   • naming    — after «Да», show a single name input with default
+ *                 «<Bank> <Type>» that the user can edit, plus [Создать].
+ *
+ * On «Создать» the prompt POSTs createAccount + assignSessionAccount and
+ * the row re-renders with the regular CTA via React Query invalidation.
+ *
+ * On «Нет» it bubbles to onCustomize → import-page opens the full form.
+ */
+function InlineAccountPrompt({
+  session,
+  banks,
+  onCustomize,
+}: {
+  session: ImportSessionListItem;
+  banks: Bank[];
+  onCustomize?: (synthetic: ImportUploadResponse) => void;
+}) {
+  const queryClient = useQueryClient();
+  const bank = banks.find((b) => b.id === session.suggested_bank_id) ?? null;
+  const typeHint = (session.account_type_hint ?? null) as string | null;
+  const typeLabel = typeHint ? INLINE_TYPE_LABEL[typeHint] ?? typeHint : null;
+  const bankName = bank?.name ?? '?';
+
+  const [phase, setPhase] = useState<'ask' | 'name'>('ask');
+  const [name, setName] = useState<string>('');
+
+  const createMut = useMutation({
+    mutationFn: async () => {
+      if (!bank || !typeHint) throw new Error('Не хватает банка или типа');
+      const finalName = name.trim() || `${bank.name} ${typeLabel ?? ''}`.trim();
+      const payload: CreateAccountPayload = {
+        name: finalName,
+        currency: 'RUB',
+        balance: 0,
+        is_active: true,
+        account_type: typeHint as CreateAccountPayload['account_type'],
+        is_credit: typeHint === 'loan',
+        bank_id: bank.id,
+        contract_number: session.contract_number ?? null,
+        statement_account_number: session.statement_account_number ?? null,
+      };
+      const account = await createAccount(payload);
+      const accountId = (account as { id?: number } | null | undefined)?.id;
+      if (!accountId) throw new Error('Сервер не вернул id счёта');
+      await assignSessionAccount(session.id, accountId);
+      return accountId;
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['accounts'] });
+      await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+      toast.success(`Создан счёт «${name.trim() || `${bankName} ${typeLabel ?? ''}`.trim()}»`);
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось создать счёт'),
+  });
+
+  // If extractor knew the bank but not the type, we can't form the «Это X?»
+  // sentence — bounce straight to the full form. (Should be rare since the
+  // contract-prefix refiner now resolves type for tbank/yandex/ozon/sber.)
+  if (!typeHint) {
+    return (
+      <button
+        type="button"
+        onClick={() => onCustomize?.(synthesizeUploadResponse(session, bank))}
+        className="rounded-lg border border-line bg-bg-surface px-3 py-1.5 text-xs text-ink-2 transition hover:bg-bg-surface2"
+      >
+        Указать счёт вручную
+      </button>
+    );
+  }
+
+  if (phase === 'ask') {
+    return (
+      <div className="flex flex-col items-end gap-1.5">
+        <div className="text-[11px] text-ink-3">
+          Это <span className="font-medium text-ink-2">«{bankName} {typeLabel}»</span>?
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setName(`${bankName} ${typeLabel}`);
+              setPhase('name');
+            }}
+            className="rounded-lg bg-accent-green px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90"
+          >
+            Да
+          </button>
+          <button
+            type="button"
+            onClick={() => onCustomize?.(synthesizeUploadResponse(session, bank))}
+            className="rounded-lg border border-line bg-bg-surface px-3 py-1.5 text-xs text-ink-2 transition hover:bg-bg-surface2"
+          >
+            Нет
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Phase 'name' — confirm + give name.
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        autoFocus
+        placeholder="Название"
+        className="w-44 rounded-lg border border-line bg-bg-surface px-2 py-1.5 text-xs text-ink outline-none focus:border-ink-3"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !createMut.isPending && name.trim()) {
+            createMut.mutate();
+          } else if (e.key === 'Escape') {
+            setPhase('ask');
+          }
+        }}
+      />
+      <button
+        type="button"
+        disabled={createMut.isPending || !name.trim()}
+        onClick={() => createMut.mutate()}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-ink px-3 py-1.5 text-xs font-medium text-white transition hover:bg-ink-2 disabled:opacity-50"
+      >
+        {createMut.isPending ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
+        Создать
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Build a synthetic `ImportUploadResponse` from a queue list entry so the
+ * legacy `CreateAccountFromImportModal` (which expects an upload response)
+ * can be opened from queue without a separate code path.
+ */
+function synthesizeUploadResponse(
+  session: ImportSessionListItem,
+  bank: Bank | null,
+): ImportUploadResponse {
+  return {
+    session_id: session.id,
+    filename: session.filename,
+    source_type: session.source_type as ImportUploadResponse['source_type'],
+    status: session.status as ImportUploadResponse['status'],
+    detected_columns: [],
+    sample_rows: [],
+    total_rows: 0,
+    extraction: {},
+    detection: {
+      selected_table: null, available_tables: [], field_mapping: {},
+      field_confidence: {}, field_reasons: {}, column_analysis: [],
+      suggested_date_formats: [], overall_confidence: 0,
+      confidence_label: 'low', unresolved_fields: [],
+    },
+    suggested_account_id: null,
+    contract_number: session.contract_number ?? null,
+    contract_match_reason: null,
+    contract_match_confidence: null,
+    statement_account_number: session.statement_account_number ?? null,
+    statement_account_match_reason: null,
+    statement_account_match_confidence: null,
+    bank_code: session.bank_code ?? null,
+    account_type_hint: session.account_type_hint ?? null,
+    suggested_account_match_reason: null,
+    suggested_account_match_confidence: null,
+    suggested_bank_id: bank?.id ?? session.suggested_bank_id ?? null,
+    account_candidates: [],
+    requires_account_creation: true,
+  };
 }

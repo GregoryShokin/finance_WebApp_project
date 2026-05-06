@@ -69,6 +69,29 @@ class ExistingProgress(BaseModel):
     total_rows: int
 
 
+class AccountCandidate(BaseModel):
+    """Account that *might* be the destination for this upload (Шаг 2 of
+    auto-account-recognition).
+
+    Emitted in `ImportUploadResponse.account_candidates` when the extractor's
+    bank/account_type detection matches multiple accounts for the user — the
+    UI shows a quick picker instead of falling back to the full queue. Fields
+    are the minimal subset needed to render that picker: id + name + bank +
+    type, plus closed-state flags for §13 spec compliance.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    bank_id: int
+    bank_name: str | None = None
+    account_type: str
+    is_closed: bool = False
+    contract_number: str | None = None
+    statement_account_number: str | None = None
+
+
 class ImportTableInfo(BaseModel):
     name: str
     columns: list[str]
@@ -106,6 +129,22 @@ class ImportUploadResponse(BaseModel):
     statement_account_number: str | None = None
     statement_account_match_reason: str | None = None
     statement_account_match_confidence: float | None = None
+    # Auto-account-recognition Шаг 2 (2026-05-06). The extractor classifies the
+    # PDF into a bank + account-type pair (Шаг 1) and, when contract /
+    # statement_account lookups fail, ImportService tries a Level-3 fallback by
+    # matching the user's accounts on (bank, account_type). All these fields
+    # are populated on the SAME response that already carries
+    # contract_match_*/statement_account_match_* — the frontend reads whichever
+    # is non-null and offers the corresponding UX (auto-attach / picker /
+    # create-account). Missing values default to None / [] / False so the
+    # contract is uniform regardless of whether the upload is supported.
+    bank_code: str | None = None
+    account_type_hint: str | None = None
+    suggested_account_match_reason: str | None = None
+    suggested_account_match_confidence: float | None = None
+    suggested_bank_id: int | None = None
+    account_candidates: list[AccountCandidate] = Field(default_factory=list)
+    requires_account_creation: bool = False
     # Duplicate-detection signals (Этап 0.5). All None on a fresh upload.
     # `session_id` itself points to the existing session when action_required is set,
     # so the frontend can `setActive(session_id)` on the [Open existing] action.
@@ -278,6 +317,15 @@ class ImportSessionListItem(BaseModel):
     # Mirrors session.summary_json["auto_preview"]["status"]:
     # pending | running | ready | failed | skipped | null (never attempted).
     auto_preview_status: str | None = None
+    # Auto-account-recognition Шаг 4 — extractor-detected bank+type are
+    # echoed on every queue entry so the frontend can render the inline
+    # «Это <Bank> <Type>?» prompt without an extra getImportSession call.
+    # All optional: legacy sessions and unknown-bank uploads leave them null.
+    bank_code: str | None = None
+    account_type_hint: str | None = None
+    contract_number: str | None = None
+    statement_account_number: str | None = None
+    suggested_bank_id: int | None = None
 
 
 class ImportSessionListResponse(BaseModel):

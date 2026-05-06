@@ -22,10 +22,12 @@ import { useAuth } from '@/hooks/use-auth';
 import { getAccounts } from '@/lib/api/accounts';
 import {
   commitImport,
+  getImportSession,
   unexcludeImportRow,
   unparkImportRow,
   uploadImportFile,
 } from '@/lib/api/imports';
+import { getBanks } from '@/lib/api/banks';
 import { ApiError } from '@/lib/api/client';
 import { formatRateLimitErrorUpload } from '@/lib/api/rate-limit-error';
 import { validateUploadSize } from '@/lib/upload/limits';
@@ -40,6 +42,9 @@ import { ImportFabCluster } from './import-fab-cluster';
 import { QueuePanel } from './queue-panel';
 import { MappingModal } from './mapping-modal';
 import { DuplicateModal } from './duplicate-modal';
+import { CreateAccountFromImportModal } from './create-account-from-import-modal';
+import { AccountCandidatesPickerModal } from './account-candidates-picker-modal';
+import { AccountTypeConfirmModal } from './account-type-confirm-modal';
 import { useActiveImportSession } from './use-active-session';
 import { FlyToFabProvider } from './fly-to-fab-context';
 import { fmtRubAbs } from './format';
@@ -78,6 +83,25 @@ export function ImportPage() {
   // wondering what to do.
   const [unsupportedBank, setUnsupportedBank] = useState<Bank | null>(null);
 
+  // Auto-account-recognition Шаг 3 (2026-05-06).
+  // Two new branches in `uploadMut.onSuccess`:
+  //   • requires_account_creation=true → open CreateAccountFromImportModal,
+  //     pre-filled with bank_id + account_type_hint + contract/statement.
+  //   • account_candidates.length >= 2 → open AccountCandidatesPickerModal
+  //     so the user picks one of N matching accounts (or routes to the
+  //     create-account modal as escape hatch).
+  // Both states carry the upload payload so the modals can call
+  // assignSessionAccount(sessionId, …) themselves.
+  const [createAccountState, setCreateAccountState] = useState<ImportUploadResponse | null>(null);
+  const [candidatesState, setCandidatesState] = useState<ImportUploadResponse | null>(null);
+  // Confirm-first path: when the extractor knows enough (bank + maybe type),
+  // we ask "Создать «<Bank> <Type>»?" instead of opening the full form.
+  // The user clicks once → account is created and attached. "Изменить
+  // параметры" / "Другое" routes them to createAccountState (full form).
+  // confirmState carries the upload payload (or a session-rehydrated equivalent
+  // for the queue-panel path) so the modal has everything it needs.
+  const [confirmState, setConfirmState] = useState<ImportUploadResponse | null>(null);
+
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts });
   const hasSupportedAccount = useMemo(() => {
     const accounts = accountsQuery.data ?? [];
@@ -113,7 +137,47 @@ export function ImportPage() {
         setDuplicateState(res);
         return;
       }
-      toast.success(`Загружено: ${res.filename}`);
+
+      // Auto-account-recognition Шаг 3 — branches that take precedence over
+      // the auto-setActive path. The session is already created on the
+      // backend, but it's better to resolve account binding BEFORE pushing
+      // the user into the preview screen — the queue + AttentionFeed are
+      // confusing without an account attached.
+      //
+      // Order matters: requires_account_creation wins over candidates,
+      // because it's the unambiguous "no account exists" signal. Candidates
+      // fire only when 2+ existing accounts could match.
+      if (res.requires_account_creation && res.suggested_bank_id) {
+        await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+        // Inline-prompt UX (Шаг 4): instead of any popup at upload time, we
+        // surface the «Это <Bank> <Type>?» question inline in the queue row.
+        // The session is already created on the backend with account_id=null
+        // and bank_code/account_type_hint stamped in parse_settings; the
+        // queue picks it up on next poll and renders the prompt.
+        toast.success(`Загружено: ${res.filename}`, {
+          description: 'Распознан банк — выбери счёт в очереди',
+        });
+        setPendingFile(null);
+        return;
+      }
+      if (res.account_candidates && res.account_candidates.length >= 2) {
+        await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+        setCandidatesState(res);
+        setPendingFile(null);
+        return;
+      }
+
+      // Friendly toast when Level 1/2/3 produced an auto-attach — surface the
+      // match reason so the user understands why the session was attached
+      // (e.g. "по контракту" vs "единственный счёт банка X"). Skipped when
+      // the upload didn't auto-resolve — the regular toast covers that case.
+      if (res.suggested_account_id && res.suggested_account_match_reason) {
+        toast.success(`Загружено: ${res.filename}`, {
+          description: res.suggested_account_match_reason,
+        });
+      } else {
+        toast.success(`Загружено: ${res.filename}`);
+      }
       await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
       setActive(res.session_id);
       setPendingFile(null);
@@ -260,6 +324,85 @@ export function ImportPage() {
   }
   const readySum = readyRows > 0 ? fmtRubAbs(readySumNumeric) : null;
 
+  // Queue → confirm rehydrate. When the user presses «Начать разбор» on a
+  // session that's still without an account (Шаг 3 was added after these
+  // sessions were uploaded, OR the user cancelled the modal earlier), we
+  // re-derive bank_code / account_type_hint / contract_number /
+  // statement_account_number from session.parse_settings.extraction and
+  // open the same confirm modal as on fresh upload.
+  async function resumeSession(sessionId: number) {
+    console.log('[resumeSession] start', sessionId);
+    const list = sessions.find((s) => s.id === sessionId);
+    console.log('[resumeSession] found in list', { hasAccount: list?.account_id != null });
+    // Account already attached → straight into preview.
+    if (list?.account_id != null) {
+      setActive(sessionId);
+      return;
+    }
+    try {
+      const full = await getImportSession(sessionId);
+      const ps = (full.parse_settings ?? {}) as { extraction?: Record<string, unknown> };
+      const ext = (ps.extraction ?? {}) as Record<string, unknown>;
+      const bankCode = (ext.bank_code as string | null | undefined) ?? null;
+      const accountTypeHint = (ext.account_type_hint as string | null | undefined) ?? null;
+      const contractNumber = (ext.contract_number as string | null | undefined) ?? null;
+      const statementAccountNumber = (ext.statement_account_number as string | null | undefined) ?? null;
+      console.log('[resumeSession] hydrated', { bankCode, accountTypeHint, contractNumber, statementAccountNumber });
+
+      if (bankCode && bankCode !== 'unknown') {
+        // Resolve bank_id by code via the same cached banks list the modal uses.
+        const banks = await queryClient.fetchQuery({
+          queryKey: ['banks', { supportedOnly: false }],
+          queryFn: () => getBanks(undefined, { supportedOnly: false }),
+          staleTime: 60_000,
+        });
+        const bank = banks.find((b) => b.code === bankCode);
+        console.log('[resumeSession] resolved bank', { bank });
+        if (bank) {
+          // Synthesize an ImportUploadResponse-shaped payload so the existing
+          // confirm/create modals can consume it without code changes.
+          // Required fields filled with safe defaults — the modals read only
+          // session_id / suggested_bank_id / account_type_hint /
+          // contract_number / statement_account_number / account_candidates.
+          const synthetic: ImportUploadResponse = {
+            session_id: sessionId,
+            filename: full.filename,
+            source_type: full.source_type,
+            status: full.status,
+            detected_columns: full.detected_columns ?? [],
+            sample_rows: [],
+            total_rows: 0,
+            extraction: ext,
+            detection: { selected_table: null, available_tables: [], field_mapping: {}, field_confidence: {}, field_reasons: {}, column_analysis: [], suggested_date_formats: [], overall_confidence: 0, confidence_label: 'low', unresolved_fields: [] },
+            suggested_account_id: null,
+            contract_number: contractNumber,
+            contract_match_reason: null,
+            contract_match_confidence: null,
+            statement_account_number: statementAccountNumber,
+            statement_account_match_reason: null,
+            statement_account_match_confidence: null,
+            bank_code: bankCode,
+            account_type_hint: accountTypeHint,
+            suggested_account_match_reason: null,
+            suggested_account_match_confidence: null,
+            suggested_bank_id: bank.id,
+            account_candidates: [],
+            requires_account_creation: true,
+          };
+          console.log('[resumeSession] opening confirm modal', synthetic);
+          setConfirmState(synthetic);
+          return;
+        }
+      }
+    } catch (e) {
+      // Fall through: unable to hydrate parse_settings → fall back to the
+      // legacy "open in queue" behaviour so the user isn't stuck.
+      console.error('Failed to hydrate session for confirm modal', e);
+    }
+    console.log('[resumeSession] fallback setActive', sessionId);
+    setActive(sessionId);
+  }
+
   function openQueueAtPill() {
     const el = queuePillRef.current;
     if (!el) {
@@ -343,6 +486,13 @@ export function ImportPage() {
           onClose={() => setQueueOpen(null)}
           onResume={(id) => setActive(id)}
           onOpenMapping={(id) => setMappingSessionId(id)}
+          onOpenCustomCreate={(synthetic) => {
+            // «Нет» from inline-prompt → open full create-account form
+            // pre-filled from extracted bank/type. QueuePanel synthesizes
+            // the upload-shaped payload and hands it off; we keep it open
+            // so the user can return to the queue afterwards.
+            setCreateAccountState(synthetic);
+          }}
           activeSessionId={activeSessionId}
         />
       ) : null}
@@ -381,6 +531,86 @@ export function ImportPage() {
         <BankSupportRequestModal
           bank={unsupportedBank}
           onClose={() => setUnsupportedBank(null)}
+        />
+      )}
+
+      {/* Auto-account-recognition Шаг 3: 2+ candidates picker. Lets the user
+          pick which of their existing matching accounts owns this statement.
+          "Create new" routes to the create-account modal below by handing
+          off candidatesState into createAccountState. */}
+      {candidatesState && (
+        <AccountCandidatesPickerModal
+          open
+          sessionId={candidatesState.session_id}
+          bankName={
+            candidatesState.account_candidates?.[0]?.bank_name ?? null
+          }
+          candidates={candidatesState.account_candidates ?? []}
+          onClose={() => setCandidatesState(null)}
+          onPicked={async () => {
+            const sid = candidatesState.session_id;
+            setCandidatesState(null);
+            await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+            await queryClient.invalidateQueries({ queryKey: ['imports', 'preview', sid] });
+            setActive(sid);
+          }}
+          onCreateNew={() => {
+            // Hand off to the create-account modal — the picker closes and
+            // the next render shows CreateAccountFromImportModal pre-filled
+            // from the same upload payload.
+            setCreateAccountState(candidatesState);
+            setCandidatesState(null);
+          }}
+        />
+      )}
+
+      {/* Auto-account-recognition Шаг 3+: quick confirm prompt. Replaces the
+          immediate full-form modal as the first step. Customize/Other routes
+          back into createAccountState to open the full form below. */}
+      {confirmState && confirmState.suggested_bank_id && (
+        <AccountTypeConfirmModal
+          open
+          sessionId={confirmState.session_id}
+          bankId={confirmState.suggested_bank_id}
+          bankNameHint={
+            confirmState.account_candidates?.[0]?.bank_name ?? null
+          }
+          accountTypeHint={confirmState.account_type_hint}
+          contractNumber={confirmState.contract_number}
+          statementAccountNumber={confirmState.statement_account_number}
+          onClose={() => setConfirmState(null)}
+          onAttached={async () => {
+            const sid = confirmState.session_id;
+            setConfirmState(null);
+            await queryClient.invalidateQueries({ queryKey: ['imports', 'preview', sid] });
+            setActive(sid);
+          }}
+          onCustomize={() => {
+            // Hand off to the full form, preserving the upload payload.
+            setCreateAccountState(confirmState);
+            setConfirmState(null);
+          }}
+        />
+      )}
+
+      {/* Auto-account-recognition Шаг 3: create-account from import. Opens
+          when requires_account_creation=true OR when the candidates picker
+          handed off via "Создать новый счёт". */}
+      {createAccountState && createAccountState.suggested_bank_id && (
+        <CreateAccountFromImportModal
+          open
+          sessionId={createAccountState.session_id}
+          bankId={createAccountState.suggested_bank_id}
+          accountTypeHint={createAccountState.account_type_hint}
+          contractNumber={createAccountState.contract_number}
+          statementAccountNumber={createAccountState.statement_account_number}
+          onClose={() => setCreateAccountState(null)}
+          onAttached={async () => {
+            const sid = createAccountState.session_id;
+            setCreateAccountState(null);
+            await queryClient.invalidateQueries({ queryKey: ['imports', 'preview', sid] });
+            setActive(sid);
+          }}
         />
       )}
     </div>

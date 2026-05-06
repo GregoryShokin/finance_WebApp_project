@@ -196,6 +196,44 @@ class AccountRepository:
             .first()
         )
 
+    def list_active_by_bank_and_type(
+        self,
+        user_id: int,
+        *,
+        bank_id: int,
+        account_type: str | None = None,
+    ) -> list[Account]:
+        """Level-3 fallback for auto-account-recognition (Шаг 2, 2026-05-06).
+
+        Returns the user's active (non-closed, is_active=True) accounts that
+        match the given bank and — optionally — account_type. Closed accounts
+        are excluded: a fresh upload should never auto-attach to a closed
+        account, even if the bank+type matches (spec §13).
+
+        `account_type=None` means the extractor couldn't disambiguate the type
+        — return every account at this bank so the caller can offer them all
+        as candidates instead of guessing.
+
+        Caller (ImportService.upload_file) treats the result as:
+          • exactly 1 → auto-attach (suggested_account_id = matched.id),
+          • 2+        → return as candidates for the UI picker,
+          • 0         → propose creating a new account at (bank, type).
+        """
+        filters = [
+            Account.user_id == user_id,
+            Account.bank_id == bank_id,
+            Account.is_active == True,
+            Account.is_closed.is_(False),
+        ]
+        if account_type:
+            filters.append(Account.account_type == account_type)
+        return (
+            self.db.query(Account)
+            .filter(*filters)
+            .order_by(Account.id.desc())
+            .all()
+        )
+
     def get_by_id_and_user(self, account_id: int, user_id: int) -> Account | None:
         return self.db.query(Account).filter(Account.id == account_id, Account.user_id == user_id).first()
 

@@ -248,8 +248,24 @@ class ImportService:
         statement_account_number = extraction.meta.get("statement_account_number")
         statement_account_match_reason = extraction.meta.get("statement_account_match_reason")
         statement_account_match_confidence = extraction.meta.get("statement_account_match_confidence")
-        suggested_account_id = None
+        # Auto-account-recognition Шаг 1: extractor classifies bank + type up
+        # front; we surface both into the response and use them for Level-3
+        # fallback below. Defaults are conservative — `unknown` for bank means
+        # "extractor didn't recognize", `None` for type means "extractor couldn't
+        # disambiguate" (e.g. T-Bank universal pipeline doesn't yet classify
+        # debit vs credit). See pdf_extractor.BANK_CODE_* / ACCOUNT_TYPE_*.
+        bank_code = extraction.meta.get("bank_code")
+        account_type_hint = extraction.meta.get("account_type_hint")
+        suggested_account_id: int | None = None
+        suggested_account_match_reason: str | None = None
+        suggested_account_match_confidence: float | None = None
+        suggested_bank_id: int | None = None
+        account_candidates: list[dict[str, Any]] = []
+        requires_account_creation = False
 
+        # Level 1 — exact contract_number match (highest trust, indexed lookup
+        # with three internal levels: Account.contract_number → active session
+        # parse_settings → tokens.contract inside import rows).
         if contract_number and user_id:
             matched_account = self.account_repo.find_by_contract_number(
                 user_id=user_id,
@@ -257,7 +273,11 @@ class ImportService:
             )
             if matched_account:
                 suggested_account_id = matched_account.id
+                suggested_account_match_reason = contract_match_reason
+                suggested_account_match_confidence = contract_match_confidence
 
+        # Level 2 — exact statement_account_number match (Sber 20-digit РФ
+        # лицевой счёт, Ozon Номер лицевого счёта).
         if suggested_account_id is None and statement_account_number and user_id:
             matched_account = self.account_repo.find_by_statement_account_number(
                 user_id=user_id,
@@ -265,6 +285,73 @@ class ImportService:
             )
             if matched_account:
                 suggested_account_id = matched_account.id
+                suggested_account_match_reason = statement_account_match_reason
+                suggested_account_match_confidence = statement_account_match_confidence
+
+        # Level 3 — bank + account_type fallback (Шаг 2). Only fires when the
+        # exact-identifier lookups above didn't match. Resolves the user's
+        # active accounts at the detected bank, optionally narrowed by type:
+        #   • exactly 1   → auto-attach (lower confidence than Level 1/2 — we
+        #                   matched on profile, not on a unique identifier).
+        #   • 2 or more   → return as account_candidates for the UI picker;
+        #                   we don't auto-pick because the user may not want
+        #                   the most-recent one.
+        #   • 0           → propose creating a new account, pre-fill
+        #                   bank_id + account_type for the modal.
+        # Skipped entirely when bank_code is missing or 'unknown' — universal
+        # pipeline didn't recognise the bank, so guessing by account_type
+        # alone (across all the user's banks) would mismatch wildly.
+        if (
+            suggested_account_id is None
+            and user_id
+            and bank_code
+            and bank_code != "unknown"
+        ):
+            from app.repositories.bank_repository import BankRepository
+            bank_repo = BankRepository(self.db)
+            bank = bank_repo.get_by_code(bank_code)
+            if bank is not None:
+                suggested_bank_id = bank.id
+                matches = self.account_repo.list_active_by_bank_and_type(
+                    user_id=user_id,
+                    bank_id=bank.id,
+                    account_type=account_type_hint,
+                )
+                if len(matches) == 1:
+                    sole = matches[0]
+                    suggested_account_id = sole.id
+                    # Reason is intentionally human-readable — the frontend
+                    # surfaces it directly under the "ready to import" status
+                    # ("Найден единственный счёт «Sber Кредитная карта»").
+                    type_label = account_type_hint or "счёт"
+                    suggested_account_match_reason = (
+                        f"Найден единственный {type_label} в банке «{bank.name}»"
+                    )
+                    # 0.7 stays comfortably below Level 1/2's 0.93–0.99 — the
+                    # match is profile-based and the user might still own
+                    # another similar account at this bank that just doesn't
+                    # exist in our DB yet.
+                    suggested_account_match_confidence = 0.7
+                elif len(matches) >= 2:
+                    account_candidates = [
+                        {
+                            "id": acc.id,
+                            "name": acc.name,
+                            "bank_id": acc.bank_id,
+                            "bank_name": getattr(acc.bank, "name", None) if getattr(acc, "bank", None) else None,
+                            "account_type": acc.account_type,
+                            "is_closed": bool(acc.is_closed),
+                            "contract_number": acc.contract_number,
+                            "statement_account_number": acc.statement_account_number,
+                        }
+                        for acc in matches
+                    ]
+                else:
+                    # Zero matches — user has no account at this bank+type.
+                    # The UI uses this + suggested_bank_id + account_type_hint
+                    # to offer "Create account «Sber Кредитная карта» now"
+                    # without making the user pick the bank manually.
+                    requires_account_creation = True
 
         # Этап 1 Шаг 1.6 — bank-supported guard. Fires only when the upload
         # auto-matched an account (via contract_number / statement_account_number)
@@ -359,6 +446,17 @@ class ImportService:
             "statement_account_number": statement_account_number,
             "statement_account_match_reason": statement_account_match_reason,
             "statement_account_match_confidence": statement_account_match_confidence,
+            # Auto-account-recognition Шаг 2 — extractor-derived bank/type +
+            # Level-3 fallback results. The fields are populated together so
+            # the frontend has a single read path regardless of which level
+            # produced the match. See `_resolve_suggested_account` flow above.
+            "bank_code": bank_code,
+            "account_type_hint": account_type_hint,
+            "suggested_account_match_reason": suggested_account_match_reason,
+            "suggested_account_match_confidence": suggested_account_match_confidence,
+            "suggested_bank_id": suggested_bank_id,
+            "account_candidates": account_candidates,
+            "requires_account_creation": requires_account_creation,
             # Этап 0.5 — duplicate-detection signals. Always None on the
             # fresh-upload path (we only got here because no duplicate matched).
             # Kept aligned with `_session_to_upload_response` so the response
@@ -814,12 +912,66 @@ class ImportService:
 
     def list_active_sessions(self, *, user_id: int) -> dict[str, Any]:
         sessions = self.import_repo.list_active_sessions(user_id=user_id)
+        # Suggested-bank lookup is one DB query per distinct bank_code on the
+        # response; cache it locally so a queue of N Tbank sessions doesn't
+        # repeat the same lookup N times.
+        from app.repositories.bank_repository import BankRepository
+        bank_repo = BankRepository(self.db)
+        bank_id_by_code: dict[str, int | None] = {}
+
         items = []
         for session in sessions:
             rows = self.import_repo.list_rows(session_id=session.id)
             summary = session.summary_json or {}
             auto_preview = (summary.get("auto_preview") or {}).get("status")
             transfer_match = (summary.get("transfer_match") or {}).get("status")
+
+            # Auto-account-recognition Шаг 4 (2026-05-06). Surface the
+            # extractor's bank/account_type detection on every queue entry
+            # so the frontend can render an inline «Это <Bank> <Type>?»
+            # prompt without a per-session getImportSession() roundtrip.
+            #
+            # Refine the persisted account_type_hint at read time: the rules
+            # in `_refine_account_type_by_contract` evolve as we learn more
+            # about each bank's contract format (Ozon «КК», T-Bank statement
+            # fallback, Yandex no-credit-card coercion — all added 2026-05-06).
+            # Doing it on-the-fly avoids a DB migration: any session uploaded
+            # before the latest refine ruleset still presents the correct
+            # type to the queue UI without re-extracting the PDF.
+            from app.services.import_extractors.pdf_extractor import PdfExtractor
+            extraction = (session.parse_settings or {}).get("extraction") or {}
+            bank_code = extraction.get("bank_code")
+            stored_type_hint = extraction.get("account_type_hint")
+            contract_number = extraction.get("contract_number")
+            statement_account_number = extraction.get("statement_account_number")
+
+            # Re-extract contract from the stored preview_text when it's
+            # missing — covers sessions uploaded before regex fixes (e.g.
+            # Ozon «Номер договора: № …» pattern was added 2026-05-06).
+            # preview_text is the first 40 raw_lines of the PDF, which is
+            # exactly the window `_extract_contract_number_details` needs.
+            if not contract_number:
+                preview_text = extraction.get("preview_text")
+                if preview_text:
+                    raw_lines = [ln for ln in str(preview_text).splitlines() if ln.strip()]
+                    re_contract, _, _ = PdfExtractor._extract_contract_number_details(raw_lines)
+                    if re_contract:
+                        contract_number = re_contract
+
+            account_type_hint = PdfExtractor._refine_account_type_by_contract(
+                bank_code=bank_code,
+                contract_number=contract_number,
+                statement_account_number=statement_account_number,
+                default=stored_type_hint,
+            )
+
+            suggested_bank_id: int | None = None
+            if bank_code and bank_code != "unknown":
+                if bank_code not in bank_id_by_code:
+                    bank = bank_repo.get_by_code(bank_code)
+                    bank_id_by_code[bank_code] = bank.id if bank else None
+                suggested_bank_id = bank_id_by_code[bank_code]
+
             items.append({
                 "id": session.id,
                 "filename": session.filename,
@@ -834,6 +986,11 @@ class ImportService:
                 "error_count": sum(1 for r in rows if r.status == "error"),
                 "auto_preview_status": auto_preview,
                 "transfer_match_status": transfer_match,
+                "bank_code": bank_code,
+                "account_type_hint": account_type_hint,
+                "contract_number": contract_number,
+                "statement_account_number": statement_account_number,
+                "suggested_bank_id": suggested_bank_id,
             })
         return {"sessions": items, "total": len(items)}
 

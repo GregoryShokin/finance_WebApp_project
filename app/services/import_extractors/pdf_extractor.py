@@ -38,7 +38,10 @@ OZON_START_RX = re.compile(r"^(?P<dt>\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2})\s+
 OZON_TIME_DOC_RX = re.compile(r"^(?P<time>\d{2}:\d{2}:\d{2})\s+(?P<doc>\S+)(?:\s+(?P<rest>.*))?$")
 YANDEX_TIME_FALLBACK_RX = re.compile(r"^(?:\u0432\s+)?(?P<time>\d{2}:\d{2})$")
 CONTRACT_NUMBER_PATTERNS = [
-    re.compile(r"\b\u043d\u043e\u043c\u0435\u0440\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430\s*:\s*([\w\-\/]+)", re.I),
+    # \u00ab\u041d\u043e\u043c\u0435\u0440 \u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430: \u2116 2025-11-27-KK-...\u00bb (\u041e\u0437\u043e\u043d) or \u00ab\u041d\u043e\u043c\u0435\u0440 \u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430: AB-1234\u00bb
+    # \u2014 colon is required by this branch; \u2116 / # / N is optional after the colon
+    # because \u041e\u0437\u043e\u043d inserts \u00ab\u2116\u00bb and Tinkoff/Yandex omit it.
+    re.compile(r"\b\u043d\u043e\u043c\u0435\u0440\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430\s*:\s*(?:\u2116|#|N)?\s*([\w\-\/]+)", re.I),
     re.compile(r"\b\u0432\u044b\u043f\u0438\u0441\u043a\u0430\s+\u043f\u043e\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0443(?:\s+\u0437\u0430\s+\u043f\u0435\u0440\u0438\u043e\u0434.*)?\s*(?:\u2116|#|N)\s*([\w\-\/]+)", re.I),
     re.compile(r"\b\u0434\u043e\u0433\u043e\u0432\u043e\u0440[\u0443\u0430]?\s*(?:\u2116|#|N)\s*([\w\-\/]+)", re.I),
 ]
@@ -56,6 +59,38 @@ STATEMENT_ACCOUNT_PATTERNS = [
     # itself never uses one, but defensive uniformity with the patterns above.
     re.compile(r"\b\u043d\u043e\u043c\u0435\u0440\s+\u0441\u0447[\u0435\u0451]\u0442\u0430\s*:?\s*(\d[\d\s]{18,28}\d)(?=\s|$)", re.I),
 ]
+
+# \u2500\u2500 Bank / account-type identifiers (\u0428\u0430\u0433 1 of auto-account-recognition) \u2500\u2500\u2500
+# Stable string codes written into ExtractionResult.meta so downstream
+# consumers (ImportService.upload_file resolve, frontend create-account
+# suggestions) can dispatch on bank/account_type without re-parsing the
+# PDF or peeking into per-table `parser` fields.
+#
+# `bank_code` mirrors the values stored in `Bank.code` (sber/yandex/tbank/
+# ozon/unknown). Adding a new bank means: add a const here, add markers in
+# `_detect_universal_bank` (or a dedicated `_is_<bank>_statement` if it gets
+# its own extractor branch), and ensure `Bank.code` matches.
+#
+# `account_type_hint` mirrors `Account.account_type` values \u2014 the four
+# kinds that affect bank_mechanics + auto-resolution decisions:
+#   credit_card     \u2014 \u043a\u0440\u0435\u0434\u0438\u0442\u043a\u0430 (Sber \u041a\u0440\u0435\u0434\u0438\u0442\u043d\u0430\u044f \u043a\u0430\u0440\u0442\u0430, Tinkoff \u041f\u043b\u0430\u0442\u0438\u043d\u0443\u043c, ...)
+#   installment_card\u2014 \u042f\u043d\u0434\u0435\u043a\u0441 \u0421\u043f\u043b\u0438\u0442, Ozon \u0440\u0430\u0441\u0441\u0440\u043e\u0447\u043a\u0430
+#   loan            \u2014 \u043f\u043e\u0442\u0440\u0435\u0431\u043a\u0440\u0435\u0434\u0438\u0442 (currently no PDF extractor distinguishes)
+#   deposit         \u2014 \u0432\u043a\u043b\u0430\u0434
+#   main            \u2014 \u043e\u0431\u044b\u0447\u043d\u044b\u0439 \u0441\u0447\u0451\u0442 / \u0434\u0435\u0431\u0435\u0442\u043e\u0432\u0430\u044f \u043a\u0430\u0440\u0442\u0430
+# `None` means the extractor cannot tell \u2014 frontend will not pre-fill
+# account-type when offering "create account".
+BANK_CODE_SBER = "sber"
+BANK_CODE_YANDEX = "yandex"
+BANK_CODE_TBANK = "tbank"
+BANK_CODE_OZON = "ozon"
+BANK_CODE_UNKNOWN = "unknown"
+
+ACCOUNT_TYPE_MAIN = "main"
+ACCOUNT_TYPE_CREDIT_CARD = "credit_card"
+ACCOUNT_TYPE_INSTALLMENT_CARD = "installment_card"
+ACCOUNT_TYPE_DEPOSIT = "deposit"
+ACCOUNT_TYPE_LOAN = "loan"
 SIGNED_AMOUNT_RX = re.compile(r"([+\-Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р вЂ Р В РІР‚С™Р РЋРЎв„ўР В Р’В Р В РІР‚В Р В Р вЂ Р Р†Р вЂљРЎв„ўР вЂ™Р’В¬Р В Р вЂ Р В РІР‚С™Р Р†РІР‚С›РЎС›])\s*([\d\s]+(?:[.,]\d{2}))\s*(?:₽|RUB|Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†РІР‚С™Р’В¬Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р вЂ™Р’В)?", re.I)
 ANY_MONEY_RX = re.compile(r"([\d\s]+(?:[.,]\d{2}))\s*(?:₽|RUB|Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†РІР‚С™Р’В¬Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р вЂ™Р’В)", re.I)
 CARD_TAIL_RX = re.compile(r"^\d{4}$")
@@ -213,6 +248,8 @@ class PdfExtractor(BaseExtractor):
                     "page_count": 0,
                     "needs_ocr": False,
                     "text_based": False,
+                    "bank_code": BANK_CODE_UNKNOWN,
+                    "account_type_hint": None,
                     "diagnostics": {"reason": "pdf_read_error", "error": str(exc)},
                 },
             )
@@ -224,6 +261,8 @@ class PdfExtractor(BaseExtractor):
                     "page_count": 0,
                     "needs_ocr": False,
                     "text_based": False,
+                    "bank_code": BANK_CODE_UNKNOWN,
+                    "account_type_hint": None,
                     "diagnostics": {"reason": "pdf_open_error", "error": str(exc)},
                 },
             )
@@ -245,6 +284,8 @@ class PdfExtractor(BaseExtractor):
                         "page_count": len(reader.pages),
                         "needs_ocr": False,
                         "text_based": False,
+                        "bank_code": BANK_CODE_UNKNOWN,
+                        "account_type_hint": None,
                         "diagnostics": {
                             "reason": "encrypted_pdf",
                             **({"error": decrypt_error} if decrypt_error else {}),
@@ -277,6 +318,8 @@ class PdfExtractor(BaseExtractor):
                     "page_count": len(reader.pages),
                     "needs_ocr": True,
                     "text_based": False,
+                    "bank_code": BANK_CODE_UNKNOWN,
+                    "account_type_hint": None,
                     "diagnostics": {"reason": "no_text_extracted", "pages": page_stats},
                 },
             )
@@ -287,6 +330,13 @@ class PdfExtractor(BaseExtractor):
         statement_account_number, statement_account_match_reason, statement_account_match_confidence = self._extract_statement_account_number_details(raw_lines)
 
         if self._is_sber_statement(full_text):
+            sber_type = self._classify_sber_account_type(full_text)
+            sber_type = self._refine_account_type_by_contract(
+                bank_code=BANK_CODE_SBER,
+                contract_number=contract_number,
+                statement_account_number=statement_account_number,
+                default=sber_type,
+            )
             return self._extract_sber_statement(
                 raw_lines=raw_lines,
                 page_stats=page_stats,
@@ -294,9 +344,23 @@ class PdfExtractor(BaseExtractor):
                 statement_account_number=statement_account_number,
                 statement_account_match_reason=statement_account_match_reason,
                 statement_account_match_confidence=statement_account_match_confidence,
+                bank_code=BANK_CODE_SBER,
+                account_type_hint=sber_type,
             )
 
         if self._is_yandex_credit_statement(full_text):
+            yandex_type = self._classify_yandex_credit_account_type(full_text)
+            # Contract-prefix refinement is the strongest Yandex signal — if
+            # the contract starts with «КС» the user actually owns a debit
+            # card (Yandex Дебет), even though dispatch landed in
+            # _is_yandex_credit_statement because the body contains
+            # credit-shaped phrases. See live case 2026-05-06.
+            yandex_type = self._refine_account_type_by_contract(
+                bank_code=BANK_CODE_YANDEX,
+                contract_number=contract_number,
+                statement_account_number=statement_account_number,
+                default=yandex_type,
+            )
             return self._extract_yandex_credit_statement(
                 raw_lines=raw_lines,
                 page_stats=page_stats,
@@ -304,9 +368,24 @@ class PdfExtractor(BaseExtractor):
                 contract_number=contract_number,
                 contract_match_reason=contract_match_reason,
                 contract_match_confidence=contract_match_confidence,
+                bank_code=BANK_CODE_YANDEX,
+                account_type_hint=yandex_type,
             )
 
         if self._is_yandex_bank_statement(full_text, raw_lines):
+            # Bank-branch default is MAIN, but the product-name in the
+            # header overrides it: a Сплит-выписка structurally landing in
+            # the Bank-branch (e.g. without «Погашение основного долга»
+            # in body) still announces «продукт «Потребительский кредит…»»
+            # in the heading and must be classified as installment_card.
+            product_signal = self._classify_yandex_account_type_by_product(full_text)
+            yandex_type = product_signal if product_signal is not None else ACCOUNT_TYPE_MAIN
+            yandex_type = self._refine_account_type_by_contract(
+                bank_code=BANK_CODE_YANDEX,
+                contract_number=contract_number,
+                statement_account_number=statement_account_number,
+                default=yandex_type,
+            )
             return self._extract_yandex_bank_statement(
                 raw_lines=raw_lines,
                 page_stats=page_stats,
@@ -314,6 +393,8 @@ class PdfExtractor(BaseExtractor):
                 contract_number=contract_number,
                 contract_match_reason=contract_match_reason,
                 contract_match_confidence=contract_match_confidence,
+                bank_code=BANK_CODE_YANDEX,
+                account_type_hint=yandex_type,
             )
 
         filtered_lines = [line for line in raw_lines if not self._is_service_line(line)]
@@ -373,6 +454,17 @@ class PdfExtractor(BaseExtractor):
         if not tables:
             tables.append(self._diagnostics_table(reason="yandex_credit_parse_error"))
 
+        bank_code, account_type_hint = self._detect_universal_bank(full_text)
+        # Refine type by contract prefix + statement-account presence (T-Bank:
+        # 54xx → main, 05xx → credit, statement → main; Ozon: КК → credit,
+        # statement → main; Yandex: КС → main, Э → installment).
+        account_type_hint = self._refine_account_type_by_contract(
+            bank_code=bank_code,
+            contract_number=contract_number,
+            statement_account_number=statement_account_number,
+            default=account_type_hint,
+        )
+
         return ExtractionResult(
             source_type=self.source_type,
             tables=tables,
@@ -381,6 +473,8 @@ class PdfExtractor(BaseExtractor):
                 "needs_ocr": False,
                 "text_based": True,
                 "line_count": len(raw_lines),
+                "bank_code": bank_code,
+                "account_type_hint": account_type_hint,
                 "contract_number": contract_number,
                 "contract_match_reason": contract_match_reason,
                 "contract_match_confidence": contract_match_confidence,
@@ -428,6 +522,8 @@ class PdfExtractor(BaseExtractor):
         statement_account_number: str | None = None,
         statement_account_match_reason: str | None = None,
         statement_account_match_confidence: float | None = None,
+        bank_code: str = BANK_CODE_SBER,
+        account_type_hint: str | None = None,
     ) -> "ExtractionResult":
         rows, rejected = self._parse_sber_rows(raw_lines)
         tables: list["ExtractedTable"] = []
@@ -462,6 +558,8 @@ class PdfExtractor(BaseExtractor):
                 "needs_ocr": False,
                 "text_based": True,
                 "line_count": len(raw_lines),
+                "bank_code": bank_code,
+                "account_type_hint": account_type_hint,
                 "statement_account_number": statement_account_number,
                 "statement_account_match_reason": statement_account_match_reason,
                 "statement_account_match_confidence": statement_account_match_confidence,
@@ -681,6 +779,8 @@ class PdfExtractor(BaseExtractor):
         contract_number: str | None = None,
         contract_match_reason: str | None = None,
         contract_match_confidence: float | None = None,
+        bank_code: str = BANK_CODE_YANDEX,
+        account_type_hint: str | None = ACCOUNT_TYPE_CREDIT_CARD,
     ) -> ExtractionResult:
         statement_lines = self._slice_yandex_credit_lines_v2(raw_lines)
         filtered_lines = [line for line in statement_lines if not self._is_service_line(line)]
@@ -724,6 +824,8 @@ class PdfExtractor(BaseExtractor):
                 "needs_ocr": False,
                 "text_based": True,
                 "line_count": len(raw_lines),
+                "bank_code": bank_code,
+                "account_type_hint": account_type_hint,
                 "contract_number": contract_number,
                 "contract_match_reason": contract_match_reason,
                 "contract_match_confidence": contract_match_confidence,
@@ -953,6 +1055,8 @@ class PdfExtractor(BaseExtractor):
         contract_number: str | None = None,
         contract_match_reason: str | None = None,
         contract_match_confidence: float | None = None,
+        bank_code: str = BANK_CODE_YANDEX,
+        account_type_hint: str | None = ACCOUNT_TYPE_MAIN,
     ) -> ExtractionResult:
         statement_lines = self._slice_yandex_transaction_lines(raw_lines)
         filtered_lines = [line for line in statement_lines if not self._is_service_line(line)]
@@ -1004,6 +1108,8 @@ class PdfExtractor(BaseExtractor):
                 "needs_ocr": False,
                 "text_based": True,
                 "line_count": len(raw_lines),
+                "bank_code": bank_code,
+                "account_type_hint": account_type_hint,
                 "contract_number": contract_number,
                 "contract_match_reason": contract_match_reason,
                 "contract_match_confidence": contract_match_confidence,
@@ -1609,6 +1715,246 @@ class PdfExtractor(BaseExtractor):
         if "Р В Р’В Р вЂ™Р’В Р В Р Р‹Р Р†Р вЂљРЎС›Р В Р’В Р вЂ™Р’В Р В Р Р‹Р Р†Р вЂљРІР‚СњР В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В»Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В°Р В Р’В Р В Р вЂ№Р В Р вЂ Р В РІР‚С™Р РЋРІвЂћСћР В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В°" in lower:
             return "card_payment"
         return "operation"
+
+    # ── Bank / account-type classification (Шаг 1 of auto-account-recognition) ──
+    #
+    # These three helpers run on the full PDF text BEFORE the row-parsing
+    # branches. Each returns plain string codes that flow through into
+    # `ExtractionResult.meta` so downstream consumers (ImportService.upload_file
+    # resolve, frontend create-account suggestions) can react to bank /
+    # account_type without re-parsing the PDF.
+    #
+    # Defaults are conservative:
+    #   • Sber  → ACCOUNT_TYPE_MAIN unless a credit-card marker is present.
+    #   • Yandex Credit → ACCOUNT_TYPE_CREDIT_CARD; promoted to INSTALLMENT_CARD
+    #     for Сплит statements (BNPL / installment, see §9.10 spec).
+    #   • Yandex Bank (Дебет) is set to ACCOUNT_TYPE_MAIN at the dispatch site
+    #     directly (no per-text classification needed — the format is one).
+    #   • Universal pipeline (T-Bank, Ozon, …) → bank detected by header markers,
+    #     account_type_hint left as None when the header doesn't disambiguate.
+    @staticmethod
+    def _classify_sber_account_type(full_text: str) -> str | None:
+        """Return ACCOUNT_TYPE_CREDIT_CARD / ACCOUNT_TYPE_MAIN / None for Sber.
+
+        Sber issues separate statements per product (debit card, credit card,
+        deposit). The statement header carries explicit Russian phrases — we
+        match the strongest signal and fall back to MAIN. None is returned only
+        when no Sber-specific markers are found, which shouldn't happen if
+        `_is_sber_statement` already matched, but we keep the option for
+        robustness against partial extracts.
+        """
+        if not full_text:
+            return None
+        lower = full_text.lower()
+        # Credit-card markers — order matters: phrase variants ranked by
+        # specificity. "по кредитной карте" / "по счёту кредитной карты"
+        # appear in headings; "кредитная карта" appears in the product line.
+        credit_card_markers = (
+            "по счёту кредитной карты",
+            "по счету кредитной карты",
+            "выписка по кредитной карте",
+            "кредитной карты",
+            "кредитная карта",
+            "кредитной картой",
+        )
+        if any(marker in lower for marker in credit_card_markers):
+            return ACCOUNT_TYPE_CREDIT_CARD
+        # Deposit / вклад
+        if "вклад" in lower and "выписка по" in lower:
+            return ACCOUNT_TYPE_DEPOSIT
+        # Default: debit / main account. Sber dispatches here for «Выписка
+        # по счёту дебетовой карты», «Сберкарта», and the regular «Выписка
+        # по счёту» without a credit qualifier.
+        return ACCOUNT_TYPE_MAIN
+
+    @staticmethod
+    def _classify_yandex_account_type_by_product(full_text: str) -> str | None:
+        """Highest-priority Yandex classifier — reads the product name from
+        the standard header sentence shipped on every Yandex Bank statement:
+
+            АО «Яндекс Банк», … сообщает, что между Вами и Банком заключён
+            договор № <CONTRACT> от <DATE> в рамках продукта «<PRODUCT>»
+            (далее — «Договор»).
+
+        Live confirmation (screenshots from user, 2026-05-06):
+          • «Счёт ЭДС»                                       → main (debit)
+          • «Потребительский кредит (с лимитом кредитования)»→ installment_card
+                                                                (= Яндекс Сплит)
+
+        Returns None when no known product is mentioned — caller can fall
+        back to contract-prefix refinement or branch-specific defaults.
+        """
+        if not full_text:
+            return None
+        lower = full_text.lower()
+        # Order: more specific phrases first. The «Счёт ЭДС» check is also
+        # tolerant to the e/ё typographical variant (some PDF extractors
+        # decompose ё into e + combining diacritic).
+        if "счёт эдс" in lower or "счет эдс" in lower:
+            return ACCOUNT_TYPE_MAIN
+        if any(marker in lower for marker in (
+            "потребительский кредит (с лимитом кредитования)",
+            "потребительский кредит с лимитом кредитования",
+            "потребительский кредит с фиксированным лимитом",
+            "потребительский кредит",
+            "яндекс сплит",
+            "ya сплит",
+            "сплит",
+            "рассрочк",
+        )):
+            return ACCOUNT_TYPE_INSTALLMENT_CARD
+        return None
+
+    @staticmethod
+    def _classify_yandex_credit_account_type(full_text: str) -> str | None:
+        """Yandex Bank credit-statement branch resolves to one of:
+        installment_card (Сплит / рассрочка) or main (Дебет, when dispatcher
+        landed here by accident — contract refinement will fix that).
+
+        ВАЖНО: Яндекс Банк НЕ выпускает кредитные карты (live confirmation
+        2026-05-06). Никогда не возвращаем `credit_card`.
+
+        Resolution order:
+          1. `_classify_yandex_account_type_by_product` — header product
+             name is the strongest signal («Счёт ЭДС» → main, «Потребительский
+             кредит (с лимитом кредитования)» → installment_card).
+          2. Default → INSTALLMENT_CARD (we're in the credit branch by
+             dispatcher, and Yandex's credit branch is structurally for Сплит).
+        """
+        product_signal = PdfExtractor._classify_yandex_account_type_by_product(full_text)
+        if product_signal is not None:
+            return product_signal
+        return ACCOUNT_TYPE_INSTALLMENT_CARD
+
+    @staticmethod
+    def _detect_universal_bank(full_text: str) -> tuple[str, str | None]:
+        """Best-effort bank detection for PDFs that fall through to universal.
+
+        Returns a (bank_code, account_type_hint) tuple. account_type_hint is
+        usually None because the universal pipeline doesn't have a per-bank
+        header parser — once a bank has its own dedicated parser branch
+        (`_extract_<bank>_statement`), classification moves there with
+        stronger signals.
+
+        For Ozon Банк we default to ACCOUNT_TYPE_MAIN: their PDF flow is
+        almost exclusively the «Справка о движении средств» from a current
+        account; credit / installment-card statements are issued under a
+        different doc layout. Wrong default lets the user flip to credit/
+        installment in one click in the queue inline-prompt — no harm.
+        """
+        if not full_text:
+            return BANK_CODE_UNKNOWN, None
+        lower = full_text.lower()
+        # T-Bank (formerly Тинькоф). The bank rebranded in 2024 — both
+        # variants appear in production statements, including English form
+        # in international wire transfers. Account type is refined later
+        # by `_refine_account_type_by_contract` (54xx → main, 05xx → credit).
+        if any(token in lower for token in (
+            "тинькофф",
+            "тинькоф",
+            "т-банк",
+            "tinkoff",
+            "t-bank",
+            "tbank",
+        )):
+            return BANK_CODE_TBANK, None
+        # Ozon Банк — default MAIN (see docstring above).
+        if any(token in lower for token in (
+            "озон банк",
+            "ozon банк",
+            "ozon bank",
+            "ао «озон банк»",
+        )):
+            return BANK_CODE_OZON, ACCOUNT_TYPE_MAIN
+        return BANK_CODE_UNKNOWN, None
+
+    @staticmethod
+    def _refine_account_type_by_contract(
+        *,
+        bank_code: str | None,
+        contract_number: str | None,
+        statement_account_number: str | None = None,
+        default: str | None,
+    ) -> str | None:
+        """Use the contract-number prefix (and statement-account presence)
+        to disambiguate account_type when the extractor's text-based
+        classifier is ambiguous.
+
+        Reasoning: Russian banks encode the product (debit / credit / BNPL)
+        into the first characters of the contract number itself — a
+        deterministic signal even when header text is missing or the
+        dispatch routed to the wrong branch (Yandex Bank vs Yandex Credit
+        can't always be told apart from body text alone — see live cases
+        2026-05-06).
+
+        Mappings (confirmed by user against real statements):
+          • T-Bank   `54xx…`         → main          (дебетовая карта)
+                      `05xx…`         → credit_card  (кредитная карта)
+                      statement_acc.  → main         (lichevoy счёт ⇒ debit)
+          • Ozon     contains «КК»   → credit_card   (Ozon Card credit/BNPL)
+                      statement_acc.  → main         (lichevoy счёт ⇒ debit;
+                                                       also default for Ozon)
+          • Yandex   `Э…`            → installment_card (Яндекс Сплит)
+                      `КС…`           → main             (Яндекс Дебет)
+                      `credit_card`-default for Yandex is silently coerced
+                      to `installment_card` — Яндекс не выпускает кредитки
+                      (live confirmation 2026-05-06).
+
+        Refinement only OVERRIDES the default when a stronger signal is
+        present. Yandex `credit_card` default is the one exception — it is
+        always coerced to `installment_card` because that account type does
+        not exist as a Yandex product.
+        """
+        # Yandex coercion: never `credit_card`, even before considering contract.
+        if bank_code == BANK_CODE_YANDEX and default == ACCOUNT_TYPE_CREDIT_CARD:
+            default = ACCOUNT_TYPE_INSTALLMENT_CARD
+
+        cn = (contract_number or "").strip()
+        cn_upper = cn.upper()
+        sa = (statement_account_number or "").strip()
+
+        if bank_code == BANK_CODE_TBANK:
+            if cn.startswith("54"):
+                return ACCOUNT_TYPE_MAIN
+            if cn.startswith("05"):
+                return ACCOUNT_TYPE_CREDIT_CARD
+            # Fallback: lichevoy счёт ⇒ дебет (per user 2026-05-06).
+            if sa and not default:
+                return ACCOUNT_TYPE_MAIN
+        elif bank_code == BANK_CODE_OZON:
+            # Two adjacent «КК» (Cyrillic) anywhere in the contract → credit
+            # card per user spec. Cover Latin "KK" too because some banks
+            # transliterate identifiers in PDFs. Case-insensitive.
+            if "КК" in cn_upper or "KK" in cn_upper:
+                return ACCOUNT_TYPE_CREDIT_CARD
+            # Lichevoy счёт ⇒ дебет (also covered by Ozon's default=main, but
+            # explicit here so refine returns a final answer regardless of
+            # default).
+            if sa:
+                return ACCOUNT_TYPE_MAIN
+            # Ozon's product mix is overwhelmingly retail debit accounts —
+            # if no other signal is present, default to main. This also
+            # rescues legacy sessions stored with type_hint=NULL before
+            # the universal-pipeline default existed.
+            if default is None:
+                return ACCOUNT_TYPE_MAIN
+        elif bank_code == BANK_CODE_YANDEX:
+            # Yandex contract prefixes — verified against real PDF headers
+            # (screenshots from user 2026-05-06):
+            #   • КС... — «Кредитный Счёт». Used by «Потребительский кредит
+            #             (с лимитом кредитования)» — это и есть Яндекс
+            #             Сплит → installment_card.
+            #   • Э...  — «Электронные Денежные Средства» (ЭДС). Header:
+            #             «продукт «Счёт ЭДС»» → debit wallet → main.
+            # IMPORTANT: this is a fallback to product-name detection. If
+            # `_classify_yandex_account_type_by_product` already resolved
+            # via header, refine receives that as `default` and won't
+            # override unless the contract prefix says something stronger.
+            if cn_upper.startswith("КС"):
+                return ACCOUNT_TYPE_INSTALLMENT_CARD
+            if cn_upper.startswith("Э"):
+                return ACCOUNT_TYPE_MAIN
+        return default
 
     @staticmethod
     def _diagnostics_table(*, reason: str) -> ExtractedTable:

@@ -44,11 +44,14 @@ const defaultValues: AccountFormValues = {
   deposit_open_date: null,
   deposit_close_date: null,
   deposit_capitalization_period: null,
+  contract_number: null,
+  statement_account_number: null,
 };
 
 export function AccountForm({
   initialData,
   initialValues,
+  initialBank,
   allowedTypes,
   isSubmitting,
   onSubmit,
@@ -56,6 +59,10 @@ export function AccountForm({
 }: {
   initialData?: Account | null;
   initialValues?: Partial<CreateAccountPayload> | null;
+  // Auto-account-recognition Шаг 3 (2026-05-06): when the import flow opens
+  // the create-account dialog with a pre-detected bank, pass the full Bank
+  // object so the BankPicker shows it preselected without a second roundtrip.
+  initialBank?: Bank | null;
   allowedTypes?: AccountType[];
   isSubmitting?: boolean;
   onSubmit: (values: AccountFormValues) => void;
@@ -125,8 +132,15 @@ export function AccountForm({
       deposit_open_date: initialValues?.deposit_open_date ?? null,
       deposit_close_date: initialValues?.deposit_close_date ?? null,
       deposit_capitalization_period: initialValues?.deposit_capitalization_period ?? null,
+      contract_number: initialValues?.contract_number ?? null,
+      statement_account_number: initialValues?.statement_account_number ?? null,
     });
-  }, [initialData, initialValues, reset]);
+    // initialBank pre-selects the BankPicker without an extra fetch — used by
+    // the import flow when the extractor detected a known bank.
+    if (initialBank) {
+      setSelectedBank(initialBank);
+    }
+  }, [initialData, initialValues, initialBank, reset]);
 
   const typeOptions = allowedTypes
     ? ALL_TYPE_OPTIONS.filter((o) => allowedTypes.includes(o.value))
@@ -164,6 +178,12 @@ export function AccountForm({
           deposit_open_date: isSavings ? (values.deposit_open_date || null) : null,
           deposit_close_date: isSavings ? (values.deposit_close_date || null) : null,
           deposit_capitalization_period: isSavings ? (values.deposit_capitalization_period || null) : null,
+          // Шаг 3: thread contract_number / statement_account_number through to
+          // backend so the create-account-from-import flow sets the identifiers
+          // that will let future uploads from the same bank auto-attach via
+          // Level 1/2 lookup. Empty strings are normalised to null.
+          contract_number: values.contract_number?.trim() ? values.contract_number.trim() : null,
+          statement_account_number: values.statement_account_number?.trim() ? values.statement_account_number.trim() : null,
         };
         onSubmit(payload);
       })}

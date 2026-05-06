@@ -2,13 +2,14 @@
 
 import { Dialog } from '@/components/ui/dialog';
 import { AccountForm } from '@/components/accounts/account-form';
-import type { Account, AccountType, CreateAccountPayload } from '@/types/account';
+import type { Account, AccountType, Bank, CreateAccountPayload } from '@/types/account';
 
 export function AccountDialog({
   open,
   mode,
   account,
   initialValues,
+  initialBank,
   allowedTypes,
   isSubmitting,
   onClose,
@@ -18,6 +19,7 @@ export function AccountDialog({
   mode: 'create' | 'edit';
   account?: Account | null;
   initialValues?: Partial<CreateAccountPayload> | null;
+  initialBank?: Bank | null;
   allowedTypes?: AccountType[];
   isSubmitting?: boolean;
   onClose: () => void;
@@ -33,6 +35,7 @@ export function AccountDialog({
       <AccountForm
         initialData={account}
         initialValues={initialValues}
+        initialBank={initialBank}
         allowedTypes={allowedTypes}
         isSubmitting={isSubmitting}
         onSubmit={onSubmit}

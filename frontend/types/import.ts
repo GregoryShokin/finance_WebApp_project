@@ -138,6 +138,22 @@ export type ExistingProgress = {
   total_rows: number;
 };
 
+// Auto-account-recognition Шаг 2 (2026-05-06). Mirror of backend
+// `app.schemas.imports.AccountCandidate`. Emitted on the upload response
+// when 2+ user accounts match the extractor-detected bank+account_type —
+// the UI shows a quick-pick modal instead of dropping the user into the
+// generic queue.
+export type ImportAccountCandidate = {
+  id: number;
+  name: string;
+  bank_id: number;
+  bank_name: string | null;
+  account_type: string;
+  is_closed: boolean;
+  contract_number: string | null;
+  statement_account_number: string | null;
+};
+
 export type ImportUploadResponse = {
   session_id: number;
   filename: string;
@@ -155,6 +171,20 @@ export type ImportUploadResponse = {
   statement_account_number: string | null;
   statement_account_match_reason: string | null;
   statement_account_match_confidence: number | null;
+  // Auto-account-recognition Шаг 1 + 2 (2026-05-06).
+  // bank_code / account_type_hint always come from the extractor (Шаг 1).
+  // suggested_account_match_* mirrors whichever level matched — Level 1
+  // (contract), Level 2 (statement_account) or Level 3 (bank+type).
+  // suggested_bank_id / account_candidates / requires_account_creation
+  // populate when Level 3 fires (zero / many / single profile-match
+  // doesn't auto-attach), enabling the create-account / candidates picker UX.
+  bank_code?: string | null;
+  account_type_hint?: string | null;
+  suggested_account_match_reason?: string | null;
+  suggested_account_match_confidence?: number | null;
+  suggested_bank_id?: number | null;
+  account_candidates?: ImportAccountCandidate[];
+  requires_account_creation?: boolean;
   // Этап 0.5: all four are null on a fresh upload (no duplicate).
   // When action_required != null, `session_id` points at the existing
   // session (so the UI can `setActive(session_id)` on [Открыть]).
@@ -245,6 +275,15 @@ export type ImportSessionListItem = {
   user_touched_rows: number;
   auto_preview_status: 'pending' | 'running' | 'ready' | 'failed' | 'skipped' | null;
   transfer_match_status: 'pending' | 'running' | 'ready' | 'failed' | null;
+  // Auto-account-recognition Шаг 4 — extractor-detected bank/type. Lets the
+  // queue render an inline «Это <Bank> <Type>?» prompt for unattached sessions
+  // instead of opening a modal. All optional — sessions uploaded before the
+  // detector existed (or for unknown banks) leave these null.
+  bank_code?: string | null;
+  account_type_hint?: string | null;
+  contract_number?: string | null;
+  statement_account_number?: string | null;
+  suggested_bank_id?: number | null;
 };
 
 
