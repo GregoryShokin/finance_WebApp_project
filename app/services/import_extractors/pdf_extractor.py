@@ -45,8 +45,16 @@ CONTRACT_NUMBER_PATTERNS = [
 CONTRACT_NUMBER_ONLY_RX = re.compile(r"^(?:\u2116|#|N)\s*([\w\-\/]+)\b", re.I)
 CONTRACT_HINT_RX = re.compile(r"\b(\u043d\u043e\u043c\u0435\u0440\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0430|\u0437\u0430\u043a\u043b\u044e\u0447[\u0435\u0451]\u043d\s+\u0434\u043e\u0433\u043e\u0432\u043e\u0440|\u0434\u043e\u0433\u043e\u0432\u043e\u0440[\u0443\u0430]?)\b", re.I)
 STATEMENT_ACCOUNT_PATTERNS = [
-    re.compile(r"\b\u043d\u043e\u043c\u0435\u0440\s+\u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e\s+\u0441\u0447[\u0435\u0451]\u0442\u0430\s*:\s*(?:\u2116|#|N)?\s*([A-Z\u0410-\u042f0-9\-]+)", re.I),
-    re.compile(r"\b\u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e\s+\u0441\u0447[\u0435\u0451]\u0442\u0430\s*:\s*(?:\u2116|#|N)?\s*([A-Z\u0410-\u042f0-9\-]+)", re.I),
+    # Ozon-style: \u00ab\u041d\u043e\u043c\u0435\u0440 \u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e \u0441\u0447\u0451\u0442\u0430 \u211640817\u2026\u00bb (colon is sometimes omitted).
+    re.compile(r"\b\u043d\u043e\u043c\u0435\u0440\s+\u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e\s+\u0441\u0447[\u0435\u0451]\u0442\u0430\s*:?\s*(?:\u2116|#|N)?\s*([A-Z\u0410-\u042f0-9\-]+)", re.I),
+    re.compile(r"\b\u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e\s+\u0441\u0447[\u0435\u0451]\u0442\u0430\s*:?\s*(?:\u2116|#|N)?\s*([A-Z\u0410-\u042f0-9\-]+)", re.I),
+    # Sber heading: \u00ab\u041d\u043e\u043c\u0435\u0440 \u0441\u0447\u0451\u0442\u0430 40817 810 2 5209 5260514\u00bb \u2014 20-digit RF account
+    # number split into groups by spaces. Captures `\d[\d\s]{18,28}\d` so the
+    # normalizer can strip whitespace and verify the 20-digit format. The
+    # `(?=\s|$)` anchor stops the greedy `[\d\s]` from absorbing trailing
+    # tokens on multi-column lines. Colon after \u00ab\u0441\u0447\u0451\u0442\u0430\u00bb is optional \u2014 Sber
+    # itself never uses one, but defensive uniformity with the patterns above.
+    re.compile(r"\b\u043d\u043e\u043c\u0435\u0440\s+\u0441\u0447[\u0435\u0451]\u0442\u0430\s*:?\s*(\d[\d\s]{18,28}\d)(?=\s|$)", re.I),
 ]
 SIGNED_AMOUNT_RX = re.compile(r"([+\-Р В Р’В Р В РІР‚В Р В Р’В Р Р†Р вЂљРЎв„ўР В Р вЂ Р В РІР‚С™Р РЋРЎв„ўР В Р’В Р В РІР‚В Р В Р вЂ Р Р†Р вЂљРЎв„ўР вЂ™Р’В¬Р В Р вЂ Р В РІР‚С™Р Р†РІР‚С›РЎС›])\s*([\d\s]+(?:[.,]\d{2}))\s*(?:₽|RUB|Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†РІР‚С™Р’В¬Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р вЂ™Р’В)?", re.I)
 ANY_MONEY_RX = re.compile(r"([\d\s]+(?:[.,]\d{2}))\s*(?:₽|RUB|Р В Р’В Р вЂ™Р’В Р В РІР‚в„ўР вЂ™Р’В Р В Р’В Р вЂ™Р’В Р В Р’В Р Р†РІР‚С™Р’В¬Р В Р’В Р вЂ™Р’В Р В Р вЂ Р В РІР‚С™Р вЂ™Р’В)", re.I)
@@ -1483,13 +1491,21 @@ class PdfExtractor(BaseExtractor):
     def _extract_statement_account_number_details(raw_lines: list[str]) -> tuple[str | None, str | None, float | None]:
         header_lines = PdfExtractor._contract_header_lines(raw_lines)
 
+        # Pattern index \u2192 (UI-facing reason for the heading variant). The
+        # ordering must match STATEMENT_ACCOUNT_PATTERNS at module top.
+        reasons = (
+            "\u041d\u0430\u0439\u0434\u0435\u043d \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u00ab\u041d\u043e\u043c\u0435\u0440 \u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e \u0441\u0447\u0451\u0442\u0430\u00bb",
+            "\u041d\u0430\u0439\u0434\u0435\u043d \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u00ab\u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e \u0441\u0447\u0451\u0442\u0430\u00bb",
+            "\u041d\u0430\u0439\u0434\u0435\u043d \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u00ab\u041d\u043e\u043c\u0435\u0440 \u0441\u0447\u0451\u0442\u0430\u00bb",
+        )
+
         for line in header_lines:
             normalized = " ".join(line.split())
-            for pattern in STATEMENT_ACCOUNT_PATTERNS:
+            for index, pattern in enumerate(STATEMENT_ACCOUNT_PATTERNS):
                 match = pattern.search(normalized)
                 candidate = PdfExtractor._normalize_statement_account_candidate(match.group(1)) if match else None
                 if candidate:
-                    return candidate, "\u041d\u0430\u0439\u0434\u0435\u043d \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u00ab\u041d\u043e\u043c\u0435\u0440 \u043b\u0438\u0446\u0435\u0432\u043e\u0433\u043e \u0441\u0447\u0451\u0442\u0430\u00bb", 0.97
+                    return candidate, reasons[index], 0.97
 
         return None, None, None
 
@@ -1538,6 +1554,20 @@ class PdfExtractor(BaseExtractor):
         if candidate.lower().startswith("\u0438\u0441\u0445"):
             return None
         if not any(char.isdigit() for char in candidate):
+            return None
+        # Sber pretty-prints the 20-digit RF account in groups separated by
+        # spaces (e.g. \u00ab40817 810 2 5209 5260514\u00bb). If the candidate is just
+        # digits + whitespace, collapse the whitespace and verify the result
+        # is exactly 20 digits \u2014 that is the regulatory length for \u0420\u0424
+        # \u043b\u0438\u0446\u0435\u0432\u043e\u0439 \u0441\u0447\u0451\u0442 (175-\u0418), so a stricter check than the generic 8-char
+        # minimum below avoids accepting half-truncated numbers.
+        digits_only = re.sub(r"\s+", "", candidate)
+        if digits_only.isdigit():
+            if len(digits_only) == 20:
+                return digits_only
+            # Pure-digit candidates outside the 20-digit norm are rejected:
+            # they're too risky to round to (could be a doc number, a phone,
+            # or anything else that happens to follow \u00ab\u043d\u043e\u043c\u0435\u0440 \u0441\u0447\u0451\u0442\u0430\u00bb).
             return None
         if len(candidate) < 8:
             return None
