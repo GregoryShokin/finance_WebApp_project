@@ -22,6 +22,7 @@ from app.schemas.imports import (
     ImportMappingRequest,
     ImportPreviewResponse,
     ImportQueueBulkClustersResponse,
+    ImportQueueCommitResponse,
     ImportQueuePreviewResponse,
     ImportSessionListResponse,
     ImportReviewQueueResponse,
@@ -86,6 +87,31 @@ def get_import_queue_bulk_clusters(
     """
     service = ImportService(db)
     return service.get_queue_bulk_clusters(user_id=current_user.id)
+
+
+@router.post("/queue/commit-confirmed", response_model=ImportQueueCommitResponse)
+def commit_import_queue_confirmed(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Atomic multi-session commit of all confirmed/ready rows (v1.23,
+    variant C). Walks every preview-ready session of the user, runs the
+    same per-row commit logic as `POST /imports/{id}/commit`, and issues
+    one transaction at the end — either every eligible row commits or
+    nothing does.
+
+    Sessions whose remaining-row count drops to zero auto-transition to
+    `status='committed'` and disappear from the queue on the next
+    `GET /imports/queue/preview` refresh.
+    """
+    service = ImportService(db)
+    try:
+        return service.commit_queue_confirmed(user_id=current_user.id)
+    except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        ) from exc
 
 
 @router.get("/sessions", response_model=ImportSessionListResponse)

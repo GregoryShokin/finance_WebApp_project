@@ -476,6 +476,40 @@ class ImportQueueBulkClustersResponse(BaseModel):
     counterparty_groups: list[BulkCounterpartyGroupResponse] = []
 
 
+class ImportQueueCommitSessionResult(BaseModel):
+    """Per-session breakdown of a queue-commit operation."""
+
+    session_id: int
+    status: ImportSessionStatus
+    imported: int
+    skipped: int
+    duplicate: int
+    error: int
+    review: int
+    parked: int
+
+
+class ImportQueueCommitTotals(BaseModel):
+    imported: int = 0
+    skipped: int = 0
+    duplicate: int = 0
+    error: int = 0
+    review: int = 0
+    parked: int = 0
+
+
+class ImportQueueCommitResponse(BaseModel):
+    """Result of `POST /imports/queue/commit-confirmed` (v1.23). Atomic
+    multi-session commit returns aggregated totals plus a per-session
+    breakdown so the UI can show «Импортировано N транзакций из M выписок».
+    Sessions whose every row was committed transition to `status='committed'`
+    and disappear from the queue on the next refresh.
+    """
+
+    sessions: list[ImportQueueCommitSessionResult]
+    totals: ImportQueueCommitTotals
+
+
 class BulkClusterRowUpdate(BaseModel):
     """Per-row update inside a bulk-apply batch — mirrors the subset of
     ImportRowUpdateRequest the bulk flow needs. Each row keeps full

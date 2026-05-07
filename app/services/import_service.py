@@ -2088,6 +2088,140 @@ class ImportService:
             "parked_count": parked_count,
         }
 
+    def commit_queue_confirmed(self, *, user_id: int) -> dict[str, Any]:
+        """Atomic multi-session commit of all confirmed/ready rows (v1.23).
+
+        Runs the per-row CommitOrchestrator over every preview-ready
+        session of the user, then finalizes each session (auto-close when
+        empty, recalc summary, sweep account metadata). Issues ONE
+        `db.commit()` at the end — either every eligible row commits or
+        nothing does (modulo per-row exceptions caught by the orchestrator,
+        which keep counters but don't abort the batch).
+
+        Eligibility filter mirrors `get_queue_preview` and
+        `get_queue_bulk_clusters`: `status='preview_ready'` AND
+        `account_id IS NOT NULL`. Same row-commit semantics as the
+        per-session `commit_import` (ready rows always go; warning rows
+        only with user_confirmed_at / cluster_bulk_acked_at) — variant C
+        of the spec.
+
+        Returns aggregated totals plus per-session breakdown so the UI
+        can show «Импортировано N транзакций из M выписок».
+        """
+        sessions = self.import_repo.list_active_sessions(user_id=user_id)
+        eligible = [
+            s for s in sessions
+            if str(s.status or "") == "preview_ready" and s.account_id is not None
+        ]
+        empty_totals = {
+            "imported": 0, "skipped": 0, "duplicate": 0,
+            "error": 0, "review": 0, "parked": 0,
+        }
+        if not eligible:
+            return {"sessions": [], "totals": empty_totals}
+
+        # Lock every eligible session to serialize concurrent commits
+        # (e.g. rapid double-click on «Импортировать»). `with_for_update()`
+        # is dialect-aware: on PostgreSQL it emits `FOR UPDATE`, on SQLite
+        # (test harness) it's a silent no-op.
+        eligible_ids = [s.id for s in eligible]
+        (
+            self.db.query(ImportSession)
+            .filter(ImportSession.id.in_(eligible_ids))
+            .with_for_update()
+            .all()
+        )
+
+        from app.services.commit_orchestrator import CommitOrchestrator
+        orchestrator = CommitOrchestrator(
+            self.db,
+            import_repo=self.import_repo,
+            category_rule_repo=self.category_rule_repo,
+            transaction_service=self.transaction_service,
+            transfer_linker=self.transfer_linker,
+            counterparty_fp_service=self._counterparty_fp_service,
+            prepare_payloads_fn=self._prepare_transaction_payloads,
+        )
+
+        per_session: list[dict[str, Any]] = []
+        totals = dict(empty_totals)
+
+        for session in eligible:
+            import_rows = self.import_repo.get_rows(session_id=session.id)
+            if not import_rows:
+                continue
+            counters = orchestrator.commit_rows(user_id=user_id, rows=import_rows)
+            totals["imported"] += counters.imported
+            totals["skipped"] += counters.skipped
+            totals["duplicate"] += counters.duplicate
+            totals["error"] += counters.error
+            totals["review"] += counters.review
+            totals["parked"] += counters.parked
+
+            # Session-level finalize — same logic as `commit_import`.
+            remaining_rows = [
+                row
+                for row in self.import_repo.get_rows(session_id=session.id)
+                if (
+                    row.created_transaction_id is None
+                    and str(row.status or "").strip().lower() != "committed"
+                )
+            ]
+            remaining_summary = self._build_summary_from_rows(remaining_rows)
+            session.status = "committed" if not remaining_rows else "preview_ready"
+            session.summary_json = {
+                **(session.summary_json or {}),
+                **remaining_summary,
+                "imported_count": counters.imported,
+                "skipped_count": counters.skipped,
+                "duplicate_count": counters.duplicate,
+                "error_count": counters.error,
+                "review_count": counters.review,
+                "parked_count": counters.parked,
+            }
+            # Account metadata sweep (contract / statement number) — only
+            # propagates when the account doesn't already have those values.
+            parse_settings = session.parse_settings or {}
+            contract_number = parse_settings.get("contract_number")
+            statement_account_number = parse_settings.get("statement_account_number")
+            if session.account_id and (contract_number or statement_account_number):
+                account = self.account_repo.get_by_id_and_user(
+                    session.account_id, user_id,
+                )
+                updates: dict[str, Any] = {}
+                if account and contract_number and not account.contract_number:
+                    updates["contract_number"] = contract_number
+                if (
+                    account and statement_account_number
+                    and not account.statement_account_number
+                ):
+                    updates["statement_account_number"] = statement_account_number
+                if account and updates:
+                    self.account_repo.update(
+                        account, auto_commit=False, **updates,
+                    )
+            self.db.add(session)
+
+            per_session.append({
+                "session_id": session.id,
+                "status": session.status,
+                "imported": counters.imported,
+                "skipped": counters.skipped,
+                "duplicate": counters.duplicate,
+                "error": counters.error,
+                "review": counters.review,
+                "parked": counters.parked,
+            })
+
+        # ONE commit covers every session's row inserts + every session
+        # status flip. Multi-session atomicity in the spirit of variant C.
+        self.db.commit()
+
+        return {
+            "sessions": per_session,
+            "totals": totals,
+        }
+
     # Transfer create/link delegated to TransferLinkingService. These thin
     # wrappers keep `self._...` call sites working and translate the service's
     # `TransferLinkingError` into the public `ImportValidationError` so caller
