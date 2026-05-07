@@ -36,7 +36,7 @@ from app.models.import_session import ImportSession
 from app.repositories.brand_repository import BrandRepository
 from app.services.brand_confirm_service import BrandConfirmError, BrandConfirmService
 from app.services.brand_extractor_service import extract_brand
-from app.services.brand_resolver_service import BrandResolverService
+from app.services.brand_resolver_service import _score_match
 from app.services.import_normalizer_v2 import ExtractedTokens
 
 logger = logging.getLogger(__name__)
@@ -451,17 +451,35 @@ class BrandManagementService:
         *,
         user_id: int,
         brand_id: int,
-        session_id: int,
+        session_id: int | None,
     ) -> dict[str, int]:
-        """Re-resolve every unresolved row in `session_id` against the now-
-        updated pattern set; confirm each row that matches `brand_id`.
+        """Re-match every unresolved row in `session_id` against THIS brand's
+        patterns; confirm each row that matches.
+
+        `session_id=None` → sweep ALL active (non-committed) sessions of
+        the user. Used by «Применить ко всем строкам» on BrandEditModal
+        and by the picker post-confirm flow so existing matching rows
+        catch up to a freshly-created or freshly-edited brand.
 
         Driven by the «Создать бренд» flow — a freshly-added pattern only
-        appears on rows imported AFTER it. To make the modal-create UX feel
-        instantaneous, we re-resolve the active session inline and confirm
-        every newly-matching row through `BrandConfirmService` (which sets
-        counterparty + category + fingerprint binding correctly).
+        applies to rows imported AFTER it via the resolver. To make the
+        modal-create UX feel instantaneous, we walk the brand's patterns
+        directly here and confirm every matching row through
+        `BrandConfirmService`.
 
+        Why we DON'T use `BrandResolverService.resolve()`:
+          • Resolver applies `BRAND_PROMPT_THRESHOLD` (0.65) — meant to
+            decide whether to AUTO-ASK «Это X?» on a row. A short text
+            pattern like `wave` (extracted from «Wave Coffee 1 Volgodonsk»)
+            scores 0.80 × min(1.0, 4/6) ≈ 0.533, which is correctly below
+            threshold for resolver-driven prompts but is the WRONG cutoff
+            for user-driven «I just created this brand, apply to my rows».
+          • Resolver picks ONE winning brand globally; here we want THIS
+            brand's patterns to fire even if a different brand has a
+            higher-scoring match on the same row.
+
+        So this is a deliberately permissive matcher — any non-None
+        per-kind score on any of the brand's active patterns is a match.
         Returns counters: matched / confirmed / skipped_user_decision /
         skipped_already_resolved.
         """
@@ -472,26 +490,46 @@ class BrandManagementService:
         if not brand.is_global and brand.created_by_user_id != user_id:
             raise BrandManagementError("not your brand")
 
-        session = (
-            self.db.query(ImportSession)
-            .filter(
-                ImportSession.id == session_id,
-                ImportSession.user_id == user_id,
+        if session_id is not None:
+            session = (
+                self.db.query(ImportSession)
+                .filter(
+                    ImportSession.id == session_id,
+                    ImportSession.user_id == user_id,
+                )
+                .first()
             )
-            .first()
-        )
-        if session is None:
-            raise BrandManagementError("session not found")
-        if session.status == "committed":
-            raise BrandManagementError("session already committed")
+            if session is None:
+                raise BrandManagementError("session not found")
+            if session.status == "committed":
+                raise BrandManagementError("session already committed")
 
-        rows = (
+        # Patterns visible to this user for this brand: globals + own
+        # user-scope. Other users' private overrides are filtered (same
+        # rule as `BrandResolverService._load_patterns`).
+        all_patterns = self.repo.list_patterns_for_brand(brand_id=brand.id)
+        patterns = [
+            p for p in all_patterns
+            if p.is_active and (p.scope_user_id is None or p.scope_user_id == user_id)
+        ]
+        if not patterns:
+            return {
+                "matched": 0, "confirmed": 0,
+                "skipped_user_decision": 0, "skipped_already_resolved": 0,
+            }
+
+        rows_q = (
             self.db.query(ImportRow)
-            .filter(ImportRow.session_id == session_id)
-            .all()
+            .join(ImportSession, ImportRow.session_id == ImportSession.id)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.status != "committed",
+            )
         )
+        if session_id is not None:
+            rows_q = rows_q.filter(ImportSession.id == session_id)
+        rows = rows_q.all()
 
-        resolver = BrandResolverService(self.db)
         confirmer = BrandConfirmService(self.db)
 
         matched = 0
@@ -504,34 +542,44 @@ class BrandManagementService:
             if nd.get("user_confirmed_brand_id") or nd.get("user_rejected_brand_id"):
                 skipped_user_decision += 1
                 continue
-            if nd.get("brand_id") == brand_id:
-                # Row is already pointing at this brand from a previous resolve;
-                # still let confirm_brand_for_row stamp the user-decision below.
-                pass
-            elif nd.get("brand_id") is not None:
+            if nd.get("brand_id") not in (None, brand_id):
                 skipped_already_resolved += 1
                 continue
 
             tokens = _rehydrate_tokens(nd.get("tokens") or {})
             skeleton = nd.get("skeleton") or ""
-            match = resolver.resolve(
-                skeleton=skeleton, tokens=tokens, user_id=user_id,
-            )
-            if match is None or match.brand_id != brand_id:
+            skeleton_lc = skeleton.lower()
+
+            winning_pattern = None
+            winning_score = 0.0
+            for p in patterns:
+                score = _score_match(
+                    pattern_value=p.pattern,
+                    kind=p.kind,
+                    skeleton_lc=skeleton_lc,
+                    tokens=tokens,
+                    is_regex=bool(p.is_regex),
+                )
+                if score is None:
+                    continue
+                if score > winning_score:
+                    winning_score = score
+                    winning_pattern = p
+            if winning_pattern is None:
                 continue
 
             matched += 1
 
-            # Stamp prediction onto nd before calling confirmer so the
-            # propagation/strength branches in confirm_brand_for_row treat
-            # this as a confirmation (predicted == picked).
-            nd["brand_id"] = match.brand_id
-            nd["brand_pattern_id"] = match.pattern_id
-            nd["brand_slug"] = match.brand_slug
-            nd["brand_canonical_name"] = match.canonical_name
-            nd["brand_category_hint"] = match.category_hint
-            nd["brand_kind"] = match.kind
-            nd["brand_confidence"] = match.confidence
+            # Stamp prediction onto nd so confirm_brand_for_row's
+            # propagation/strength logic sees a "predicted == picked"
+            # case and bumps pattern.confirms (vs rejecting it).
+            nd["brand_id"] = brand.id
+            nd["brand_pattern_id"] = winning_pattern.id
+            nd["brand_slug"] = brand.slug
+            nd["brand_canonical_name"] = brand.canonical_name
+            nd["brand_category_hint"] = brand.category_hint
+            nd["brand_kind"] = winning_pattern.kind
+            nd["brand_confidence"] = round(winning_score, 4)
             row.normalized_data_json = nd
             self.db.add(row)
             self.db.flush()

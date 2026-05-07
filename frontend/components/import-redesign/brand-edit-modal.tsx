@@ -15,12 +15,12 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Trash2 } from 'lucide-react';
+import { Sparkles, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
-import { deleteBrand, getBrand, updateBrand } from '@/lib/api/brands';
+import { applyBrandToSession, deleteBrand, getBrand, updateBrand } from '@/lib/api/brands';
 
 export function BrandEditModal({
   open,
@@ -67,13 +67,31 @@ export function BrandEditModal({
     onError: (e: Error) => toast.error(e.message || 'Не удалось обновить бренд'),
   });
 
+  // Retroactive sweep: «I'm here editing this brand and I have rows
+  // that should be bound but aren't.» Calls apply-to-session with no
+  // session_id → backend walks every active session of the user.
+  const applyMut = useMutation({
+    mutationFn: () => applyBrandToSession(brandId),
+    onSuccess: (resp) => {
+      if (resp.confirmed > 0) {
+        toast.success(
+          `Применено к ${resp.confirmed} ${pluralRows(resp.confirmed)}`,
+        );
+      } else {
+        toast.info('Подходящих строк не нашлось');
+      }
+      queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+      queryClient.invalidateQueries({ queryKey: ['brand-suggested-groups'] });
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось применить'),
+  });
+
   const deleteMut = useMutation({
     mutationFn: () => deleteBrand(brandId),
     onSuccess: (resp) => {
       toast.success(
-        `Бренд удалён${resp.rows_cleared > 0
-          ? ` · очищено в ${resp.rows_cleared} ${pluralRows(resp.rows_cleared)}`
-          : ''}`,
+        `Бренд удалён${resp.rows_cleared > 0 ? ` · затронуто строк: ${resp.rows_cleared}` : ''}`,
       );
       queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
       queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
@@ -128,7 +146,23 @@ export function BrandEditModal({
           </Field>
 
           {!isGlobal ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+            <div className="flex items-center gap-2 border-t border-line pt-3">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => applyMut.mutate()}
+                disabled={applyMut.isPending || updateMut.isPending || deleteMut.isPending}
+                className="gap-1.5"
+                title="Применить паттерны бренда ко всем строкам моих активных сессий"
+              >
+                <Sparkles className="size-4" />
+                {applyMut.isPending ? 'Применяю…' : 'Применить ко всем'}
+              </Button>
+            </div>
+          ) : null}
+
+          {!isGlobal ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
               {confirmDelete ? (
                 <div className="flex items-center gap-2">
                   <span className="text-[12px] text-rose-700">Точно удалить?</span>
@@ -203,11 +237,9 @@ function Field({
   );
 }
 
+// Dative ("к N строкам" / "к 1 строке"). Used by the apply/delete toasts.
+// All plural cardinals collapse to "строкам" in dative — only singular
+// (n=1, n=21, n=31, …) takes "строке".
 function pluralRows(n: number): string {
-  const last = n % 10;
-  const tens = n % 100;
-  if (tens >= 11 && tens <= 14) return 'строках';
-  if (last === 1) return 'строке';
-  if (last >= 2 && last <= 4) return 'строках';
-  return 'строках';
+  return n % 10 === 1 && n % 100 !== 11 ? 'строке' : 'строкам';
 }

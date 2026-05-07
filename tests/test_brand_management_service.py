@@ -681,6 +681,44 @@ def test_delete_private_brand_rejects_foreign(service, db, user, other_user):
         service.delete_private_brand(user_id=user.id, brand_id=other.id)
 
 
+def test_apply_brand_to_session_matches_short_pattern_below_resolver_threshold(
+    service, db, user,
+):
+    """Reproduce the «Wave Coffee» bug: extract_brand returns the first
+    non-filler token (e.g. «wave», 4 chars). The resolver's threshold
+    (0.65) rejects that pattern (score 0.80 × 4/6 ≈ 0.533), so a vanilla
+    re-resolve via BrandResolverService would skip every Wave row.
+
+    apply_brand_to_session bypasses that threshold — pattern match is a
+    user-issued bulk command, not an inferred guess. All matching rows
+    must be confirmed.
+    """
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="Wave Coffee", category_hint=None,
+    )
+    db.commit()
+    service.add_pattern_to_brand(
+        user_id=user.id, brand_id=brand.id,
+        kind="text", pattern="wave",  # 4 chars → score 0.533 < 0.65
+    )
+    db.commit()
+
+    s = _mk_session(db, user.id)
+    for i in range(3):
+        _mk_row(
+            db, s.id, row_index=i,
+            description=f"Оплата в WAVE COFFEE {i} VOLGODONSK RUS",
+            skeleton=f"оплата в wave coffee {i}",
+            tokens={},
+        )
+
+    result = service.apply_brand_to_session(
+        user_id=user.id, brand_id=brand.id, session_id=s.id,
+    )
+    assert result["matched"] == 3
+    assert result["confirmed"] == 3
+
+
 def test_apply_brand_to_session_rejects_foreign_brand(service, db, user, other_user):
     other = service.create_private_brand(
         user_id=other_user.id, canonical_name="Other", category_hint=None,

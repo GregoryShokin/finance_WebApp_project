@@ -263,13 +263,15 @@ def add_brand_pattern(
 @router.post("/{brand_id}/apply-to-session")
 def apply_brand_to_session(
     brand_id: int,
-    session_id: int = Query(..., ge=1),
+    session_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Re-resolve unresolved rows in a session against the brand's pattern set
-    and confirm matches. Used right after «+ Создать бренд» so a freshly-added
-    pattern auto-applies to the rest of the active session.
+    """Re-match unresolved rows against the brand's pattern set and confirm.
+
+    `session_id` provided → scope to that one session (post-create flow).
+    `session_id` omitted   → sweep every active (non-committed) session of
+                              the user (retroactive «apply now» from edit).
 
     Returns counters: matched / confirmed / skipped_user_decision /
     skipped_already_resolved.

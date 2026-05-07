@@ -22,7 +22,7 @@ import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
-import { type Brand, listBrands } from '@/lib/api/brands';
+import { applyBrandToSession, type Brand, listBrands } from '@/lib/api/brands';
 import { confirmRowBrand } from '@/lib/api/imports';
 import { BrandCreateModal } from './brand-create-modal';
 import type { CreatableOption } from '@/components/ui/creatable-select';
@@ -71,11 +71,24 @@ export function BrandPickerModal({
   });
 
   const confirmMut = useMutation({
-    mutationFn: (brand: Brand) => confirmRowBrand(rowId, brand.id, null),
-    onSuccess: (_resp, brand) => {
-      toast.success(`Привязано к «${brand.canonical_name}»`);
+    mutationFn: async (brand: Brand) => {
+      // Step 1: bind the brand to this specific row (counterparty,
+      // category, fingerprint linkage). Step 2: sweep every other
+      // unbound row in the session that matches the brand's pattern
+      // set — without step 2, picking a brand for one «Wave Coffee»
+      // row leaves the other 8 «Wave Coffee» rows untouched.
+      const confirmed = await confirmRowBrand(rowId, brand.id, null);
+      const apply = await applyBrandToSession(brand.id, sessionId);
+      return { brand, confirmed, apply };
+    },
+    onSuccess: ({ brand, apply }) => {
+      const extra = apply.confirmed > 0
+        ? ` + ${apply.confirmed} ${pluralRows(apply.confirmed)}`
+        : '';
+      toast.success(`Привязано к «${brand.canonical_name}»${extra}`);
       queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
       queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+      queryClient.invalidateQueries({ queryKey: ['brand-suggested-groups'] });
       onClose();
     },
     onError: (e: Error) => toast.error(e.message || 'Не удалось привязать бренд'),
@@ -183,4 +196,13 @@ export function BrandPickerModal({
       ) : null}
     </>
   );
+}
+
+function pluralRows(n: number): string {
+  const last = n % 10;
+  const tens = n % 100;
+  if (tens >= 11 && tens <= 14) return 'строк';
+  if (last === 1) return 'строка';
+  if (last >= 2 && last <= 4) return 'строки';
+  return 'строк';
 }

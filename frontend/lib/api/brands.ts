@@ -126,11 +126,19 @@ export type ApplyBrandToSessionResponse = {
   skipped_already_resolved: number;
 };
 
-export function applyBrandToSession(brandId: number, sessionId: number) {
-  return apiClient<ApplyBrandToSessionResponse>(
-    `/brands/${brandId}/apply-to-session?session_id=${sessionId}`,
-    { method: 'POST', body: JSON.stringify({}) },
-  );
+/**
+ * Apply a brand's patterns across the user's import rows.
+ *  - `sessionId` provided → only that session (used by create flow).
+ *  - `sessionId` omitted   → sweep every active session of the user
+ *    (used by «Применить ко всем» on edit modal + post-pick re-sweep).
+ */
+export function applyBrandToSession(brandId: number, sessionId?: number) {
+  const url = sessionId != null
+    ? `/brands/${brandId}/apply-to-session?session_id=${sessionId}`
+    : `/brands/${brandId}/apply-to-session`;
+  return apiClient<ApplyBrandToSessionResponse>(url, {
+    method: 'POST', body: JSON.stringify({}),
+  });
 }
 
 export function listSuggestedBrandGroups(sessionId?: number) {
