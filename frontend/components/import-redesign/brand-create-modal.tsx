@@ -56,7 +56,9 @@ export function BrandCreateModal({
   rawDescription: string;
   /** Expense-kind categories shared with brand-prompt; CreatableSelect contract. */
   categoryOptions: (CreatableOption & { kind?: 'income' | 'expense' })[];
-  onClose: () => void;
+  /** Called on dialog close. `success=true` after a successful create — used
+   *  by parent (BrandPickerModal) to also dismiss the picker on success. */
+  onClose: (success?: boolean) => void;
 }) {
   const queryClient = useQueryClient();
 
@@ -114,7 +116,7 @@ export function BrandCreateModal({
       queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
       queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
       queryClient.invalidateQueries({ queryKey: ['brand-suggested-groups'] });
-      onClose();
+      onClose(true);
     },
     onError: (err: Error) =>
       toast.error(err.message || 'Не удалось создать бренд'),
@@ -130,7 +132,7 @@ export function BrandCreateModal({
   return (
     <Dialog
       open={open}
-      onClose={onClose}
+      onClose={() => onClose(false)}
       title="Создать бренд"
       description="Бренд приватный — виден только вам. Будет автоматически распознаваться при будущих импортах."
     >
@@ -189,7 +191,7 @@ export function BrandCreateModal({
         </Field>
 
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line pt-3">
-          <Button type="button" variant="ghost" onClick={onClose} disabled={isSubmitting}>
+          <Button type="button" variant="ghost" onClick={() => onClose(false)} disabled={isSubmitting}>
             Отмена
           </Button>
           <Button

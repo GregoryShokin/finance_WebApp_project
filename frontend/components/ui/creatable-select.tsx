@@ -198,7 +198,7 @@ export function CreatableSelect({
                   initial={{ opacity: 0, y: -4 }}
                   animate={{ opacity: 1, y: 0, transition: { duration: 0.12, ease: DROPDOWN_EASE_OUT } }}
                   exit={{ opacity: 0, y: -4, transition: { duration: 0.1, ease: DROPDOWN_EASE_IN } }}
-                  className="fixed z-[9999] overflow-hidden rounded-xl border border-line bg-bg-surface shadow-modal"
+                  className="fixed z-[10001] overflow-hidden rounded-xl border border-line bg-bg-surface shadow-modal"
                   style={{
                     top: coords.top,
                     left: coords.left,
