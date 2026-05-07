@@ -463,6 +463,19 @@ class BulkClustersResponse(BaseModel):
     counterparty_groups: list[BulkCounterpartyGroupResponse] = []
 
 
+class ImportQueueBulkClustersResponse(BaseModel):
+    """Cross-session bulk clusters (v1.23). Same shape as BulkClustersResponse
+    but session-agnostic — the queue groups rows from all preview-ready
+    sessions of the user under one set of cluster cards. Brand groups
+    naturally span sessions (same `extract_brand` token across two banks
+    rolls into one BrandCluster); counterparty groups always have, since
+    `CounterpartyFingerprint` is user-scoped."""
+
+    fingerprint_clusters: list[BulkFingerprintClusterResponse]
+    brand_clusters: list[BulkBrandClusterResponse]
+    counterparty_groups: list[BulkCounterpartyGroupResponse] = []
+
+
 class BulkClusterRowUpdate(BaseModel):
     """Per-row update inside a bulk-apply batch — mirrors the subset of
     ImportRowUpdateRequest the bulk flow needs. Each row keeps full

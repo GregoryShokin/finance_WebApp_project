@@ -21,6 +21,7 @@ from app.schemas.imports import (
     ImportCommitResponse,
     ImportMappingRequest,
     ImportPreviewResponse,
+    ImportQueueBulkClustersResponse,
     ImportQueuePreviewResponse,
     ImportSessionListResponse,
     ImportReviewQueueResponse,
@@ -67,6 +68,24 @@ def get_import_queue_preview(
     """
     service = ImportService(db)
     return service.get_queue_preview(user_id=current_user.id)
+
+
+@router.get("/queue/bulk-clusters", response_model=ImportQueueBulkClustersResponse)
+def get_import_queue_bulk_clusters(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cross-session bulk clusters (v1.23). Aggregates fingerprint clusters
+    from every preview-ready session of the user; brand and counterparty
+    groups span sessions naturally.
+
+    Brand-level threshold (≥2 fingerprints, ≥2 rows) now operates over
+    the union of clusters — «Магнит ×1 в Сбере + Магнит ×1 в Т-Банке»
+    rolls into one BrandCluster, which is the whole point of cross-session
+    moderation.
+    """
+    service = ImportService(db)
+    return service.get_queue_bulk_clusters(user_id=current_user.id)
 
 
 @router.get("/sessions", response_model=ImportSessionListResponse)

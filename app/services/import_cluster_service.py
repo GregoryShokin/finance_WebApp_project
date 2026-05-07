@@ -617,7 +617,8 @@ class ImportClusterService:
     def build_bulk_clusters(
         self, session: ImportSession,
     ) -> tuple[list[Cluster], list[BrandCluster], list[CounterpartyGroup]]:
-        """Return clusters eligible for bulk-confirm, plus brand-level groups.
+        """Return clusters eligible for bulk-confirm, plus brand-level groups
+        — for a single session.
 
         Filter pipeline — applied to rows BEFORE size threshold:
           1. Drop committed rows (they already have a Transaction — bulk-apply
@@ -631,6 +632,56 @@ class ImportClusterService:
              fingerprint; they should never land in bulk-categorize UI.
           4. Keep only surviving clusters with ≥ MIN_BULK_CLUSTER_SIZE rows.
           5. Aggregate by (brand, direction) for brand-level groups.
+
+        For cross-session moderation (v1.23) see `build_bulk_clusters_for_user`
+        which reuses the same internals over multiple eligible sessions.
+        """
+        live_clusters = self._compute_session_live_clusters(session)
+        return self._aggregate_live_clusters(
+            live_clusters, user_id=session.user_id,
+        )
+
+    def build_bulk_clusters_for_user(
+        self, *, user_id: int,
+    ) -> tuple[list[Cluster], list[BrandCluster], list[CounterpartyGroup]]:
+        """Cross-session bulk clusters (v1.23). Aggregates fingerprint
+        clusters across every preview-ready session of the user, then runs
+        the same brand / counterparty grouping as the single-session path.
+
+        Eligibility filter mirrors `get_queue_preview` — only sessions
+        with `status='preview_ready'` AND `account_id IS NOT NULL` admit
+        their rows. Same fingerprint+account combination yields the same
+        fingerprint hash, so cluster identity is stable per-account; what
+        changes is that brand-level groups now span sessions (e.g.
+        «Магнит ×1 в Сбере + Магнит ×1 в Т-Банке» rolls up into one
+        BrandCluster crossing the MIN_FINGERPRINT_COUNT_FOR_BRAND
+        threshold).
+
+        Counterparty groups are user-scoped by design (their FP-binding
+        already crosses sessions), so they aggregate naturally.
+        """
+        sessions = self.import_repo.list_active_sessions(user_id=user_id)
+        eligible_sessions = [
+            s for s in sessions
+            if str(s.status or "") == "preview_ready" and s.account_id is not None
+        ]
+        all_live: list[Cluster] = []
+        for session in eligible_sessions:
+            all_live.extend(self._compute_session_live_clusters(session))
+        return self._aggregate_live_clusters(all_live, user_id=user_id)
+
+    # ------------------------------------------------------------------
+    # Internals shared by single-session and cross-session bulk
+    # ------------------------------------------------------------------
+
+    def _compute_session_live_clusters(
+        self, session: ImportSession,
+    ) -> list[Cluster]:
+        """Per-session row-exclusion + transfer-skeleton filter. Returns
+        every fingerprint cluster of the session that survives, BEFORE
+        size threshold (so brand aggregation can pick up small per-TT
+        groups). Caller decides what to do with the size threshold +
+        cross-session grouping.
         """
         rows = self.import_repo.get_rows(session_id=session.id)
         # Compute per-row exclusion sets in one pass. Using sets because
@@ -707,6 +758,27 @@ class ImportClusterService:
                     example_row_ids=remaining_ids[:3],
                 ))
 
+        return live_clusters
+
+    def _aggregate_live_clusters(
+        self,
+        live_clusters: list[Cluster],
+        *,
+        user_id: int,
+    ) -> tuple[list[Cluster], list[BrandCluster], list[CounterpartyGroup]]:
+        """Cross-session-safe aggregation. Takes a list of already-filtered
+        live fingerprint clusters (output of `_compute_session_live_clusters`,
+        possibly concatenated across sessions) and runs:
+
+          • size threshold → eligible
+          • brand grouping (operates on full live set, including small
+            per-TT clusters that wouldn't qualify individually)
+          • counterparty grouping (user-scoped via FP-binding)
+          • aux fingerprint discovery for UI lookup
+          • brand→counterparty subsumption to avoid double-rendering
+
+        Pure given the input clusters + user_id — no session-specific work.
+        """
         # Second pass: apply the size threshold. Identifier-based transfer
         # clusters pass at a much lower threshold: a single phone/contract
         # repeated twice is already a real pattern ("перевод маме"), whereas a
@@ -741,7 +813,7 @@ class ImportClusterService:
         # bound to a counterparty is always rendered under that counterparty
         # in the UI, regardless of brand. Counterparty wins over brand.
         counterparty_groups = self._group_by_counterparty(
-            live_clusters, user_id=session.user_id,
+            live_clusters, user_id=user_id,
         )
         counterparty_bound_fps: set[str] = {
             fp for g in counterparty_groups for fp in g.fingerprint_cluster_ids

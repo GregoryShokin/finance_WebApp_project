@@ -513,6 +513,49 @@ class ImportService:
             "counterparty_groups": counterparty_dicts,
         }
 
+    def get_queue_bulk_clusters(self, *, user_id: int) -> dict[str, Any]:
+        """Cross-session bulk clusters (v1.23). Same shape as the
+        single-session `get_bulk_clusters`, but the fingerprint clusters
+        come from every preview-ready session of the user, brand groups
+        span sessions, and counterparty groups aggregate naturally
+        (FP-binding is already user-scoped, not session-scoped).
+
+        `session_id` is omitted from the response — the queue is
+        session-agnostic from the UI's perspective.
+        """
+        from app.services.import_cluster_service import ImportClusterService
+
+        cluster_svc = ImportClusterService(self.db)
+        fp_clusters, brand_clusters, counterparty_groups = (
+            cluster_svc.build_bulk_clusters_for_user(user_id=user_id)
+        )
+
+        fp_dicts = []
+        for c in fp_clusters:
+            fp_dicts.append({
+                "fingerprint": c.fingerprint,
+                "count": c.count,
+                "total_amount": c.total_amount,
+                "direction": c.direction,
+                "skeleton": c.skeleton,
+                "row_ids": list(c.row_ids),
+                "candidate_category_id": c.candidate_category_id,
+                "candidate_rule_id": c.candidate_rule_id,
+                "rule_source": c.rule_source,
+                "confidence": c.confidence,
+                "trust_zone": c.trust_zone,
+                "auto_trust": c.auto_trust,
+                "identifier_key": c.identifier_key,
+                "identifier_value": c.identifier_value,
+            })
+        brand_dicts = [b.to_dict() for b in brand_clusters]
+        counterparty_dicts = [g.to_dict() for g in counterparty_groups]
+        return {
+            "fingerprint_clusters": fp_dicts,
+            "brand_clusters": brand_dicts,
+            "counterparty_groups": counterparty_dicts,
+        }
+
     def bulk_apply_cluster(
         self, *, user_id: int, session_id: int, payload: Any,
     ) -> dict[str, Any]:
