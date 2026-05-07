@@ -510,6 +510,20 @@ class ImportQueueCommitResponse(BaseModel):
     totals: ImportQueueCommitTotals
 
 
+class ImportQueueStartAllResponse(BaseModel):
+    """Result of `POST /imports/queue/start-all` (v1.23). Bulk-trigger
+    auto-preview for every session that's ready to be previewed but isn't
+    yet. Counters drive the post-action toast: `started` is queued tasks,
+    `already_ready` is sessions already in the queue, `skipped` is
+    sessions blocked on missing account / mapping (the UI surfaces them
+    in the queue panel for manual fix).
+    """
+
+    started: int
+    already_ready: int
+    skipped: int
+
+
 class BulkClusterRowUpdate(BaseModel):
     """Per-row update inside a bulk-apply batch — mirrors the subset of
     ImportRowUpdateRequest the bulk flow needs. Each row keeps full

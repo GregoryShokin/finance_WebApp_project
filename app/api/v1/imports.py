@@ -24,6 +24,7 @@ from app.schemas.imports import (
     ImportQueueBulkClustersResponse,
     ImportQueueCommitResponse,
     ImportQueuePreviewResponse,
+    ImportQueueStartAllResponse,
     ImportSessionListResponse,
     ImportReviewQueueResponse,
     ImportRowLabelRequest,
@@ -87,6 +88,23 @@ def get_import_queue_bulk_clusters(
     """
     service = ImportService(db)
     return service.get_queue_bulk_clusters(user_id=current_user.id)
+
+
+@router.post("/queue/start-all", response_model=ImportQueueStartAllResponse)
+def start_import_queue_preview(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Bulk-start auto-preview for every analyzed session ready to roll
+    (v1.23). One click instead of N — sessions still missing account or
+    mapping are reported back as `skipped` so the UI can highlight them
+    for manual fix.
+
+    Idempotent. Already-previewed sessions are counted as `already_ready`
+    without being re-triggered.
+    """
+    service = ImportService(db)
+    return service.start_queue_preview(user_id=current_user.id)
 
 
 @router.post("/queue/commit-confirmed", response_model=ImportQueueCommitResponse)

@@ -2088,6 +2088,64 @@ class ImportService:
             "parked_count": parked_count,
         }
 
+    def start_queue_preview(self, *, user_id: int) -> dict[str, Any]:
+        """Trigger `auto_preview_import_session` for every session that's
+        ready to be previewed but isn't yet (v1.23). Idempotent: sessions
+        already in `preview_ready` are silently counted as such; sessions
+        missing account / mapping are reported as `skipped` so the UI can
+        explain what's blocking them.
+
+        Eligibility for trigger:
+          • status='analyzed' (uploaded + parsed, awaiting preview)
+          • account_id is assigned
+          • field_mapping has at least `date` + `amount`
+
+        Sessions in other states (parsing, failed, committed, etc.) are
+        out-of-scope. Returns counters used by the UI to render
+        «Запущен разбор N из M выписок» toast.
+        """
+        sessions = self.import_repo.list_active_sessions(user_id=user_id)
+        started = 0
+        already_ready = 0
+        skipped = 0
+        for session in sessions:
+            if str(session.status or "") == "preview_ready":
+                already_ready += 1
+                continue
+            if str(session.status or "") not in ("analyzed",):
+                skipped += 1
+                continue
+            mapping = session.mapping_json or {}
+            field_mapping = mapping.get("field_mapping") or {}
+            ready_for_trigger = (
+                session.account_id is not None
+                and field_mapping.get("date")
+                and field_mapping.get("amount")
+            )
+            if not ready_for_trigger:
+                skipped += 1
+                continue
+            try:
+                from app.jobs.auto_preview_import_session import (
+                    auto_preview_import_session,
+                )
+                auto_preview_import_session.delay(session.id)
+                started += 1
+            except Exception:
+                # Celery unavailable / job-lookup failed — count as skipped
+                # rather than aborting the batch. UI can retry per-session.
+                logger.exception(
+                    "start_queue_preview: failed to enqueue session %s",
+                    session.id,
+                )
+                skipped += 1
+
+        return {
+            "started": started,
+            "already_ready": already_ready,
+            "skipped": skipped,
+        }
+
     def commit_queue_confirmed(self, *, user_id: int) -> dict[str, Any]:
         """Atomic multi-session commit of all confirmed/ready rows (v1.23).
 
