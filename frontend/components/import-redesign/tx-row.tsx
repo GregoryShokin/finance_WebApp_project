@@ -87,11 +87,18 @@ export function TxRow({
   onSplitOpen,
 }: {
   row: ImportPreviewRow;
+  /** Legacy single-session prop. Queue mode (v1.23) prefers
+   * `row.session_id` (each row carries its own session); the prop is the
+   * fallback for legacy single-session preview payloads. */
   sessionId: number;
   options: TxRowOptions;
   onEditDeep: (origin: { x: number; y: number }) => void;
   onSplitOpen: (origin: { x: number; y: number }) => void;
 }) {
+  // Per-row session — queue payload stamps `row.session_id` so per-row
+  // API calls route to the correct session even when the parent renders
+  // many rows from many sessions.
+  const effectiveSessionId = row.session_id ?? sessionId;
   const queryClient = useQueryClient();
   const flyCtx = useFlyToFab();
   const [rowScope, rowAnimate] = useAnimate<HTMLElement>();
@@ -193,7 +200,7 @@ export function TxRow({
   // counterparty group card in ClusterGrid. Selecting a counterparty is
   // treated as a standalone action, not gated on the full confirm flow.
   const attachMut = useMutation({
-    mutationFn: (cpId: number) => attachRowToCounterparty(sessionId, row.id, cpId),
+    mutationFn: (cpId: number) => attachRowToCounterparty(effectiveSessionId, row.id, cpId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
     },
@@ -435,7 +442,7 @@ export function TxRow({
         <BrandPickerModal
           open={brandPickerOpen}
           rowId={row.id}
-          sessionId={sessionId}
+          sessionId={effectiveSessionId}
           rawDescription={rawDescription}
           categoryOptions={filteredCategoryOptions}
           onClose={() => setBrandPickerOpen(false)}

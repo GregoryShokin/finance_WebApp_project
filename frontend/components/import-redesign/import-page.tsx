@@ -47,6 +47,7 @@ import { CreateAccountFromImportModal } from './create-account-from-import-modal
 import { AccountCandidatesPickerModal } from './account-candidates-picker-modal';
 import { AccountTypeConfirmModal } from './account-type-confirm-modal';
 import { useActiveImportSession } from './use-active-session';
+import { useImportQueue } from './use-import-queue';
 import { FlyToFabProvider } from './fly-to-fab-context';
 import { fmtRubAbs } from './format';
 import type { ImportUploadResponse } from '@/types/import';
@@ -64,6 +65,11 @@ export function ImportPage() {
     isLoadingPreview,
     clusters,
   } = useActiveImportSession();
+
+  // v1.23: unified queue. Cross-session rows + clusters drive chronological
+  // view; cluster mode remains per-session for now (bulk-apply still
+  // session-scoped — queue-level cluster bulk-apply is a follow-up).
+  const queue = useImportQueue();
 
   const queuePillRef = useRef<HTMLButtonElement | null>(null);
   const [queueOpen, setQueueOpen] = useState<{ x: number; y: number } | null>(null);
@@ -475,18 +481,28 @@ export function ImportPage() {
       )}
 
       <div className="mt-5 space-y-3.5">
-        {activeSessionId === null ? (
+        {/*
+          Queue mode renders the chronological view ALWAYS when there are
+          queue rows, independent of `activeSessionId`. EmptyState only
+          when there are no queue rows AND no active session.
+        */}
+        {queue.rows.length === 0 && activeSessionId === null ? (
           <EmptyState hasSupportedAccount={hasSupportedAccount} />
-        ) : isLoadingPreview && !preview ? (
+        ) : (queue.isLoadingPreview && queue.rows.length === 0)
+            && (isLoadingPreview && !preview) ? (
           <div className="surface-card grid h-48 place-items-center text-xs text-ink-3">
             <Loader2 className="size-4 animate-spin" />
           </div>
         ) : (
           <>
             <ImportStatusCard
-              totalRows={totalRows}
-              readyRows={readyRows}
-              reviewRows={Math.max(reviewRows, 0)}
+              totalRows={queue.summary?.total_rows ?? totalRows}
+              readyRows={queue.summary?.ready_rows ?? readyRows}
+              reviewRows={Math.max(
+                (queue.summary?.warning_rows ?? 0) + (queue.summary?.error_rows ?? 0),
+                reviewRows,
+                0,
+              )}
             />
             <div className="flex items-center justify-end">
               <div
@@ -525,12 +541,26 @@ export function ImportPage() {
               </div>
             </div>
             {importView === 'chronological' ? (
-              <ChronologicalView sessionId={activeSessionId} preview={preview} />
-            ) : (
+              // Queue mode: cross-session flat list. `sessionId={0}` is a
+              // sentinel — TxRow falls back to `row.session_id` for per-row
+              // API routing (see TxRow.effectiveSessionId).
+              <ChronologicalView
+                sessionId={activeSessionId ?? 0}
+                preview={preview}
+                rows={queue.rows.length > 0 ? queue.rows : undefined}
+              />
+            ) : activeSessionId !== null ? (
               <>
                 <ClusterGrid sessionId={activeSessionId} preview={preview} clusters={clusters} />
                 <AttentionFeed sessionId={activeSessionId} preview={preview} clusters={clusters} />
               </>
+            ) : (
+              // Cluster mode without an active session — temporary
+              // limitation while queue-level cluster bulk-apply is a
+              // follow-up. Direct user to chronological for now.
+              <div className="surface-card p-6 text-center text-sm text-ink-3">
+                Группы операций пока показываются по одной выписке. Открой выписку из очереди или используй вид «По дате».
+              </div>
             )}
           </>
         )}

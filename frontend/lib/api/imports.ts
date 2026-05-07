@@ -7,6 +7,10 @@ import type {
   ImportMappingPayload,
   ImportPreviewResponse,
   ImportPreviewRow,
+  ImportQueueBulkClustersResponse,
+  ImportQueueCommitResponse,
+  ImportQueuePreviewResponse,
+  ImportQueueStartAllResponse,
   ImportSessionResponse,
   ImportSessionListItem,
   ImportReviewQueueResponse,
@@ -62,6 +66,30 @@ export function commitImport(sessionId: number, importReadyOnly = true) {
 
 export function getImportSessions() {
   return apiClient<{ sessions: ImportSessionListItem[]; total: number }>('/imports/sessions');
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Unified queue (cross-session moderation, v1.23)
+// ──────────────────────────────────────────────────────────────────
+
+export function getImportQueuePreview() {
+  return apiClient<ImportQueuePreviewResponse>('/imports/queue/preview');
+}
+
+export function getImportQueueBulkClusters() {
+  return apiClient<ImportQueueBulkClustersResponse>('/imports/queue/bulk-clusters');
+}
+
+export function commitImportQueueConfirmed() {
+  return apiClient<ImportQueueCommitResponse>('/imports/queue/commit-confirmed', {
+    method: 'POST',
+  });
+}
+
+export function startImportQueueAll() {
+  return apiClient<ImportQueueStartAllResponse>('/imports/queue/start-all', {
+    method: 'POST',
+  });
 }
 
 export function getImportSession(sessionId: number) {

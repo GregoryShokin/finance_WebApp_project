@@ -48,13 +48,21 @@ function _isHiddenStatus(status: string | undefined | null): boolean {
 export function ChronologicalView({
   sessionId,
   preview,
+  rows: explicitRows,
 }: {
+  /** Fallback session id used by TxRow when a row doesn't carry its own
+   * (legacy single-session preview). Queue mode passes any value;
+   * `row.session_id` overrides it per-row. */
   sessionId: number;
+  /** Legacy single-session preview payload. Ignored when `rows` is set. */
   preview: ImportPreviewResponse | null;
+  /** Queue-mode flat row list (cross-session, v1.23). When provided,
+   * takes priority over `preview.rows`. */
+  rows?: ImportPreviewRow[];
 }) {
   const rows = useMemo<ImportPreviewRow[]>(() => {
-    if (!preview) return [];
-    const visible = preview.rows.filter((r) => {
+    const source: ImportPreviewRow[] = explicitRows ?? preview?.rows ?? [];
+    const visible = source.filter((r) => {
       if (_isHiddenStatus(r.status)) return false;
       const nd = r.normalized_data as Record<string, unknown> | undefined;
       // Transfer rows live in their own widget («Переводы и дубли»).
@@ -72,7 +80,7 @@ export function ChronologicalView({
       if (ad === bd) return b.id - a.id;
       return bd.localeCompare(ad);
     });
-  }, [preview]);
+  }, [explicitRows, preview]);
 
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: () => getCategories() });
   const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
@@ -99,7 +107,8 @@ export function ChronologicalView({
   const [splittingRow, setSplittingRow] = useState<{ row: ImportPreviewRow; origin: { x: number; y: number } } | null>(null);
   const [shown, setShown] = useState(PAGE_STEP);
 
-  if (!preview) return null;
+  // Empty state: no preview AND no explicit rows → caller hasn't loaded anything.
+  if (!preview && !explicitRows) return null;
 
   if (rows.length === 0) {
     return (

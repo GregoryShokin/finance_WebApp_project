@@ -231,6 +231,14 @@ export type ImportPreviewRow = {
   review_required: boolean;
   raw_data: Record<string, string>;
   normalized_data: Record<string, unknown>;
+  // Queue-mode source attribution (v1.23). Populated only by
+  // /imports/queue/preview; undefined on legacy /imports/{id}/preview
+  // payloads. TxRow uses these to render the bank/account pill and to
+  // route per-row API calls to the correct session.
+  session_id?: number;
+  account_id?: number | null;
+  account_name?: string | null;
+  bank_code?: string | null;
 };
 
 export type ImportPreviewResponse = {
@@ -401,6 +409,72 @@ export type BulkClustersResponse = {
   fingerprint_clusters: BulkFingerprintCluster[];
   brand_clusters: BulkBrandCluster[];
   counterparty_groups?: BulkCounterpartyGroup[];
+};
+
+// ────────────────────────────────────────────────────────────────────
+// Unified queue (cross-session moderation, v1.23)
+// ────────────────────────────────────────────────────────────────────
+
+export type ImportQueueSessionMeta = {
+  session_id: number;
+  filename: string;
+  status: ImportSessionStatus;
+  account_id: number | null;
+  account_name: string | null;
+  bank_code: string | null;
+};
+
+/** Preview row enriched with source metadata. Extends ImportPreviewRow
+ * with the four pill-relevant fields the unified moderator renders. */
+export type ImportQueueRow = ImportPreviewRow & {
+  session_id: number;
+  account_id: number | null;
+  account_name: string | null;
+  bank_code: string | null;
+};
+
+export type ImportQueuePreviewResponse = {
+  sessions: ImportQueueSessionMeta[];
+  rows: ImportQueueRow[];
+  summary: {
+    total_rows: number;
+    ready_rows: number;
+    warning_rows: number;
+    error_rows: number;
+    duplicate_rows: number;
+    skipped_rows: number;
+  };
+};
+
+export type ImportQueueBulkClustersResponse = {
+  fingerprint_clusters: BulkFingerprintCluster[];
+  brand_clusters: BulkBrandCluster[];
+  counterparty_groups?: BulkCounterpartyGroup[];
+};
+
+export type ImportQueueCommitTotals = {
+  imported: number;
+  skipped: number;
+  duplicate: number;
+  error: number;
+  review: number;
+  parked: number;
+};
+
+export type ImportQueueCommitSessionResult = {
+  session_id: number;
+  status: ImportSessionStatus;
+} & ImportQueueCommitTotals;
+
+export type ImportQueueCommitResponse = {
+  sessions: ImportQueueCommitSessionResult[];
+  totals: ImportQueueCommitTotals;
+};
+
+export type ImportQueueStartAllResponse = {
+  started: number;
+  already_ready: number;
+  skipped: number;
 };
 
 export type BulkClusterRowUpdate = {
