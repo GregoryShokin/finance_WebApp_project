@@ -143,6 +143,17 @@ class BrandConfirmService:
         nd["user_confirmed_brand_at"] = now_iso
         nd.pop("user_rejected_brand_id", None)
         nd.pop("user_rejected_brand_at", None)
+        # Backfill brand display fields when the row had no resolver match.
+        # tx-row.tsx renders «{brand_canonical_name}» as primary only when
+        # `nd.brand_canonical_name` is set; without this, a manually-picked
+        # brand (where the resolver returned None) keeps showing the raw
+        # bank description even after confirm. Don't overwrite an existing
+        # value — the resolver's match is the authoritative source when present.
+        if not nd.get("brand_canonical_name"):
+            nd["brand_id"] = brand.id
+            nd["brand_slug"] = brand.slug
+            nd["brand_canonical_name"] = brand.canonical_name
+            nd["brand_category_hint"] = brand.category_hint
         # Carry the resolved entity ids on the row so commit-time
         # transaction-builder picks them up the same way as a manual
         # confirm via `update_row`.
