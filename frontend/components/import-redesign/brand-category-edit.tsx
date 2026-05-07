@@ -14,6 +14,7 @@ import { Pencil } from 'lucide-react';
 import { toast } from 'sonner';
 
 import type { CategoryOption } from './brand-prompt';
+import { CategorySelect } from '@/components/import/entity-selects';
 import { applyBrandCategory } from '@/lib/api/imports';
 
 export function BrandCategoryEdit({
@@ -60,21 +61,14 @@ export function BrandCategoryEdit({
   return (
     <div className="mt-1 inline-flex flex-wrap items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-[12px]">
       <span className="text-emerald-900">«{brandName}» →</span>
-      <select
-        value={selectedId != null ? String(selectedId) : ''}
-        onChange={(e) =>
-          setSelectedId(e.target.value ? Number(e.target.value) : null)
-        }
+      <CategorySelect
+        value={selectedId}
+        options={categories}
+        onChange={setSelectedId}
+        kind="expense"
+        width={220}
         disabled={mut.isPending}
-        className="rounded-md border border-emerald-300 bg-white px-2 py-0.5 text-xs text-ink focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
-      >
-        <option value="">— выбрать —</option>
-        {categories.map((c) => (
-          <option key={c.value} value={c.value}>
-            {c.label}
-          </option>
-        ))}
-      </select>
+      />
       <button
         type="button"
         disabled={mut.isPending || selectedId == null}

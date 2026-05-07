@@ -22,6 +22,8 @@
 import { useMemo, useState } from 'react';
 import { Tag } from 'lucide-react';
 
+import { CategorySelect } from '@/components/import/entity-selects';
+
 export type CategoryOption = {
   value: string;          // category id as string
   label: string;          // category name
@@ -80,21 +82,14 @@ export function BrandPrompt({
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <label className="text-xs text-emerald-900">Категория:</label>
-            <select
-              value={selectedId != null ? String(selectedId) : ''}
-              onChange={(e) =>
-                setSelectedId(e.target.value ? Number(e.target.value) : null)
-              }
+            <CategorySelect
+              value={selectedId}
+              options={categories}
+              onChange={setSelectedId}
+              kind="expense"
+              width={220}
               disabled={isPending}
-              className="rounded-md border border-emerald-300 bg-white px-2 py-1 text-xs text-ink focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60"
-            >
-              <option value="">— выбрать —</option>
-              {categories.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
+            />
             <button
               type="button"
               disabled={isPending}
