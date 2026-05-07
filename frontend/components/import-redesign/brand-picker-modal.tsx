@@ -78,7 +78,10 @@ export function BrandPickerModal({
       // set — without step 2, picking a brand for one «Wave Coffee»
       // row leaves the other 8 «Wave Coffee» rows untouched.
       const confirmed = await confirmRowBrand(rowId, brand.id, null);
-      const apply = await applyBrandToSession(brand.id, sessionId);
+      // v1.23: cross-session sweep. Picker now applies the brand across
+      // every active session of the user — picking «Wave Coffee» on one
+      // row also catches the same brand in any other uploaded statement.
+      const apply = await applyBrandToSession(brand.id);
       return { brand, confirmed, apply };
     },
     onSuccess: ({ brand, apply }) => {

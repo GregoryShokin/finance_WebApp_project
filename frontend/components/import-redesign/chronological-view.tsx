@@ -64,11 +64,10 @@ export function ChronologicalView({
     const source: ImportPreviewRow[] = explicitRows ?? preview?.rows ?? [];
     const visible = source.filter((r) => {
       if (_isHiddenStatus(r.status)) return false;
-      const nd = r.normalized_data as Record<string, unknown> | undefined;
-      // Transfer rows live in their own widget («Переводы и дубли»).
-      // Same gating as AttentionFeed so we don't double-show them here.
-      if (nd?.transfer_match) return false;
-      if (nd?.operation_type === 'transfer') return false;
+      // v1.23: transfer rows now appear inline as read-only entries
+      // («Перевод → Карта Сбер»), not in a separate widget. TxRow
+      // detects `transfer_match` / `operation_type='transfer'` and
+      // renders the read-only variant.
       return true;
     });
     // DESC by transaction_date — ISO strings sort lexicographically.

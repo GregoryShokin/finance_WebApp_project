@@ -22,6 +22,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { getAccounts } from '@/lib/api/accounts';
 import {
   commitImport,
+  commitImportQueueConfirmed,
   getImportSession,
   unexcludeImportRow,
   unparkImportRow,
@@ -288,6 +289,28 @@ export function ImportPage() {
     onError: (e: Error) => toast.error(e.message || 'Не удалось импортировать'),
   });
 
+  // v1.23 — queue-mode commit: one button commits all confirmed rows
+  // across every active session of the user (variant C). Sessions whose
+  // last row is committed auto-flip to status='committed' on the backend
+  // and disappear from the queue on the next refetch.
+  const commitQueueMut = useMutation({
+    mutationFn: () => commitImportQueueConfirmed(),
+    onSuccess: async (res) => {
+      const sessionWord =
+        res.sessions.length === 1 ? 'выписки' : `${res.sessions.length} выписок`;
+      toast.success(
+        `Импортировано ${res.totals.imported} ${
+          res.totals.imported === 1 ? 'операция' : 'операций'
+        } из ${sessionWord}`,
+      );
+      await queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+      // Prefix-match invalidates both queue and per-session preview/clusters.
+      await queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+      await queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось импортировать'),
+  });
+
   // Reset session — frontend-only batch: unpark + unexclude every row that
   // was moved off the active list. Category / counterparty edits remain
   // committed to the backend (full reset would require a dedicated endpoint).
@@ -444,12 +467,21 @@ export function ImportPage() {
       <ImportActionsBar
         queuePillRef={queuePillRef}
         uploading={uploadMut.isPending}
-        committing={commitMut.isPending}
+        committing={commitMut.isPending || commitQueueMut.isPending}
         resetting={resetMut.isPending}
         resetEnabled={activeSessionId !== null && !!preview}
         onUpload={handleSelectFile}
         onOpenQueue={openQueueAtPill}
-        onCommit={() => activeSessionId && commitMut.mutate(activeSessionId)}
+        // v1.23: prefer the unified queue commit. Falls back to legacy
+        // per-session commit only when there are no queue rows but there
+        // IS an active session (legacy `?session=N` URL deep-link).
+        onCommit={() => {
+          if (queue.rows.length > 0) {
+            commitQueueMut.mutate();
+          } else if (activeSessionId !== null) {
+            commitMut.mutate(activeSessionId);
+          }
+        }}
         onReset={() => {
           if (!confirm('Сбросить сессию: вернуть все отложенные и исключённые строки обратно в обработку?')) return;
           resetMut.mutate();
@@ -458,7 +490,7 @@ export function ImportPage() {
         queueOk={queueOk}
         queueSnz={queueSnz}
         queueExc={queueExc}
-        readyCount={readyRows}
+        readyCount={queue.summary?.ready_rows ?? readyRows}
         readySum={readySum}
       />
 

@@ -104,8 +104,11 @@ export function BrandCreateModal({
       });
       // 3. Confirm on the source row (sets counterparty + category + fingerprint)
       await confirmRowBrand(rowId, brand.id, categoryId);
-      // 4. Bulk-apply to other matching rows in the same session
-      const apply = await applyBrandToSession(brand.id, sessionId);
+      // 4. Bulk-apply to other matching rows across ALL active sessions
+      // (v1.23 — unified queue moderation). The `sessionId` prop is kept
+      // on the modal for legacy single-session telemetry; the brand sweep
+      // itself is session-agnostic.
+      const apply = await applyBrandToSession(brand.id);
       return { brand, apply };
     },
     onSuccess: ({ brand, apply }) => {

@@ -320,12 +320,86 @@ export function TxRow({
   const txTypeOption = TYPE_OPTIONS.find((t) => t.value === type) ?? TYPE_OPTIONS[0];
   const cpDisabled = type === 'debt' || type === 'transfer' || type === 'investment' || type === 'credit_operation';
 
+  // Source pill (queue mode v1.23) — compact bank+account label so the
+  // user knows which statement this row came from in the unified list.
+  // Hidden in legacy single-session view (row.account_name undefined).
+  const sourcePill = row.account_name ? (
+    <span
+      title={`${row.bank_code ?? ''} · ${row.account_name}`}
+      className="inline-flex max-w-[160px] items-center gap-1 truncate rounded-md border border-line bg-bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-ink-3"
+    >
+      {row.bank_code ? `${row.bank_code} · ` : ''}{row.account_name}
+    </span>
+  ) : null;
+
+  // Read-only transfer rendering (v1.23). Transfer rows now appear inline
+  // in the chronological list as informational entries — already paired
+  // by the matcher (or stamped as transfer with target by bank-mechanics),
+  // so the user can't edit them here. Orphan transfers (operation_type
+  // ='transfer' without transfer_match AND without target_account_id) fall
+  // through to the full row UI so the user can still resolve them.
+  const tmInfo = nd.transfer_match as
+    | { kind?: string; partner_account_name?: string | null; partner_account_id?: number | null }
+    | undefined;
+  const targetAccountName = (() => {
+    if (tmInfo?.partner_account_name) return String(tmInfo.partner_account_name);
+    const tid = nd.target_account_id as number | null | undefined;
+    if (tid != null) {
+      return options.accountsRaw?.find((a) => a.id === tid)?.name ?? null;
+    }
+    return null;
+  })();
+  const isTransferReadOnly =
+    !!tmInfo
+    || (nd.operation_type === 'transfer' && targetAccountName !== null);
+  if (isTransferReadOnly) {
+    const arrow = isIncome ? '←' : '→';
+    return (
+      <article
+        ref={rowScope}
+        className="border-t border-line bg-bg-surface2/40 px-4 py-2.5 first:border-t-0 lg:px-5"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="mt-0.5 flex shrink-0 flex-col items-start gap-1">
+              <span className="font-mono text-[11px] text-ink-3">{fmtDateTime(date)}</span>
+              {sourcePill}
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+                <span className="rounded-md bg-bg-surface px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-3">
+                  Перевод
+                </span>
+                {targetAccountName ? (
+                  <span className="text-ink-2">
+                    {arrow} {targetAccountName}
+                  </span>
+                ) : null}
+              </div>
+              {description ? (
+                <div className="mt-0.5 text-[11px] text-ink-3 break-words">
+                  {description}
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div className="shrink-0 text-right text-[13px] font-medium text-ink">
+            {fmtRubSigned(amount, isIncome ? 'income' : 'expense')}
+          </div>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <article ref={rowScope} className="border-t border-line bg-bg-surface px-4 py-3.5 first:border-t-0 lg:px-5">
       {/* Top row: date + merchant + amount + status */}
       <div className="flex items-start justify-between gap-2.5">
         <div className="flex min-w-0 items-start gap-3">
-          <span className="mt-0.5 shrink-0 font-mono text-[11px] text-ink-3">{fmtDateTime(date)}</span>
+          <div className="mt-0.5 flex shrink-0 flex-col items-start gap-1">
+            <span className="font-mono text-[11px] text-ink-3">{fmtDateTime(date)}</span>
+            {sourcePill}
+          </div>
           <div className="min-w-0">
             <div className="text-[13px] font-medium text-ink">
               <span className="break-words">{description || '(без описания)'}</span>

@@ -32,19 +32,21 @@ import type {
 } from '@/types/import';
 
 export function useImportQueue() {
+  // Query keys are nested under the same `['imports', 'preview']` /
+  // `['imports', 'bulk-clusters']` prefixes the legacy single-session
+  // hook uses, so existing `invalidateQueries({ queryKey: ['imports',
+  // 'preview'] })` calls (peppered across brand-confirm, picker, split,
+  // edit, etc.) match both queue and per-session entries via React
+  // Query's prefix matching. Saves us touching every mutation call site.
   const previewQuery = useQuery({
-    queryKey: ['imports', 'queue', 'preview'],
+    queryKey: ['imports', 'preview', 'queue'],
     queryFn: getImportQueuePreview,
-    // Re-fetch on window focus so the user can flip between tabs (upload
-    // a statement in another tab, come back here, see new rows).
     refetchOnWindowFocus: true,
-    // Stable cache — invalidated by commit / row-confirm / brand-confirm
-    // mutations through the same key family.
     staleTime: 0,
   });
 
   const clustersQuery = useQuery({
-    queryKey: ['imports', 'queue', 'bulk-clusters'],
+    queryKey: ['imports', 'bulk-clusters', 'queue'],
     queryFn: getImportQueueBulkClusters,
     refetchOnWindowFocus: true,
     staleTime: 0,
