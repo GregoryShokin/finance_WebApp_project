@@ -719,6 +719,76 @@ def test_apply_brand_to_session_matches_short_pattern_below_resolver_threshold(
     assert result["confirmed"] == 3
 
 
+def test_picker_confirm_then_apply_catches_sibling_skeleton_via_auto_learned_pattern(
+    service, db, user,
+):
+    """End-to-end repro of the «MRTшка» / «оплата в dts mrt» gap.
+
+    Setup mirrors the screenshot scenario:
+      • Brand «MRTшка» exists with pattern `text:mrtshka` only (created
+        from the MRTSHKA cluster).
+      • Three fingerprint clusters, all expense rows for the same brand:
+          – `оплата в dts mrt g`        (6 rows)  ← already confirmed
+          – `оплата в mrtshka`          (3 rows)  ← already confirmed
+          – `оплата в dts mrt`          (3 rows)  ← UNCONFIRMED, this is the gap
+
+    Without auto-learn the third cluster never matches: pattern
+    `text:mrtshka` has no substring overlap with skeleton `оплата в dts
+    mrt`. With auto-learn, picking «MRTшка» on a single dts-skeleton row
+    seeds `text:dts` on the brand; the subsequent apply_brand_to_session
+    sweeps the remaining two siblings.
+    """
+    from app.services.brand_confirm_service import BrandConfirmService
+
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="MRTшка", category_hint=None,
+    )
+    db.commit()
+    service.add_pattern_to_brand(
+        user_id=user.id, brand_id=brand.id,
+        kind="text", pattern="mrtshka",
+    )
+    db.commit()
+
+    s = _mk_session(db, user.id)
+    # Three rows in the dts-skeleton cluster (the unmatched one).
+    rows_dts = [
+        _mk_row(
+            db, s.id, row_index=i,
+            description=f"Оплата в DTS MRT VOLGODONSK VOLGODONSK RUS #{i}",
+            skeleton="оплата в dts mrt",
+            tokens={},
+        )
+        for i in range(3)
+    ]
+
+    # Sanity: pattern `text:mrtshka` does NOT match these rows.
+    pre_apply = service.apply_brand_to_session(
+        user_id=user.id, brand_id=brand.id, session_id=s.id,
+    )
+    assert pre_apply["matched"] == 0
+    assert pre_apply["confirmed"] == 0
+
+    # User opens picker on one of the dts-skeleton rows → confirms MRTшка.
+    BrandConfirmService(db).confirm_brand_for_row(
+        user_id=user.id, row_id=rows_dts[0].id, brand_id=brand.id,
+    )
+
+    # Auto-learn must have added `text:dts` (private user-scope).
+    patterns = [
+        (p.pattern, p.kind, p.scope_user_id)
+        for p in service.repo.list_patterns_for_brand(brand_id=brand.id)
+    ]
+    assert ("dts", "text", user.id) in patterns
+
+    # Subsequent apply now sweeps the remaining two dts-skeleton rows.
+    post_apply = service.apply_brand_to_session(
+        user_id=user.id, brand_id=brand.id, session_id=s.id,
+    )
+    assert post_apply["matched"] == 2  # rows[1], rows[2] — rows[0] already confirmed
+    assert post_apply["confirmed"] == 2
+
+
 def test_apply_brand_to_session_rejects_foreign_brand(service, db, user, other_user):
     other = service.create_private_brand(
         user_id=other_user.id, canonical_name="Other", category_hint=None,

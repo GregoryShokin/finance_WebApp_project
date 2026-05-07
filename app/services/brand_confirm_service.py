@@ -43,6 +43,7 @@ from app.repositories.import_repository import ImportRepository
 from app.repositories.user_brand_category_override_repository import (
     UserBrandCategoryOverrideRepository,
 )
+from app.services.brand_extractor_service import extract_brand
 from app.services.brand_pattern_strength_service import (
     BrandPatternNotFound,
     BrandPatternStrengthService,
@@ -50,6 +51,10 @@ from app.services.brand_pattern_strength_service import (
 from app.services.counterparty_fingerprint_service import (
     CounterpartyFingerprintService,
 )
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BrandConfirmError(Exception):
@@ -171,6 +176,18 @@ class BrandConfirmService:
         self._bind_fingerprint(
             user_id=user_id, fingerprint=nd.get("fingerprint"),
             counterparty_id=counterparty.id,
+        )
+
+        # Auto-learn: extract a brand candidate from this row's skeleton and
+        # upsert as a private text-pattern on the brand. Closes the gap where
+        # a user manually attaches a brand to a row whose skeleton differs
+        # from the brand's existing patterns — e.g. picking «MRTшка» on
+        # «оплата в dts mrt» when the brand was created from a «mrtshka» row.
+        # Without this, the next apply_brand_to_session call still misses
+        # the dts-skeleton fingerprints, even though the user just told us
+        # they belong to the same brand.
+        self._learn_pattern_from_row(
+            user_id=user_id, brand=brand, skeleton=nd.get("skeleton") or "",
         )
 
         # Propagate confirmation only when the user agreed with the
@@ -467,6 +484,47 @@ class BrandConfirmService:
         if cat is None:
             raise BrandConfirmError("Категория не найдена.")
         return cat
+
+    def _learn_pattern_from_row(
+        self, *, user_id: int, brand: Brand, skeleton: str,
+    ) -> None:
+        """Best-effort upsert of a `text` pattern derived from the row's skeleton.
+
+        Idempotent and silent on failure — pattern learning is an opportunistic
+        side-effect of confirm, never part of the contract. Safe to call from
+        bulk paths (apply_brand_to_session) — duplicate writes are deduped by
+        casefold equality with any existing pattern (regardless of scope, so
+        we never grow a private duplicate of a global pattern).
+
+        Why a private pattern: confirm authors per-user knowledge — global
+        brands accumulate user-scope overrides exactly the same way the
+        explicit «add pattern» UI does (see `add_pattern_to_brand`).
+        """
+        if not skeleton:
+            return
+        candidate = extract_brand(skeleton)
+        if not candidate:
+            return
+        candidate_cf = candidate.casefold()
+        existing = self.brand_repo.list_patterns_for_brand(brand_id=brand.id)
+        for p in existing:
+            if p.kind != "text":
+                continue
+            if (p.pattern or "").casefold() == candidate_cf:
+                return
+        try:
+            self.brand_repo.upsert_pattern(
+                brand_id=brand.id,
+                kind="text",
+                pattern=candidate,
+                is_global=False,
+                scope_user_id=user_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "auto-learn pattern upsert failed for brand %s, candidate %r",
+                brand.id, candidate, exc_info=True,
+            )
 
     def _bind_fingerprint(
         self,

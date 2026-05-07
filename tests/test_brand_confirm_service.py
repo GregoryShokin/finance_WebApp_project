@@ -754,3 +754,184 @@ def test_other_users_row_invisible(db, user, other_user, brand_pattern):
         svc.confirm_brand_for_row(
             user_id=user.id, row_id=row.id, brand_id=brand.id,
         )
+
+
+# ───────────────────────────────────────────────────────────────────
+# Auto-learn private pattern from row skeleton on confirm
+# ───────────────────────────────────────────────────────────────────
+
+
+def _make_private_brand(db, *, user_id: int, slug: str, canonical_name: str):
+    repo = BrandRepository(db)
+    brand = repo.create_brand(
+        slug=slug, canonical_name=canonical_name, category_hint=None,
+        is_global=False, created_by_user_id=user_id,
+    )
+    db.commit()
+    return brand
+
+
+def test_confirm_auto_learns_text_pattern_when_skeleton_carries_new_brand_token(
+    db, user,
+):
+    """User created brand «MRTшка» from a `mrtshka` row. Picker is then used
+    on a `dts mrt` row pointing at the same brand. Confirm must auto-add
+    a private text-pattern «dts» so subsequent apply_brand_to_session
+    sweeps the rest of the dts-skeleton fingerprint cluster.
+    """
+    brand = _make_private_brand(
+        db, user_id=user.id, slug="mrtshka_u1", canonical_name="MRTшка",
+    )
+    BrandRepository(db).upsert_pattern(
+        brand_id=brand.id, kind="text", pattern="mrtshka",
+        is_global=False, scope_user_id=user.id,
+    )
+    db.commit()
+
+    session = _make_session(db, user_id=user.id)
+    # Row skeleton differs from the existing pattern — extract_brand → "dts".
+    row = ImportRow(
+        session_id=session.id,
+        row_index=1,
+        raw_data_json={},
+        normalized_data_json={
+            "amount": "100.00",
+            "direction": "expense",
+            "transaction_date": "2026-01-15T12:00:00+00:00",
+            "skeleton": "оплата в dts mrt",
+            "fingerprint": "fp00000000000001",
+        },
+        status="warning",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    BrandConfirmService(db).confirm_brand_for_row(
+        user_id=user.id, row_id=row.id, brand_id=brand.id,
+    )
+
+    patterns = BrandRepository(db).list_patterns_for_brand(brand_id=brand.id)
+    text_patterns = sorted(
+        (p.pattern, p.scope_user_id) for p in patterns if p.kind == "text"
+    )
+    assert ("dts", user.id) in text_patterns
+    assert ("mrtshka", user.id) in text_patterns
+
+
+def test_confirm_auto_learn_is_idempotent_when_pattern_already_exists(
+    db, user,
+):
+    """Confirming on a row whose skeleton extracts to an already-known
+    pattern must not create a duplicate (regardless of scope)."""
+    brand = _make_private_brand(
+        db, user_id=user.id, slug="dts_u1", canonical_name="MRTшка",
+    )
+    BrandRepository(db).upsert_pattern(
+        brand_id=brand.id, kind="text", pattern="dts",
+        is_global=False, scope_user_id=user.id,
+    )
+    db.commit()
+
+    session = _make_session(db, user_id=user.id)
+    row = ImportRow(
+        session_id=session.id,
+        row_index=1,
+        raw_data_json={},
+        normalized_data_json={
+            "amount": "100.00",
+            "direction": "expense",
+            "transaction_date": "2026-01-15T12:00:00+00:00",
+            "skeleton": "оплата в dts mrt",
+            "fingerprint": "fp00000000000002",
+        },
+        status="warning",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    BrandConfirmService(db).confirm_brand_for_row(
+        user_id=user.id, row_id=row.id, brand_id=brand.id,
+    )
+
+    patterns = BrandRepository(db).list_patterns_for_brand(brand_id=brand.id)
+    dts_patterns = [p for p in patterns if p.kind == "text" and p.pattern == "dts"]
+    assert len(dts_patterns) == 1
+
+
+def test_confirm_auto_learn_skips_when_skeleton_has_no_brand_candidate(
+    db, user,
+):
+    """Transfer-like skeleton yields no brand from extract_brand → no pattern
+    is authored, even if the user manually attaches a brand to the row."""
+    brand = _make_private_brand(
+        db, user_id=user.id, slug="x_u1", canonical_name="X",
+    )
+    db.commit()
+
+    session = _make_session(db, user_id=user.id)
+    row = ImportRow(
+        session_id=session.id,
+        row_index=1,
+        raw_data_json={},
+        normalized_data_json={
+            "amount": "100.00",
+            "direction": "expense",
+            "transaction_date": "2026-01-15T12:00:00+00:00",
+            # `extract_brand` short-circuits on transfer keywords → None.
+            "skeleton": "внешний перевод номеру телефона <PHONE>",
+            "fingerprint": "fp00000000000003",
+        },
+        status="warning",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    BrandConfirmService(db).confirm_brand_for_row(
+        user_id=user.id, row_id=row.id, brand_id=brand.id,
+    )
+
+    patterns = BrandRepository(db).list_patterns_for_brand(brand_id=brand.id)
+    assert [p for p in patterns if p.kind == "text"] == []
+
+
+def test_confirm_auto_learn_does_not_duplicate_global_pattern(
+    db, user, brand_pattern,
+):
+    """Global brand already carries `text:pyaterochka`. A confirm on a row
+    whose skeleton extracts to «pyaterochka» must NOT spawn a private
+    duplicate — the pre-check is casefold-equal across all scopes."""
+    brand, _ = brand_pattern  # global brand with global pattern text:pyaterochka
+
+    session = _make_session(db, user_id=user.id)
+    row = ImportRow(
+        session_id=session.id,
+        row_index=1,
+        raw_data_json={},
+        normalized_data_json={
+            "amount": "100.00",
+            "direction": "expense",
+            "transaction_date": "2026-01-15T12:00:00+00:00",
+            "skeleton": "оплата pyaterochka",
+            "fingerprint": "fp00000000000004",
+        },
+        status="warning",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    BrandConfirmService(db).confirm_brand_for_row(
+        user_id=user.id, row_id=row.id, brand_id=brand.id,
+    )
+
+    patterns = BrandRepository(db).list_patterns_for_brand(brand_id=brand.id)
+    text_pyaterochka = [
+        p for p in patterns
+        if p.kind == "text" and (p.pattern or "").casefold() == "pyaterochka"
+    ]
+    assert len(text_pyaterochka) == 1
+    assert text_pyaterochka[0].is_global is True
+    assert text_pyaterochka[0].scope_user_id is None
