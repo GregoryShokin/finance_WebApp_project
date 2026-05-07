@@ -104,6 +104,159 @@ class BrandManagementService:
         )
 
     # ──────────────────────────────────────────────────────────────────
+    # Update
+    # ──────────────────────────────────────────────────────────────────
+
+    def update_private_brand(
+        self,
+        *,
+        user_id: int,
+        brand_id: int,
+        canonical_name: str | None,
+        category_hint: str | None,
+    ) -> Brand:
+        """Rename / re-hint a private brand. Owner-only.
+
+        Note: this does NOT rename any materialized Counterparty rows
+        — those live in their own table and may have been edited by
+        the user (e.g. «Пятёрочка у дома»). Counterparties created
+        from this brand keep their existing names; future confirms
+        will look up by the new brand name (case-fold match), creating
+        a new Counterparty if none matches. The user can manually
+        rename the Counterparty separately if they want unification.
+        """
+        brand = self.repo.get_brand(brand_id)
+        if brand is None:
+            raise BrandManagementError("brand not found")
+        if brand.is_global:
+            raise BrandManagementError("cannot edit a global brand")
+        if brand.created_by_user_id != user_id:
+            raise BrandManagementError("not your brand")
+
+        changed = False
+        if canonical_name is not None:
+            new_name = canonical_name.strip()
+            if not new_name:
+                raise BrandManagementError("canonical_name cannot be blank")
+            if new_name != brand.canonical_name:
+                brand.canonical_name = new_name
+                changed = True
+        if category_hint is not None:
+            new_hint = category_hint.strip() or None
+            if new_hint != brand.category_hint:
+                brand.category_hint = new_hint
+                changed = True
+
+        if changed:
+            self.db.add(brand)
+            self.db.flush()
+            self._refresh_display_fields_for_brand(brand)
+        return brand
+
+    def _refresh_display_fields_for_brand(self, brand: Brand) -> None:
+        """Sweep ImportRows that point at this brand and refresh their
+        cached display fields in `normalized_data_json`.
+
+        The row carries `brand_canonical_name` / `brand_category_hint`
+        for fast UI rendering without a join. After the brand renames,
+        those caches go stale — without this sweep, a row confirmed
+        before the rename would keep showing the old name in the
+        moderator UI until the user re-confirmed.
+        """
+        rows = (
+            self.db.query(ImportRow)
+            .filter(
+                # JSON containment on PostgreSQL is faster than fetch-all
+                # but SQLite (test fixtures) doesn't support `@>`. Loop in
+                # Python — at typical scale (single user, hundreds of
+                # active rows) the cost is negligible.
+            )
+            .all()
+        )
+        for row in rows:
+            nd = row.normalized_data_json or {}
+            if not isinstance(nd, dict):
+                continue
+            cached_brand_id = nd.get("brand_id") or nd.get("user_confirmed_brand_id")
+            if cached_brand_id != brand.id:
+                continue
+            nd = dict(nd)
+            nd["brand_canonical_name"] = brand.canonical_name
+            nd["brand_category_hint"] = brand.category_hint
+            row.normalized_data_json = nd
+            self.db.add(row)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Delete
+    # ──────────────────────────────────────────────────────────────────
+
+    def delete_private_brand(
+        self,
+        *,
+        user_id: int,
+        brand_id: int,
+    ) -> int:
+        """Hard-delete a private brand and clear its display traces from
+        every ImportRow in the user's active sessions. Owner-only.
+
+        Why hard-delete vs soft: private brands are user-authored
+        scratch space. If the user typed the wrong name and wants to
+        retry, soft-delete just clutters their picker. Hard-delete
+        cascades through `BrandPattern` (FK ondelete=CASCADE) and
+        `UserBrandCategoryOverride` (same), so no orphans survive.
+
+        Returns the number of ImportRows whose brand_* keys were
+        cleared. The user_confirmed_brand_id stamp is also removed —
+        rows fall back to «Требуют внимания» until the user picks a
+        new brand or leaves them un-branded.
+        """
+        brand = self.repo.get_brand(brand_id)
+        if brand is None:
+            raise BrandManagementError("brand not found")
+        if brand.is_global:
+            raise BrandManagementError("cannot delete a global brand")
+        if brand.created_by_user_id != user_id:
+            raise BrandManagementError("not your brand")
+
+        rows_cleared = self._clear_brand_traces_on_rows(brand_id=brand.id)
+
+        self.db.delete(brand)
+        self.db.flush()
+        return rows_cleared
+
+    def _clear_brand_traces_on_rows(self, *, brand_id: int) -> int:
+        """Remove brand_* + user_confirmed_brand_* keys on rows pointing
+        at the given brand. Counterparty / category remain untouched —
+        deleting a brand undoes the brand binding, not the user's
+        manual classification of the row."""
+        rows = self.db.query(ImportRow).all()
+        cleared = 0
+        for row in rows:
+            nd = row.normalized_data_json or {}
+            if not isinstance(nd, dict):
+                continue
+            touches_brand = (
+                nd.get("brand_id") == brand_id
+                or nd.get("user_confirmed_brand_id") == brand_id
+                or nd.get("user_rejected_brand_id") == brand_id
+            )
+            if not touches_brand:
+                continue
+            nd = dict(nd)
+            for key in (
+                "brand_id", "brand_slug", "brand_canonical_name",
+                "brand_category_hint", "brand_pattern_id", "brand_kind",
+                "brand_confidence",
+                "user_confirmed_brand_id", "user_confirmed_brand_at",
+                "user_rejected_brand_id", "user_rejected_brand_at",
+            ):
+                nd.pop(key, None)
+            row.normalized_data_json = nd
+            self.db.add(row)
+            cleared += 1
+        return cleared
+
+    # ──────────────────────────────────────────────────────────────────
     # Add pattern
     # ──────────────────────────────────────────────────────────────────
 

@@ -51,6 +51,7 @@ import {
 } from '@/lib/api/imports';
 import { BrandPrompt } from './brand-prompt';
 import { BrandCategoryEdit } from './brand-category-edit';
+import { BrandEditModal } from './brand-edit-modal';
 import { BrandPickerModal } from './brand-picker-modal';
 import { OrphanTransferHint } from './orphan-transfer-hint';
 import type { Account } from '@/types/account';
@@ -128,6 +129,9 @@ export function TxRow({
   // where the user rejected the suggestion). Picker has a nested «+ Создать
   // бренд» button that opens BrandCreateModal — single entry point per row.
   const [brandPickerOpen, setBrandPickerOpen]     = useState(false);
+  // Ph8b: «Изменить бренд» — only available on confirmed rows; modal
+  // gates write actions on `is_global=false` (global brands are read-only).
+  const [brandEditOpen, setBrandEditOpen]         = useState(false);
 
   // External refresh sync: when an out-of-band update lands on the row's
   // normalized_data (e.g. brand confirm propagation, apply-brand-category
@@ -328,13 +332,21 @@ export function TxRow({
               </div>
             ) : null}
             {confirmedBrandName ? (
-              <div className="mt-1.5">
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <BrandCategoryEdit
                   brandId={Number(nd.user_confirmed_brand_id)}
                   brandName={confirmedBrandName}
                   currentCategoryId={(nd.category_id as number | null) ?? null}
                   categories={filteredCategoryOptions}
                 />
+                <button
+                  type="button"
+                  onClick={() => setBrandEditOpen(true)}
+                  title={`Редактировать бренд «${confirmedBrandName}»`}
+                  className="inline-flex items-center gap-1 rounded-md border border-line bg-bg-surface px-2 py-0.5 text-[11px] text-ink-3 hover:border-ink-3 hover:bg-bg-surface2 hover:text-ink"
+                >
+                  <Pencil className="size-3" /> Изменить бренд
+                </button>
               </div>
             ) : null}
           </div>
@@ -427,6 +439,14 @@ export function TxRow({
           rawDescription={rawDescription}
           categoryOptions={filteredCategoryOptions}
           onClose={() => setBrandPickerOpen(false)}
+        />
+      ) : null}
+
+      {brandEditOpen && nd.user_confirmed_brand_id != null ? (
+        <BrandEditModal
+          open={brandEditOpen}
+          brandId={Number(nd.user_confirmed_brand_id)}
+          onClose={() => setBrandEditOpen(false)}
         />
       ) : null}
 

@@ -33,6 +33,22 @@ class BrandCreateRequest(BaseModel):
     category_hint: str | None = Field(default=None, max_length=64)
 
 
+class BrandUpdateRequest(BaseModel):
+    """Partial update — only fields that arrive non-None get patched.
+
+    `category_hint` is intentionally allowed to be sent as an empty string
+    to clear the hint; the service trims and converts "" → None.
+    """
+
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=128)
+    category_hint: str | None = Field(default=None, max_length=64)
+
+
+class BrandDeleteResponse(BaseModel):
+    brand_id: int
+    rows_cleared: int
+
+
 class BrandPatternCreateRequest(BaseModel):
     kind: USER_PATTERN_KIND
     pattern: str = Field(..., min_length=1, max_length=256)

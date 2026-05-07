@@ -77,6 +77,27 @@ export function getBrand(brandId: number) {
   return apiClient<BrandWithPatterns>(`/brands/${brandId}`);
 }
 
+export function updateBrand(brandId: number, payload: {
+  canonical_name?: string;
+  category_hint?: string | null;
+}) {
+  return apiClient<Brand>(`/brands/${brandId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export type DeleteBrandResponse = {
+  brand_id: number;
+  rows_cleared: number;
+};
+
+export function deleteBrand(brandId: number) {
+  return apiClient<DeleteBrandResponse>(`/brands/${brandId}`, {
+    method: 'DELETE',
+  });
+}
+
 export function addBrandPattern(brandId: number, payload: {
   kind: BrandPatternKind;
   pattern: string;

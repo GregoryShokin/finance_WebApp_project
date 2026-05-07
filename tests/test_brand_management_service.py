@@ -531,6 +531,156 @@ def test_unresolved_groups_isolates_users(service, db, user, other_user):
     assert {g.candidate for g in theirs} == {"otherbrand"}
 
 
+def test_update_private_brand_renames(service, db, user):
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="Дэйв Кофе", category_hint=None,
+    )
+    db.commit()
+    updated = service.update_private_brand(
+        user_id=user.id, brand_id=brand.id,
+        canonical_name="Wave Coffee", category_hint=None,
+    )
+    db.commit()
+    assert updated.canonical_name == "Wave Coffee"
+
+
+def test_update_private_brand_changes_hint(service, db, user):
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="X", category_hint="Кафе",
+    )
+    db.commit()
+    updated = service.update_private_brand(
+        user_id=user.id, brand_id=brand.id,
+        canonical_name=None, category_hint="Здоровье",
+    )
+    db.commit()
+    assert updated.category_hint == "Здоровье"
+    assert updated.canonical_name == "X"  # unchanged
+
+
+def test_update_private_brand_clears_hint_with_blank_string(service, db, user):
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="X", category_hint="Кафе",
+    )
+    db.commit()
+    updated = service.update_private_brand(
+        user_id=user.id, brand_id=brand.id,
+        canonical_name=None, category_hint="   ",
+    )
+    db.commit()
+    assert updated.category_hint is None
+
+
+def test_update_private_brand_rejects_blank_name(service, db, user):
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="X", category_hint=None,
+    )
+    db.commit()
+    with pytest.raises(BrandManagementError):
+        service.update_private_brand(
+            user_id=user.id, brand_id=brand.id,
+            canonical_name="   ", category_hint=None,
+        )
+
+
+def test_update_private_brand_rejects_global(service, repo, db, user):
+    g = repo.create_brand(slug="g", canonical_name="Global", is_global=True)
+    db.commit()
+    with pytest.raises(BrandManagementError):
+        service.update_private_brand(
+            user_id=user.id, brand_id=g.id,
+            canonical_name="Modified", category_hint=None,
+        )
+
+
+def test_update_private_brand_rejects_foreign(service, db, user, other_user):
+    other = service.create_private_brand(
+        user_id=other_user.id, canonical_name="Theirs", category_hint=None,
+    )
+    db.commit()
+    with pytest.raises(BrandManagementError):
+        service.update_private_brand(
+            user_id=user.id, brand_id=other.id,
+            canonical_name="Mine", category_hint=None,
+        )
+
+
+def test_update_brand_refreshes_display_fields_on_rows(service, db, user):
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="Old Name", category_hint="Кафе",
+    )
+    db.commit()
+
+    s = _mk_session(db, user.id)
+    row = _mk_row(
+        db, s.id, row_index=0,
+        description="Оплата в OLD",
+        skeleton="оплата в old", tokens={},
+        brand_id=brand.id,
+    )
+    nd = dict(row.normalized_data_json)
+    nd["brand_canonical_name"] = "Old Name"
+    nd["brand_category_hint"] = "Кафе"
+    row.normalized_data_json = nd
+    db.add(row)
+    db.commit()
+
+    service.update_private_brand(
+        user_id=user.id, brand_id=brand.id,
+        canonical_name="New Name", category_hint="Здоровье",
+    )
+    db.commit()
+    db.refresh(row)
+
+    assert row.normalized_data_json["brand_canonical_name"] == "New Name"
+    assert row.normalized_data_json["brand_category_hint"] == "Здоровье"
+
+
+def test_delete_private_brand_clears_rows(service, db, user):
+    brand = service.create_private_brand(
+        user_id=user.id, canonical_name="Wrong", category_hint=None,
+    )
+    db.commit()
+
+    s = _mk_session(db, user.id)
+    row = _mk_row(
+        db, s.id, row_index=0,
+        description="Оплата в WRONG",
+        skeleton="оплата в wrong", tokens={},
+        brand_id=brand.id,
+        user_confirmed_brand_id=brand.id,
+    )
+    nd = dict(row.normalized_data_json)
+    nd["brand_canonical_name"] = "Wrong"
+    row.normalized_data_json = nd
+    db.add(row)
+    db.commit()
+
+    cleared = service.delete_private_brand(user_id=user.id, brand_id=brand.id)
+    db.commit()
+    db.refresh(row)
+
+    assert cleared == 1
+    assert "brand_id" not in row.normalized_data_json
+    assert "user_confirmed_brand_id" not in row.normalized_data_json
+    assert "brand_canonical_name" not in row.normalized_data_json
+
+
+def test_delete_private_brand_rejects_global(service, repo, user):
+    g = repo.create_brand(slug="g", canonical_name="Global", is_global=True)
+    with pytest.raises(BrandManagementError):
+        service.delete_private_brand(user_id=user.id, brand_id=g.id)
+
+
+def test_delete_private_brand_rejects_foreign(service, db, user, other_user):
+    other = service.create_private_brand(
+        user_id=other_user.id, canonical_name="Theirs", category_hint=None,
+    )
+    db.commit()
+    with pytest.raises(BrandManagementError):
+        service.delete_private_brand(user_id=user.id, brand_id=other.id)
+
+
 def test_apply_brand_to_session_rejects_foreign_brand(service, db, user, other_user):
     other = service.create_private_brand(
         user_id=other_user.id, canonical_name="Other", category_hint=None,

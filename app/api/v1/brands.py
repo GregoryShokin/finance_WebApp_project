@@ -22,10 +22,12 @@ from app.api.deps import get_current_user, get_db
 from app.models.user import User
 from app.schemas.brands import (
     BrandCreateRequest,
+    BrandDeleteResponse,
     BrandPatternCreateRequest,
     BrandPatternResponse,
     BrandResponse,
     BrandSuggestionResponse,
+    BrandUpdateRequest,
     BrandWithPatternsResponse,
     SuggestedBrandGroup,
     SuggestedBrandsResponse,
@@ -164,6 +166,58 @@ def get_brand(
         created_by_user_id=brand.created_by_user_id,
         patterns=[BrandPatternResponse.model_validate(p) for p in patterns],
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Update / Delete (private brands only)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@router.patch("/{brand_id}", response_model=BrandResponse)
+def update_brand(
+    brand_id: int,
+    payload: BrandUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Rename / re-hint a private brand. Global brands are read-only."""
+    service = BrandManagementService(db)
+    try:
+        brand = service.update_private_brand(
+            user_id=current_user.id,
+            brand_id=brand_id,
+            canonical_name=payload.canonical_name,
+            category_hint=payload.category_hint,
+        )
+    except BrandManagementError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        ) from exc
+    db.commit()
+    db.refresh(brand)
+    return brand
+
+
+@router.delete("/{brand_id}", response_model=BrandDeleteResponse)
+def delete_brand(
+    brand_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Hard-delete a private brand + clear its traces from ImportRows."""
+    service = BrandManagementService(db)
+    try:
+        rows_cleared = service.delete_private_brand(
+            user_id=current_user.id, brand_id=brand_id,
+        )
+    except BrandManagementError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        ) from exc
+    db.commit()
+    return BrandDeleteResponse(brand_id=brand_id, rows_cleared=rows_cleared)
 
 
 # ──────────────────────────────────────────────────────────────────────
