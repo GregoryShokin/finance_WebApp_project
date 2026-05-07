@@ -1576,6 +1576,74 @@ class ImportService:
             "rows": [self._serialize_preview_row(row) for row in rows],
         }
 
+    def get_queue_preview(self, *, user_id: int) -> dict[str, Any]:
+        """Aggregate all parsed rows from the user's active (non-committed)
+        sessions into one moderation payload — the unified queue (v1.23).
+
+        Sessions in earlier states (queued / parsing / awaiting_account, or
+        with no `account_id` assigned yet) are skipped: their rows aren't
+        moderation-ready. The only sessions admitted are
+        `status='preview_ready'` AND `account_id IS NOT NULL` — i.e. the
+        user has assigned a bank account and clicked «Начать разбор».
+
+        Each row is enriched with source metadata (`session_id`,
+        `account_id`, `account_name`, `bank_code`) so the unified UI can
+        render a bank pill and apply per-account / per-bank filters
+        without an extra round-trip per row.
+        """
+        sessions = self.import_repo.list_active_sessions(user_id=user_id)
+        eligible = [
+            s for s in sessions
+            if str(s.status or "") == "preview_ready" and s.account_id is not None
+        ]
+
+        sessions_payload: list[dict[str, Any]] = []
+        rows_payload: list[dict[str, Any]] = []
+        all_rows: list[ImportRow] = []
+
+        # Account lookups cached per session — a typical user has 5-10
+        # accounts but uploads many sessions over time. Avoid N+1.
+        account_cache: dict[int, Any] = {}
+
+        for session in eligible:
+            account = None
+            if session.account_id is not None:
+                account = account_cache.get(session.account_id)
+                if account is None:
+                    account = self.account_repo.get_by_id_and_user(
+                        session.account_id, user_id,
+                    )
+                    if account is not None:
+                        account_cache[session.account_id] = account
+            bank_code = (
+                (account.bank.code if account is not None and account.bank else None)
+                or (session.parse_settings or {}).get("detection", {}).get("bank_code")
+            )
+            sessions_payload.append({
+                "session_id": session.id,
+                "filename": session.filename,
+                "status": session.status,
+                "account_id": session.account_id,
+                "account_name": account.name if account else None,
+                "bank_code": bank_code,
+            })
+
+            rows = self.import_repo.get_rows(session_id=session.id)
+            all_rows.extend(rows)
+            for row in rows:
+                serialized = self._serialize_preview_row(row)
+                serialized["session_id"] = session.id
+                serialized["account_id"] = session.account_id
+                serialized["account_name"] = account.name if account else None
+                serialized["bank_code"] = bank_code
+                rows_payload.append(serialized)
+
+        return {
+            "sessions": sessions_payload,
+            "rows": rows_payload,
+            "summary": self._build_summary_from_rows(all_rows),
+        }
+
     def build_preview(self, *, user_id: int, session_id: int, payload: ImportMappingRequest) -> dict[str, Any]:
         session = self.get_session(user_id=user_id, session_id=session_id)
         # Serialize concurrent build_preview calls for the same session — prevents

@@ -21,6 +21,7 @@ from app.schemas.imports import (
     ImportCommitResponse,
     ImportMappingRequest,
     ImportPreviewResponse,
+    ImportQueuePreviewResponse,
     ImportSessionListResponse,
     ImportReviewQueueResponse,
     ImportRowLabelRequest,
@@ -48,6 +49,24 @@ def get_import_review_queue(
 ):
     service = ImportService(db)
     return service.list_review_queue(user_id=current_user.id)
+
+
+@router.get("/queue/preview", response_model=ImportQueuePreviewResponse)
+def get_import_queue_preview(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Unified moderation queue (v1.23) — all preview-ready rows from
+    every active session of the user, with per-row source metadata.
+
+    The session abstraction is hidden from the user: this endpoint is the
+    single source of truth for the moderator UI in queue mode. Only
+    sessions with `status='preview_ready'` AND assigned `account_id` are
+    admitted; sessions still queued / parsing / awaiting account are
+    excluded silently.
+    """
+    service = ImportService(db)
+    return service.get_queue_preview(user_id=current_user.id)
 
 
 @router.get("/sessions", response_model=ImportSessionListResponse)

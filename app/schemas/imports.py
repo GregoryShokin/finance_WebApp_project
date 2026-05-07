@@ -223,6 +223,44 @@ class ImportPreviewResponse(BaseModel):
     rows: list[ImportPreviewRowResponse]
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Unified queue (cross-session moderation, v1.23)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class ImportQueueSessionMeta(BaseModel):
+    """Source metadata for one session contributing rows to the queue."""
+
+    session_id: int
+    filename: str
+    status: ImportSessionStatus
+    account_id: int | None = None
+    account_name: str | None = None
+    bank_code: str | None = None
+
+
+class ImportQueueRowResponse(ImportPreviewRowResponse):
+    """Preview row enriched with source metadata so the unified moderator
+    can render a bank/account pill without per-session lookup."""
+
+    session_id: int
+    account_id: int | None = None
+    account_name: str | None = None
+    bank_code: str | None = None
+
+
+class ImportQueuePreviewResponse(BaseModel):
+    """All preview-ready rows across the user's active sessions, plus the
+    minimal metadata needed for source attribution and filtering. Sessions
+    in earlier states (queued / parsing / awaiting_account) are excluded —
+    their rows aren't moderation-ready.
+    """
+
+    sessions: list[ImportQueueSessionMeta]
+    rows: list[ImportQueueRowResponse]
+    summary: ImportPreviewSummary
+
+
 class ImportSplitItemRequest(BaseModel):
     # Each split part is a self-contained mini-transaction with its own type.
     # operation_type defaults to 'regular' for backwards compat with the old
