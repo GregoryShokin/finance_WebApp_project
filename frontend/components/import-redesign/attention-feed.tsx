@@ -13,6 +13,7 @@ import { Filter } from 'lucide-react';
 import { TxRow } from './tx-row';
 import { EditTxRazvorot } from './edit-tx-razvorot';
 import { SplitModal } from './split-modal';
+import { BrandSuggestionsWidget } from './brand-suggestions-widget';
 import { getCategories } from '@/lib/api/categories';
 import { getCounterparties } from '@/lib/api/counterparties';
 import { getDebtPartners } from '@/lib/api/debt-partners';
@@ -126,6 +127,11 @@ export function AttentionFeed({
           <Filter className="size-3" /> Фильтр
         </button>
       </header>
+
+      <BrandSuggestionsWidget
+        sessionId={sessionId}
+        categoryOptions={opts.categories.filter((c) => c.kind === 'expense')}
+      />
 
       <div>
         {singles.slice(0, shown).map((row) => (

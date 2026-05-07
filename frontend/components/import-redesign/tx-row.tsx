@@ -51,6 +51,8 @@ import {
 } from '@/lib/api/imports';
 import { BrandPrompt } from './brand-prompt';
 import { BrandCategoryEdit } from './brand-category-edit';
+import { BrandCreateModal } from './brand-create-modal';
+import { BrandPickerModal } from './brand-picker-modal';
 import { OrphanTransferHint } from './orphan-transfer-hint';
 import type { Account } from '@/types/account';
 import type { ImportPreviewRow, ImportRowUpdatePayload } from '@/types/import';
@@ -123,6 +125,10 @@ export function TxRow({
   const [creditAccountId, setCreditAccountId]     = useState<number | null>((nd.credit_account_id as number | null) ?? null);
   const [creditPrincipal, setCreditPrincipal]     = useState<string>(((nd.credit_principal_amount as string | number | null) ?? '').toString());
   const [creditInterest, setCreditInterest]       = useState<string>(((nd.credit_interest_amount as string | number | null) ?? '').toString());
+  // Ph8b: «+ Создать бренд» / «Выбрать бренд» modals on rows that didn't
+  // resolve to a brand (or where the user rejected the suggestion).
+  const [brandCreateOpen, setBrandCreateOpen]     = useState(false);
+  const [brandPickerOpen, setBrandPickerOpen]     = useState(false);
 
   // The parser stores amount as an absolute magnitude; direction is the
   // authoritative source of sign. Never derive sign from `amount > 0`.
@@ -375,6 +381,52 @@ export function TxRow({
             brandConfirmMut.mutate({ brandId, categoryId })
           }
           onReject={() => brandRejectMut.mutate()}
+        />
+      ) : null}
+
+      {/* Brand registry Ph8b: fallback on rows with no resolved brand.
+          Either resolver had no match (brand_id == null) OR the user
+          rejected the suggestion (user_rejected_brand_id != null). Two
+          escape hatches: create a private brand or pick an existing one
+          from the registry. Hidden once the brand is confirmed — then
+          BrandCategoryEdit on the description block takes over. */}
+      {nd.user_confirmed_brand_id == null
+        && (type === 'regular' || type === 'refund')
+        && (nd.brand_id == null || nd.user_rejected_brand_id != null) ? (
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setBrandCreateOpen(true)}
+            className="inline-flex items-center gap-1 rounded-md border border-line bg-bg-surface px-2 py-0.5 text-[11px] text-ink-3 hover:border-ink-3 hover:bg-bg-surface2 hover:text-ink"
+          >
+            + Создать бренд
+          </button>
+          <button
+            type="button"
+            onClick={() => setBrandPickerOpen(true)}
+            className="inline-flex items-center gap-1 rounded-md border border-line bg-bg-surface px-2 py-0.5 text-[11px] text-ink-3 hover:border-ink-3 hover:bg-bg-surface2 hover:text-ink"
+          >
+            Выбрать бренд
+          </button>
+        </div>
+      ) : null}
+
+      {brandCreateOpen ? (
+        <BrandCreateModal
+          open={brandCreateOpen}
+          rowId={row.id}
+          sessionId={sessionId}
+          rawDescription={rawDescription}
+          categoryOptions={filteredCategoryOptions}
+          onClose={() => setBrandCreateOpen(false)}
+        />
+      ) : null}
+
+      {brandPickerOpen ? (
+        <BrandPickerModal
+          open={brandPickerOpen}
+          rowId={row.id}
+          onClose={() => setBrandPickerOpen(false)}
         />
       ) : null}
 
