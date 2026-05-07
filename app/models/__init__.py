@@ -14,6 +14,7 @@ from app.models.account import Account
 from app.models.bank import Bank
 from app.models.bank_support_request import BankSupportRequest
 from app.models.base import Base
+from app.models.brand import Brand, BrandPattern
 from app.models.global_pattern import GlobalPattern, GlobalPatternVote
 from app.models.budget import Budget
 from app.models.budget_alert import BudgetAlert
@@ -33,12 +34,15 @@ from app.models.refresh_token import RefreshToken
 from app.models.transaction import Transaction
 from app.models.transaction_category_rule import TransactionCategoryRule
 from app.models.user import User
+from app.models.user_brand_category_override import UserBrandCategoryOverride
 
 __all__ = [
     "Account",
     "Bank",
     "BankSupportRequest",
     "Base",
+    "Brand",
+    "BrandPattern",
     "GlobalPattern",
     "GlobalPatternVote",
     "Budget",
@@ -59,4 +63,5 @@ __all__ = [
     "Transaction",
     "TransactionCategoryRule",
     "User",
+    "UserBrandCategoryOverride",
 ]

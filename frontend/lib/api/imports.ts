@@ -167,6 +167,68 @@ export function attachRowToCounterparty(
   );
 }
 
+// Brand confirm/reject (Brand registry Ph6 + Ph8).
+export type BrandConfirmResponse = {
+  row_id: number;
+  brand_id: number;
+  brand_slug: string;
+  brand_canonical_name: string;
+  counterparty_id: number | null;
+  counterparty_name: string | null;
+  category_id: number | null;
+  category_name: string | null;
+  propagated_count: number;
+  was_override: boolean;
+};
+
+export type BrandRejectResponse = {
+  row_id: number;
+  rejected_brand_id: number;
+};
+
+export function confirmRowBrand(
+  rowId: number,
+  brandId: number,
+  categoryId?: number | null,
+) {
+  // Ph8: optional categoryId overrides the brand's default hint and saves
+  // a per-user override so future imports of this brand resolve to the
+  // chosen category.
+  const body: Record<string, unknown> = { brand_id: brandId };
+  if (categoryId != null) body.category_id = categoryId;
+  return apiClient<BrandConfirmResponse>(
+    `/imports/rows/${rowId}/confirm-brand`,
+    { method: 'POST', body: JSON.stringify(body) },
+  );
+}
+
+export function rejectRowBrand(rowId: number) {
+  return apiClient<BrandRejectResponse>(
+    `/imports/rows/${rowId}/reject-brand`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
+// Ph8: bulk-apply category for an entire brand (post-confirmation editing).
+export type ApplyBrandCategoryResponse = {
+  brand_id: number;
+  brand_canonical_name: string;
+  category_id: number;
+  category_name: string;
+  rows_updated: number;
+  override_id: number;
+};
+
+export function applyBrandCategory(brandId: number, categoryId: number) {
+  return apiClient<ApplyBrandCategoryResponse>(
+    `/brands/${brandId}/apply-category`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ category_id: categoryId }),
+    },
+  );
+}
+
 export function parkImportRow(rowId: number) {
   return apiClient<{ session_id: number; row_id: number; status: string; summary: Record<string, number> }>(
     `/imports/rows/${rowId}/park`,

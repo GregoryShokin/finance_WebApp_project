@@ -38,6 +38,7 @@ import { ImportActionsBar } from './import-actions-bar';
 import { ImportStatusCard } from './import-status-card';
 import { ClusterGrid } from './cluster-grid';
 import { AttentionFeed } from './attention-feed';
+import { ChronologicalView } from './chronological-view';
 import { ImportFabCluster } from './import-fab-cluster';
 import { QueuePanel } from './queue-panel';
 import { MappingModal } from './mapping-modal';
@@ -67,6 +68,24 @@ export function ImportPage() {
   const queuePillRef = useRef<HTMLButtonElement | null>(null);
   const [queueOpen, setQueueOpen] = useState<{ x: number; y: number } | null>(null);
   const [mappingSessionId, setMappingSessionId] = useState<number | null>(null);
+
+  // Ph7b: cluster vs chronological view. Persisted across reloads so the
+  // user's preference sticks. Default 'chronological' — that's the new
+  // primary UX (Brand registry plan §7) and the cluster grid stays as an
+  // opt-in fallback for users who want the bulk-by-brand workflow.
+  const [importView, setImportView] = useState<'clusters' | 'chronological'>(
+    () => {
+      if (typeof window === 'undefined') return 'chronological';
+      const stored = window.localStorage.getItem('import.view');
+      return stored === 'clusters' ? 'clusters' : 'chronological';
+    },
+  );
+  const setImportViewPersistent = (v: 'clusters' | 'chronological') => {
+    setImportView(v);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('import.view', v);
+    }
+  };
 
   // Этап 0.5: duplicate-statement detection state.
   // `pendingFile` is needed because the user may pick "Загрузить как новую"
@@ -469,8 +488,50 @@ export function ImportPage() {
               readyRows={readyRows}
               reviewRows={Math.max(reviewRows, 0)}
             />
-            <ClusterGrid sessionId={activeSessionId} preview={preview} clusters={clusters} />
-            <AttentionFeed sessionId={activeSessionId} preview={preview} clusters={clusters} />
+            <div className="flex items-center justify-end">
+              <div
+                role="tablist"
+                aria-label="Вид списка операций"
+                className="inline-flex rounded-lg border border-line bg-bg-surface p-0.5 text-xs"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={importView === 'chronological'}
+                  onClick={() => setImportViewPersistent('chronological')}
+                  className={
+                    'rounded-md px-3 py-1.5 transition '
+                    + (importView === 'chronological'
+                      ? 'bg-bg-surface2 font-medium text-ink'
+                      : 'text-ink-3 hover:text-ink')
+                  }
+                >
+                  По дате
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={importView === 'clusters'}
+                  onClick={() => setImportViewPersistent('clusters')}
+                  className={
+                    'rounded-md px-3 py-1.5 transition '
+                    + (importView === 'clusters'
+                      ? 'bg-bg-surface2 font-medium text-ink'
+                      : 'text-ink-3 hover:text-ink')
+                  }
+                >
+                  Группы
+                </button>
+              </div>
+            </div>
+            {importView === 'chronological' ? (
+              <ChronologicalView sessionId={activeSessionId} preview={preview} />
+            ) : (
+              <>
+                <ClusterGrid sessionId={activeSessionId} preview={preview} clusters={clusters} />
+                <AttentionFeed sessionId={activeSessionId} preview={preview} clusters={clusters} />
+              </>
+            )}
           </>
         )}
       </div>

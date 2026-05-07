@@ -11,6 +11,9 @@ from app.models.user import User
 from app.schemas.imports import (
     AttachRowToClusterRequest,
     AttachRowToClusterResponse,
+    BrandConfirmRequest,
+    BrandConfirmResponse,
+    BrandRejectResponse,
     BulkApplyRequest,
     BulkApplyResponse,
     BulkClustersResponse,
@@ -290,6 +293,64 @@ def update_import_row(
         db.rollback()
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ImportValidationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/rows/{row_id}/confirm-brand", response_model=BrandConfirmResponse)
+def confirm_row_brand(
+    row_id: int,
+    payload: BrandConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Confirm the brand for a row («Это Пятёрочка? [Да]»).
+
+    When `brand_id` matches the resolver's prediction, the same brand is
+    propagated to every other row of this session that resolved to it —
+    the prompt vanishes across the cluster in one click. When it differs
+    (override), only the current row is stamped; the predicted pattern
+    gets a rejection signal.
+    """
+    from app.services.brand_confirm_service import BrandConfirmError, BrandConfirmService
+
+    service = BrandConfirmService(db)
+    try:
+        return service.confirm_brand_for_row(
+            user_id=current_user.id,
+            row_id=row_id,
+            brand_id=payload.brand_id,
+            category_id=payload.category_id,
+        )
+    except BrandConfirmError as exc:
+        db.rollback()
+        # 400 covers all rejection causes — row not found, session committed,
+        # row committed, brand missing/inaccessible. The message is in Russian
+        # and surfaced verbatim to the moderator UI.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/rows/{row_id}/reject-brand", response_model=BrandRejectResponse)
+def reject_row_brand(
+    row_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Reject the predicted brand for a row («Не этот бренд»).
+
+    Stamps `user_rejected_brand_id` so the resolver doesn't re-suggest the
+    same brand on next preview-read. Increments the predicted pattern's
+    rejection counter; pattern auto-deactivates after enough rejections.
+    No propagation — rejection is row-local.
+    """
+    from app.services.brand_confirm_service import BrandConfirmError, BrandConfirmService
+
+    service = BrandConfirmService(db)
+    try:
+        return service.reject_brand_for_row(
+            user_id=current_user.id, row_id=row_id,
+        )
+    except BrandConfirmError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

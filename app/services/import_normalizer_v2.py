@@ -57,14 +57,29 @@ CONTRACT_RX = re.compile(
 # Pre-stripping internal spaces is caller's job if needed.
 IBAN_RX = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b")
 
-# SBP merchant payment — T-Bank / Ozon format:
-#   "26033 MOR SBP 0387"  or  "26033 MOP SBP 1232"
-# Structure: MERCHANT_ID(4-6 digits) + CAT_CODE(2-5 latin letters) + SBP + TERMINAL_ID(3-6 digits)
-# The merchant ID uniquely identifies the business; the category code and terminal ID
-# vary per store location and are meaningless for categorisation.
-# Replacement keeps the merchant ID so different merchants stay in different clusters.
-SBP_MERCHANT_RX = re.compile(
-    r"\b(\d{4,6})\s+[A-Za-z]{2,5}\s+SBP\s+\d{3,6}\b",
+# SBP merchant payment — two distinct T-Bank rail formats:
+#
+# Format A (explicit SBP, full QR-payment via SBP):
+#     "26033 MOR SBP 0387"  /  "26033 MOP SBP 1232"
+# Structure: MERCHANT_ID(4-6 digits) + NSPK_CAT(2-5 latin letters) + SBP + LAST4(4 digits).
+#   Group 1: sbp_merchant_id — uniquely identifies the brand legal entity
+#     (kind='sbp_merchant_id', primary brand-resolution key, §3).
+#   Group 2: card_last4 — last 4 of the *payer's* card. User-side, never
+#     a brand signal — kept only for parity/debug.
+#
+# Format B (card-via-QR — card payment routed through SBP):
+#     "QSR 26033_P_QR 1232"
+# Structure: NSPK_CAT(2-5 latin letters) + MERCHANT_ID(4-6 digits) + "_P_QR" + LAST4(4 digits).
+# Same merchant_id space as Format A — populates the same tokens.
+#
+# Replacement in normalize_skeleton keeps merchant_id so different merchants
+# stay in different clusters; NSPK category and last4 are dropped.
+SBP_EXPLICIT_RX = re.compile(
+    r"\b(\d{4,6})\s+[A-Za-z]{2,5}\s+SBP\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+SBP_QR_SUFFIX_RX = re.compile(
+    r"\b[A-Za-z]{2,5}\s+(\d{4,6})_P_QR\s+(\d{4})\b",
     re.IGNORECASE,
 )
 
@@ -373,6 +388,8 @@ class ExtractedTokens:
     card: str | None = None
     person_name: str | None = None
     counterparty_org: str | None = None
+    sbp_merchant_id: str | None = None
+    card_last4: str | None = None
     amounts: tuple[Decimal, ...] = field(default_factory=tuple)
     dates: tuple[date, ...] = field(default_factory=tuple)
 
@@ -395,6 +412,9 @@ def extract_tokens(description: str) -> ExtractedTokens:
     card_m = CARD_MASKED_RX.search(description) or CARD_FULL_RX.search(description)
     person_m = PERSON_NAME_RX.search(description)
     org_m = ORG_RX.search(description)
+    # Format A is the explicit-SBP form; if absent, fall through to Format B
+    # (card-via-QR with the "_P_QR" suffix). Both feed the same token slots.
+    sbp_m = SBP_EXPLICIT_RX.search(description) or SBP_QR_SUFFIX_RX.search(description)
 
     amounts: list[Decimal] = []
     for m in AMOUNT_RX.finditer(description):
@@ -425,6 +445,8 @@ def extract_tokens(description: str) -> ExtractedTokens:
         card=card_m.group(0).strip() if card_m else None,
         person_name=person_m.group(0) if person_m else None,
         counterparty_org=org_m.group(0) if org_m else None,
+        sbp_merchant_id=sbp_m.group(1) if sbp_m else None,
+        card_last4=sbp_m.group(2) if sbp_m else None,
         amounts=tuple(amounts),
         dates=tuple(dates),
     )
@@ -482,9 +504,12 @@ def normalize_skeleton(description: str, extracted: ExtractedTokens) -> str:
     # substrings before narrower patterns see them.
     # SBP merchant payments must be normalized before AMOUNT_RX/CONTRACT_RX
     # would swallow the merchant-ID digits individually.
-    # "26033 MOR SBP 0387" → "26033 <SBP_PAYMENT>" — merchant ID kept as
-    # the cluster discriminant; category code + terminal ID removed.
-    text = SBP_MERCHANT_RX.sub(r"\1 <SBP_PAYMENT>", text)
+    #   Format A: "26033 MOR SBP 0387"      → "26033 <SBP_PAYMENT>"
+    #   Format B: "QSR 26033_P_QR 1232"     → "26033 <SBP_PAYMENT>"
+    # In both cases the merchant_id is kept as the cluster discriminant;
+    # NSPK category code + payer card last4 are dropped.
+    text = SBP_EXPLICIT_RX.sub(r"\1 <SBP_PAYMENT>", text)
+    text = SBP_QR_SUFFIX_RX.sub(r"\1 <SBP_PAYMENT>", text)
     text = CARD_FULL_RX.sub("<CARD>", text)
     text = CARD_MASKED_RX.sub("<CARD>", text)
     text = IBAN_RX.sub("<IBAN>", text)

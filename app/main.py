@@ -12,6 +12,7 @@ from app.models.installment_purchase import InstallmentPurchase  # noqa: F401 â€
 from app.api.v1.accounts import router as accounts_router
 from app.api.v1.bank_support import router as bank_support_router
 from app.api.v1.banks import router as banks_router
+from app.api.v1.brands import router as brands_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.categories import router as categories_router
 from app.api.v1.budget import router as budget_router
@@ -88,6 +89,7 @@ app.include_router(health_router, prefix=settings.API_V1_PREFIX)
 app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
 app.include_router(accounts_router, prefix=settings.API_V1_PREFIX)
 app.include_router(banks_router, prefix=settings.API_V1_PREFIX)
+app.include_router(brands_router, prefix=settings.API_V1_PREFIX)
 app.include_router(bank_support_router, prefix=settings.API_V1_PREFIX)
 app.include_router(categories_router, prefix=settings.API_V1_PREFIX)
 app.include_router(counterparties_router, prefix=settings.API_V1_PREFIX)

@@ -41,7 +41,16 @@ import {
   investmentDirFor,
   investmentDirToOperationType,
 } from './option-sets';
-import { attachRowToCounterparty, excludeImportRow, parkImportRow, updateImportRow } from '@/lib/api/imports';
+import {
+  attachRowToCounterparty,
+  confirmRowBrand,
+  excludeImportRow,
+  parkImportRow,
+  rejectRowBrand,
+  updateImportRow,
+} from '@/lib/api/imports';
+import { BrandPrompt } from './brand-prompt';
+import { BrandCategoryEdit } from './brand-category-edit';
 import { OrphanTransferHint } from './orphan-transfer-hint';
 import type { Account } from '@/types/account';
 import type { ImportPreviewRow, ImportRowUpdatePayload } from '@/types/import';
@@ -121,7 +130,15 @@ export function TxRow({
   const amount = (nd.amount as string | number | null) ?? row.raw_data?.amount ?? null;
   const isIncome = direction === 'income';
   const date = (nd.date as string) || (row.raw_data?.date as string) || '';
-  const description = (nd.description as string) || (row.raw_data?.description as string) || '';
+  const rawDescription = (nd.description as string) || (row.raw_data?.description as string) || '';
+  // Brand registry Ph7c: once user confirmed a brand for this row, show the
+  // canonical brand name as the primary label and tuck the original bank
+  // text underneath as a small subtitle. Pre-confirmation we keep showing
+  // the bank's text so the user can read what they're confirming.
+  const confirmedBrandName = nd.user_confirmed_brand_id != null
+    ? (nd.brand_canonical_name as string | undefined)
+    : undefined;
+  const description = confirmedBrandName || rawDescription;
   const cardLast4 =
     (nd.card_last4 as string) ||
     (row.raw_data?.card as string) ||
@@ -180,6 +197,33 @@ export function TxRow({
       queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
     },
     onError: (e: Error) => toast.error(e.message || 'Не удалось исключить'),
+  });
+
+  // Brand registry Ph7a/Ph8: confirm/reject the resolver's prediction.
+  // Confirm propagates same-brand siblings server-side; reject is row-local.
+  // Ph8: when categoryId is passed, the backend saves a per-user override
+  // for this brand so future imports auto-apply the chosen category.
+  const brandConfirmMut = useMutation({
+    mutationFn: (vars: { brandId: number; categoryId: number | null }) =>
+      confirmRowBrand(row.id, vars.brandId, vars.categoryId),
+    onSuccess: (resp) => {
+      if (resp.propagated_count > 0) {
+        toast.success(`Привязано к «${resp.brand_canonical_name}» (+${resp.propagated_count} строк)`);
+      } else {
+        toast.success(`Привязано к «${resp.brand_canonical_name}»`);
+      }
+      queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось подтвердить бренд'),
+  });
+  const brandRejectMut = useMutation({
+    mutationFn: () => rejectRowBrand(row.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось отклонить бренд'),
   });
 
   const handleConfirm = () => {
@@ -256,6 +300,21 @@ export function TxRow({
                 <span className="font-normal text-ink-3"> · карта {cardLast4}</span>
               ) : null}
             </div>
+            {confirmedBrandName && rawDescription && rawDescription !== confirmedBrandName ? (
+              <div className="mt-0.5 text-[11px] text-ink-3 break-words">
+                {rawDescription}
+              </div>
+            ) : null}
+            {confirmedBrandName ? (
+              <div className="mt-1.5">
+                <BrandCategoryEdit
+                  brandId={Number(nd.user_confirmed_brand_id)}
+                  brandName={confirmedBrandName}
+                  currentCategoryId={(nd.category_id as number | null) ?? null}
+                  categories={filteredCategoryOptions}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -288,6 +347,36 @@ export function TxRow({
         </Banner>
       ) : null}
       {aiQuestion ? <Banner tone="amber">{aiQuestion}</Banner> : null}
+
+      {/* Brand registry Ph7a: inline «Это <brand>?» prompt.
+          Visible when the resolver matched a brand above the prompt
+          threshold AND the user has not yet confirmed/rejected it AND the
+          row's operation is brand-bearing (regular/refund — transfers,
+          debt, credit ops carry no merchant brand by design). Confirm
+          propagates to same-brand siblings server-side; reject is local. */}
+      {nd.brand_id != null
+        && nd.user_confirmed_brand_id == null
+        && nd.user_rejected_brand_id == null
+        && (type === 'regular' || type === 'refund') ? (
+        <BrandPrompt
+          data={{
+            brand_id: Number(nd.brand_id),
+            brand_canonical_name: String(nd.brand_canonical_name ?? ''),
+            brand_category_hint: nd.brand_category_hint
+              ? String(nd.brand_category_hint)
+              : null,
+          }}
+          // Brand prompts only fire on regular/refund rows. For refund the
+          // resolved category from purchase history is expense-kind too,
+          // so always show expense categories.
+          categories={filteredCategoryOptions}
+          isPending={brandConfirmMut.isPending || brandRejectMut.isPending}
+          onConfirm={(brandId, categoryId) =>
+            brandConfirmMut.mutate({ brandId, categoryId })
+          }
+          onReject={() => brandRejectMut.mutate()}
+        />
+      ) : null}
 
       {/* Spec §5.2 v1.20: orphan-transfer history hint. Visible only when
           history says this fingerprint has been a transfer ≥3 times with ≥80%

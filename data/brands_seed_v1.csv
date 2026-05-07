@@ -1,0 +1,26 @@
+slug,canonical_name,category_hint,patterns
+pyaterochka,Пятёрочка,Продукты,text:pyaterochka|text:пятерочка|text:пятёрочка|text:pyatyorochka
+magnit,Магнит,Продукты,text:magnit|text:магнит
+perekrestok,Перекрёсток,Продукты,text:perekrestok|text:перекресток|text:перекрёсток
+lenta,Лента,Продукты,text:lenta|text:лента
+vkusvill,ВкусВилл,Продукты,text:vkusvill|text:вкусвилл|text:vkusville
+dixy,Дикси,Продукты,text:dixy|text:дикси
+auchan,Ашан,Продукты,text:auchan|text:ашан
+vkusno_i_tochka,Вкусно и точка,Кафе и рестораны,text:vkusno_i_tochka|text:vkusno|text:вкусно и точка|text:вкусноиточка|sbp_merchant_id:26033|re:\bqsr\s+26033\b
+ozon,Ozon,Маркетплейсы,text:ozon|text:озон
+wildberries,Wildberries,Маркетплейсы,text:wildberries|text:вайлдберриз|text:вайлдберис
+yandex_taxi,Яндекс Такси,Транспорт,"re:yandex.{0,30}taxi|re:yandex.{0,30}go\b|re:яндекс.{0,30}такси|text:yandex.taxi|text:yandex taxi|text:яндекс такси|text:yandextaxi"
+yandex_eda,Яндекс Еда,Кафе и рестораны,"re:yandex.{0,30}eats|re:yandex.{0,30}eda\b|re:яндекс.{0,30}еда|text:yandex.eda|text:yandex eda|text:яндекс еда|text:yandexeda"
+samokat,Самокат,Продукты,text:samokat|text:самокат
+kuper,Купер,Продукты,text:kuper|text:купер|text:sbermarket|text:сбермаркет
+kfc,KFC,Кафе и рестораны,text:kfc|text:rostiks|text:ростикс
+dodo_pizza,Додо Пицца,Кафе и рестораны,text:dodopizza|text:dodo pizza|text:dodo-pizza|text:dodo_pizza|text:додопицца|text:додо пицца
+lamoda,Lamoda,Маркетплейсы,text:lamoda|text:ламода
+krasnoe_beloe,Красное и Белое,Продукты,text:krasnoe|text:krasnoebeloe|text:krasnoe beloe|text:krasnoe&beloe|text:красное|text:красное и белое|text:красное беле
+megafon,МегаФон,Связь,text:megafon|text:мегафон|text:m.bank.megafon|text:mbank.megafon
+mts,МТС,Связь,text:mts.ru|text:мтс|text:оплата мтс|text:m.t.s
+beeline,Билайн,Связь,text:beeline|text:билайн|text:bee line
+tele2,Tele2,Связь,text:tele2|text:теле2|text:tele 2
+yandex_plus,Яндекс Плюс,Подписки,"re:yandex.{0,30}plus|re:яндекс.{0,30}плюс|text:yandex plus|text:yandex.plus"
+yandex_music,Яндекс Музыка,Подписки,"re:yandex.{0,30}music|re:яндекс.{0,30}музыка|text:yandex music|text:yandex.music"
+yandex_market,Яндекс Маркет,Маркетплейсы,"re:yandex.{0,30}market|re:яндекс.{0,30}маркет|text:yandex.market"

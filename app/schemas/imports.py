@@ -492,3 +492,46 @@ class AttachRowToClusterResponse(BaseModel):
     binding_created: bool = False
     source_fingerprint: str | None
     summary: ImportPreviewSummary
+
+
+# ── Brand confirm/reject (Brand registry Ph6) ──────────────────────────
+
+
+class BrandConfirmRequest(BaseModel):
+    brand_id: int = Field(ge=1)
+    # Optional: when set, used as the category for this brand globally for
+    # the user. Default behaviour (no field) → resolver looks up by hint.
+    category_id: int | None = Field(default=None, ge=1)
+
+
+class BrandConfirmResponse(BaseModel):
+    row_id: int
+    brand_id: int
+    brand_slug: str
+    brand_canonical_name: str
+    counterparty_id: int | None = None
+    counterparty_name: str | None = None
+    category_id: int | None = None
+    category_name: str | None = None
+    propagated_count: int
+    was_override: bool
+
+
+class BrandRejectResponse(BaseModel):
+    row_id: int
+    rejected_brand_id: int
+
+
+class ApplyBrandCategoryRequest(BaseModel):
+    """Set per-user category override for a brand and bulk-apply to
+    active rows. Standalone endpoint (post-confirmation editing flow)."""
+    category_id: int = Field(ge=1)
+
+
+class ApplyBrandCategoryResponse(BaseModel):
+    brand_id: int
+    brand_canonical_name: str
+    category_id: int
+    category_name: str
+    rows_updated: int
+    override_id: int

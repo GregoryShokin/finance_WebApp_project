@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
+from app.services.brand_resolver_service import BrandMatch
 from app.services.import_normalizer_v2 import ExtractedTokens
 
 
@@ -61,6 +62,10 @@ class DerivedRow:
     refund_brand: str | None               # merchant inferred from refund skeleton
     requires_credit_split_hint: bool       # from raw_type or description keyword
     normalizer_version: int                # = 2
+    # Brand registry hit (Ph3): None when the resolver found nothing above
+    # the prompt threshold OR when the resolver wasn't supplied (legacy
+    # callers / unit tests). Populated by BrandResolverService.resolve.
+    brand_match: BrandMatch | None = None
 
 
 @dataclass

@@ -1655,6 +1655,9 @@ class ImportService:
         # Per-row Phase 1-4 logic lives in PreviewRowProcessor (extracted
         # 2026-04-29 as §1 backlog step 8). The processor is stateless and
         # reusable across rows — instantiated once outside the loop.
+        # Brand resolver caches active patterns once per call, then matches
+        # ~one row per substring sweep — see brand_resolver_service.
+        from app.services.brand_resolver_service import BrandResolverService
         from app.services.preview_row_processor import PreviewRowProcessor
         row_processor = PreviewRowProcessor(
             self.db,
@@ -1662,6 +1665,7 @@ class ImportService:
             enrichment=self.enrichment,
             find_duplicate_fn=self._find_duplicate,
             alias_service=self._alias_service,
+            brand_resolver=BrandResolverService(self.db),
         )
         bank_for_normalize = bank_code or str(getattr(session, "source_type", None) or "unknown")
 

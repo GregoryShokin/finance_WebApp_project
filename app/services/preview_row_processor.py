@@ -80,12 +80,14 @@ class PreviewRowProcessor:
         enrichment: TransactionEnrichmentService,
         find_duplicate_fn: Callable[..., bool],
         alias_service: Any,
+        brand_resolver: Any | None = None,
     ) -> None:
         self.db = db
         self.category_rule_repo = category_rule_repo
         self.enrichment = enrichment
         self._find_duplicate = find_duplicate_fn
         self._alias_service = alias_service
+        self._brand_resolver = brand_resolver
 
     def process(
         self,
@@ -116,6 +118,7 @@ class PreviewRowProcessor:
                 bank=bank_for_normalize,
                 account_id=session_account_id,
                 alias_service=self._alias_service,
+                brand_resolver=self._brand_resolver,
                 user_id=user_id,
                 row_index=row_index,
             )
@@ -140,6 +143,7 @@ class PreviewRowProcessor:
                 fingerprint=derived.fingerprint,
                 is_refund=derived.is_refund_like,
                 refund_brand=derived.refund_brand,
+                brand_match=derived.brand_match,
             )
             normalized = v2_model.merge_into(normalized)
             if bank_code:

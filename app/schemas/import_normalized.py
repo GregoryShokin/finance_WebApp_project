@@ -19,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.services.brand_resolver_service import BrandMatch
 from app.services.import_normalizer_v2 import ExtractedTokens
 
 
@@ -36,6 +37,8 @@ class TokensV2(BaseModel):
     card: str | None = None
     person_name_present: bool = False
     counterparty_org: str | None = None
+    sbp_merchant_id: str | None = None
+    card_last4: str | None = None
     amounts_extra: list[str] = Field(default_factory=list)
     dates_extra: list[str] = Field(default_factory=list)
 
@@ -56,6 +59,19 @@ class NormalizedDataV2(BaseModel):
     is_refund: bool = False
     refund_brand: str | None = None
 
+    # Brand registry resolution (Ph3-Ph4). All None when the resolver didn't
+    # produce a match above the prompt threshold OR wasn't run (legacy rows
+    # imported before Ph4). The frontend reads these to render the inline
+    # «Это <brand_canonical_name>?» prompt; gating logic (which op_types
+    # show the prompt) lives in the UI, not here.
+    brand_id: int | None = None
+    brand_slug: str | None = None
+    brand_canonical_name: str | None = None
+    brand_category_hint: str | None = None
+    brand_pattern_id: int | None = None
+    brand_kind: str | None = None
+    brand_confidence: float | None = None
+
     # ------------------------------------------------------------------
     # Constructors
     # ------------------------------------------------------------------
@@ -69,6 +85,7 @@ class NormalizedDataV2(BaseModel):
         fingerprint: str,
         is_refund: bool = False,
         refund_brand: str | None = None,
+        brand_match: BrandMatch | None = None,
     ) -> "NormalizedDataV2":
         """Build the v2 payload from a normalizer run."""
         return cls(
@@ -81,11 +98,20 @@ class NormalizedDataV2(BaseModel):
                 card=tokens.card,
                 person_name_present=tokens.person_name is not None,
                 counterparty_org=tokens.counterparty_org,
+                sbp_merchant_id=tokens.sbp_merchant_id,
+                card_last4=tokens.card_last4,
                 amounts_extra=[_decimal_str(a) for a in tokens.amounts],
                 dates_extra=[d.isoformat() for d in tokens.dates],
             ),
             is_refund=is_refund,
             refund_brand=refund_brand,
+            brand_id=brand_match.brand_id if brand_match else None,
+            brand_slug=brand_match.brand_slug if brand_match else None,
+            brand_canonical_name=brand_match.canonical_name if brand_match else None,
+            brand_category_hint=brand_match.category_hint if brand_match else None,
+            brand_pattern_id=brand_match.pattern_id if brand_match else None,
+            brand_kind=brand_match.kind if brand_match else None,
+            brand_confidence=brand_match.confidence if brand_match else None,
         )
 
     @classmethod
@@ -118,6 +144,13 @@ class NormalizedDataV2(BaseModel):
         out["normalizer_version"] = self.normalizer_version
         out["is_refund"] = self.is_refund
         out["refund_brand"] = self.refund_brand
+        out["brand_id"] = self.brand_id
+        out["brand_slug"] = self.brand_slug
+        out["brand_canonical_name"] = self.brand_canonical_name
+        out["brand_category_hint"] = self.brand_category_hint
+        out["brand_pattern_id"] = self.brand_pattern_id
+        out["brand_kind"] = self.brand_kind
+        out["brand_confidence"] = self.brand_confidence
         return out
 
 

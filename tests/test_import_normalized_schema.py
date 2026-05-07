@@ -30,6 +30,8 @@ def test_from_tokens_populates_all_fields() -> None:
         card="**** 1234",
         person_name="Иванов И.И.",
         counterparty_org='ООО "Рога и копыта"',
+        sbp_merchant_id="26033",
+        card_last4="0387",
         amounts=(Decimal("1234.56"), Decimal("50.00")),
         dates=(date(2026, 3, 15),),
     )
@@ -48,6 +50,8 @@ def test_from_tokens_populates_all_fields() -> None:
     assert norm.tokens.card == "**** 1234"
     assert norm.tokens.person_name_present is True
     assert norm.tokens.counterparty_org == 'ООО "Рога и копыта"'
+    assert norm.tokens.sbp_merchant_id == "26033"
+    assert norm.tokens.card_last4 == "0387"
     assert norm.tokens.amounts_extra == ["1234.56", "50.00"]
     assert norm.tokens.dates_extra == ["2026-03-15"]
 
@@ -68,6 +72,86 @@ def test_from_tokens_empty_produces_empty_collections() -> None:
     assert norm.tokens.dates_extra == []
     assert norm.tokens.phone is None
     assert norm.tokens.person_name_present is False
+    assert norm.tokens.sbp_merchant_id is None
+    assert norm.tokens.card_last4 is None
+
+
+def test_merge_into_carries_sbp_tokens_to_normalized_data() -> None:
+    tokens = ExtractedTokens(sbp_merchant_id="26033", card_last4="0387")
+    norm = NormalizedDataV2.from_tokens(
+        tokens=tokens, skeleton="s", fingerprint="f" * 16,
+    )
+    merged = norm.merge_into({"existing_key": "preserved"})
+    assert merged["existing_key"] == "preserved"
+    assert merged["tokens"]["sbp_merchant_id"] == "26033"
+    assert merged["tokens"]["card_last4"] == "0387"
+
+
+# ---------------------------------------------------------------------------
+# Brand registry pass-through (Ph4)
+# ---------------------------------------------------------------------------
+
+
+def test_from_tokens_with_brand_match_populates_all_brand_fields() -> None:
+    from app.services.brand_resolver_service import BrandMatch
+
+    bm = BrandMatch(
+        brand_id=42,
+        brand_slug="pyaterochka",
+        canonical_name="Пятёрочка",
+        category_hint="Продукты",
+        pattern_id=7,
+        kind="text",
+        confidence=0.96,
+    )
+    norm = NormalizedDataV2.from_tokens(
+        tokens=ExtractedTokens(),
+        skeleton="s",
+        fingerprint="f" * 16,
+        brand_match=bm,
+    )
+    assert norm.brand_id == 42
+    assert norm.brand_slug == "pyaterochka"
+    assert norm.brand_canonical_name == "Пятёрочка"
+    assert norm.brand_category_hint == "Продукты"
+    assert norm.brand_pattern_id == 7
+    assert norm.brand_kind == "text"
+    assert norm.brand_confidence == 0.96
+
+
+def test_from_tokens_without_brand_match_leaves_brand_fields_none() -> None:
+    norm = NormalizedDataV2.from_tokens(
+        tokens=ExtractedTokens(), skeleton="s", fingerprint="f" * 16,
+    )
+    assert norm.brand_id is None
+    assert norm.brand_slug is None
+    assert norm.brand_canonical_name is None
+    assert norm.brand_category_hint is None
+    assert norm.brand_pattern_id is None
+    assert norm.brand_kind is None
+    assert norm.brand_confidence is None
+
+
+def test_merge_into_writes_brand_fields_into_normalized_data() -> None:
+    from app.services.brand_resolver_service import BrandMatch
+
+    bm = BrandMatch(
+        brand_id=1, brand_slug="ozon", canonical_name="Ozon",
+        category_hint="Маркетплейсы", pattern_id=99, kind="text",
+        confidence=0.78,
+    )
+    norm = NormalizedDataV2.from_tokens(
+        tokens=ExtractedTokens(), skeleton="s", fingerprint="f" * 16,
+        brand_match=bm,
+    )
+    merged = norm.merge_into({})
+    assert merged["brand_id"] == 1
+    assert merged["brand_slug"] == "ozon"
+    assert merged["brand_canonical_name"] == "Ozon"
+    assert merged["brand_category_hint"] == "Маркетплейсы"
+    assert merged["brand_pattern_id"] == 99
+    assert merged["brand_kind"] == "text"
+    assert merged["brand_confidence"] == 0.78
 
 
 # ---------------------------------------------------------------------------

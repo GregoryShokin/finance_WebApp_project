@@ -148,6 +148,60 @@ def test_invalid_date_is_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
+# SBP merchant ID + payer card last4 (Brand registry §3, kind='sbp_merchant_id')
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,merchant,last4", [
+    # Format A: explicit SBP — "MERCHANT_ID NSPK SBP CARD_LAST4"
+    ("Покупка 26033 MOR SBP 0387 Volgodonsk", "26033", "0387"),
+    ("Оплата 12345 MOP SBP 1232 Москва", "12345", "1232"),
+    ("Платёж 999999 ABCDE SBP 9999", "999999", "9999"),
+])
+def test_extract_sbp_explicit_format(raw: str, merchant: str, last4: str) -> None:
+    tokens = extract_tokens(raw)
+    assert tokens.sbp_merchant_id == merchant
+    assert tokens.card_last4 == last4
+
+
+@pytest.mark.parametrize("raw,merchant,last4", [
+    # Format B: card-via-QR — "NSPK MERCHANT_ID_P_QR CARD_LAST4"
+    ("Оплата в QSR 26033_P_QR 1232", "26033", "1232"),
+    ("Списание MOR 12345_P_QR 0387", "12345", "0387"),
+])
+def test_extract_sbp_qr_suffix_format(raw: str, merchant: str, last4: str) -> None:
+    tokens = extract_tokens(raw)
+    assert tokens.sbp_merchant_id == merchant
+    assert tokens.card_last4 == last4
+
+
+def test_no_sbp_when_pattern_absent() -> None:
+    # Plain "TEXT NUMBER City RUS" form — number can be store-id or merchant-id
+    # depending on the chain (Pyaterochka uses store-ids, QSR uses merchant-id)
+    # so we deliberately don't extract from it.
+    tokens = extract_tokens("Покупка PYATEROCHKA 14130 Volgodonsk RUS")
+    assert tokens.sbp_merchant_id is None
+    assert tokens.card_last4 is None
+
+
+def test_sbp_skeleton_keeps_merchant_id_after_regex_change() -> None:
+    raw = "Покупка 26033 MOR SBP 0387 Volgodonsk 250,00 руб"
+    skel = normalize_skeleton(raw, extract_tokens(raw))
+    assert "26033" in skel
+    assert "<SBP_PAYMENT>" in skel.upper()
+    assert "0387" not in skel
+
+
+def test_sbp_qr_skeleton_keeps_merchant_id() -> None:
+    raw = "Оплата в QSR 26033_P_QR 1232"
+    skel = normalize_skeleton(raw, extract_tokens(raw))
+    assert "26033" in skel
+    assert "<SBP_PAYMENT>" in skel.upper()
+    assert "1232" not in skel
+    assert "_p_qr" not in skel
+
+
+# ---------------------------------------------------------------------------
 # Skeleton
 # ---------------------------------------------------------------------------
 

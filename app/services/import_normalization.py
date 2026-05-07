@@ -100,6 +100,7 @@ def normalize(
     bank: str,
     account_id: int,
     alias_service: FingerprintAliasService | None = None,
+    brand_resolver: object | None = None,  # BrandResolverService — lazy type to avoid cycle
     user_id: int | None = None,
     row_index: int = 0,
 ) -> tuple[ParsedRow, DerivedRow]:
@@ -139,6 +140,7 @@ def normalize(
         bank=bank,
         account_id=account_id,
         alias_service=alias_service,
+        brand_resolver=brand_resolver,
         user_id=user_id,
         row_index=row_index,
     )
@@ -152,6 +154,7 @@ def _derive(
     bank: str,
     account_id: int,
     alias_service: FingerprintAliasService | None = None,
+    brand_resolver: object | None = None,
     user_id: int | None = None,
     row_index: int = 0,
 ) -> DerivedRow:
@@ -192,6 +195,15 @@ def _derive(
 
     requires_credit_split_hint = (parsed.raw_type or "").strip().lower() in _RAW_TYPES_REQUIRING_CREDIT_SPLIT
 
+    brand_match = None
+    if brand_resolver is not None and user_id is not None:
+        try:
+            brand_match = brand_resolver.resolve(
+                skeleton=skeleton, tokens=tokens, user_id=user_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — never block import on resolver
+            logger.warning("brand resolver failed row=%s: %s", row_index, exc)
+
     return DerivedRow(
         skeleton=skeleton,
         fingerprint=fp,
@@ -202,6 +214,7 @@ def _derive(
         refund_brand=refund_brand,
         requires_credit_split_hint=requires_credit_split_hint,
         normalizer_version=2,
+        brand_match=brand_match,
     )
 
 
