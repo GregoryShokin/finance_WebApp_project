@@ -1,4 +1,4 @@
-"""Brand confirm/reject orchestrator (Brand registry Ph6).
+"""Brand confirm/reject orchestrator (Brand registry Ph6, post-Phase C).
 
 Two flows used by the moderator inline-prompt («Это <Brand>?»):
 
@@ -16,12 +16,11 @@ Reject — user says «not this brand» without offering an alternative.
     the resolver doesn't re-suggest the same brand on next read. No
     propagation — rejection is row-local.
 
-Counterparty bindings are NOT touched here. The existing
-`attach_row_to_cluster` flow stays the contract for «I've decided this
-row belongs to counterparty X». Brand confirm is a layer above —
-informs the user's choice (showing the brand badge on the prompt UI),
-but doesn't auto-create CounterpartyFingerprint bindings on its own.
-That behaviour is a Ph7+ enhancement.
+Phase C (step 2): Brand IS the merchant entity now. `_get_brand_for_user`
+returns the Brand; the prompt response carries `brand_id`. Counterparty
+materialisation continues as a dual-write side effect — same DB row gets
+created/updated with the same name so legacy reads keep working until
+step 4 turns dual-write off.
 """
 
 from __future__ import annotations
@@ -43,7 +42,11 @@ from app.repositories.import_repository import ImportRepository
 from app.repositories.user_brand_category_override_repository import (
     UserBrandCategoryOverrideRepository,
 )
+from app.repositories.user_brand_display_name_repository import (
+    UserBrandDisplayNameRepository,
+)
 from app.services.brand_extractor_service import extract_brand
+from app.services.brand_fingerprint_service import BrandFingerprintService
 from app.services.brand_pattern_strength_service import (
     BrandPatternNotFound,
     BrandPatternStrengthService,
@@ -72,9 +75,12 @@ class BrandConfirmService:
         self.import_repo = ImportRepository(db)
         self.cp_repo = CounterpartyRepository(db)
         self.category_repo = CategoryRepository(db)
+        # Dual-write fingerprint bindings until step 4.
         self.cp_fp_service = CounterpartyFingerprintService(db)
+        self.brand_fp_service = BrandFingerprintService(db)
         self.strength = BrandPatternStrengthService(db)
         self.override_repo = UserBrandCategoryOverrideRepository(db)
+        self.display_repo = UserBrandDisplayNameRepository(db)
 
     # ------------------------------------------------------------------
     # Confirm
@@ -127,13 +133,14 @@ class BrandConfirmService:
         except BrandPatternNotFound:
             pass
 
-        # Materialize the brand into a usable Counterparty + Category for
-        # this user. find-or-create by name (case-insensitive equality).
-        # Existing counterparties win over creation so user-edited names
-        # ("Пятёрочка у дома") survive Brand confirms — we only create a
-        # fresh row when no counterparty for that brand yet exists.
-        counterparty = self._find_or_create_counterparty(
-            user_id=user_id, brand=brand,
+        # Phase C: Brand IS the merchant entity. `_get_brand_for_user`
+        # returns the Brand the user sees plus the user's preferred
+        # display label (UserBrandDisplayName, when set). Counterparty
+        # materialisation continues as a dual-write side effect so
+        # legacy reads keep working until step 4.
+        display_name = self._get_brand_for_user(user_id=user_id, brand=brand)
+        counterparty = self._dualwrite_counterparty(
+            user_id=user_id, display_name=display_name,
         )
         # Category resolution: explicit (just-picked) > override > hint.
         if explicit_category is not None:
@@ -159,9 +166,13 @@ class BrandConfirmService:
             nd["brand_slug"] = brand.slug
             nd["brand_canonical_name"] = brand.canonical_name
             nd["brand_category_hint"] = brand.category_hint
-        # Carry the resolved entity ids on the row so commit-time
-        # transaction-builder picks them up the same way as a manual
-        # confirm via `update_row`.
+        else:
+            # Always ensure brand_id is up to date even when display
+            # fields were pre-populated by the resolver — the user might
+            # have switched to a different brand after the first match.
+            nd["brand_id"] = brand.id
+        # Dual-write: keep counterparty_id stamp so legacy reads (commit
+        # builder, refund matcher, etc.) still find the merchant.
         nd["counterparty_id"] = counterparty.id
         if category is not None and not nd.get("category_id"):
             # Only auto-fill category when the user hasn't picked one
@@ -170,11 +181,13 @@ class BrandConfirmService:
         row.normalized_data_json = nd
         self.db.add(row)
 
-        # Bind the row's fingerprint to the counterparty so future imports
-        # of any skeleton resolving to this brand go straight to the right
-        # counterparty without prompting again.
-        self._bind_fingerprint(
-            user_id=user_id, fingerprint=nd.get("fingerprint"),
+        # Bind the row's fingerprint on BOTH sides — brand_fingerprints
+        # (new authoritative store) and counterparty_fingerprints (legacy,
+        # still read by some flows until step 4).
+        self._bind_fingerprint_dualwrite(
+            user_id=user_id,
+            fingerprint=nd.get("fingerprint"),
+            brand_id=brand.id,
             counterparty_id=counterparty.id,
         )
 
@@ -214,6 +227,7 @@ class BrandConfirmService:
             "brand_id": brand.id,
             "brand_slug": brand.slug,
             "brand_canonical_name": brand.canonical_name,
+            "brand_display_name": display_name,
             "counterparty_id": counterparty.id,
             "counterparty_name": counterparty.name,
             "category_id": category.id if category is not None else None,
@@ -397,26 +411,50 @@ class BrandConfirmService:
                     rd["category_id"] = category_id
             r.normalized_data_json = rd
             self.db.add(r)
-            self._bind_fingerprint(
-                user_id=user_id, fingerprint=rd.get("fingerprint"),
+            self._bind_fingerprint_dualwrite(
+                user_id=user_id,
+                fingerprint=rd.get("fingerprint"),
+                brand_id=brand_id,
                 counterparty_id=counterparty_id,
             )
             propagated += 1
         return propagated
 
-    # ── Counterparty / Category materialization ─────────────────────────
+    # ── Brand / Counterparty materialization (Phase C) ─────────────────
 
-    def _find_or_create_counterparty(
+    def _get_brand_for_user(
         self, *, user_id: int, brand: Brand,
-    ) -> Counterparty:
-        """Find existing counterparty by case-insensitive name match, or create.
+    ) -> str:
+        """Resolve the user's preferred display label for this Brand.
 
-        Case-folding is done Python-side because SQLite's SQL `lower()`
-        is ASCII-only — Cyrillic survives unchanged on that engine, which
-        is what powers our test fixtures. Postgres lower() handles
-        Cyrillic correctly, but the Python loop works on both engines.
+        Returns the UserBrandDisplayName override if the user has one
+        for this brand (e.g. they renamed «Пятёрочка» to «Пятёрочка у
+        дома» in the moderator), else the brand's canonical_name.
+
+        Replaces the pre-Phase-C `_find_or_create_counterparty`. Brand
+        is now the merchant entity — we don't materialise a separate
+        Counterparty as the source of truth, only a dual-write shadow
+        for legacy reads (`_dualwrite_counterparty`).
         """
-        target_fold = brand.canonical_name.casefold()
+        override = self.display_repo.get(user_id=user_id, brand_id=brand.id)
+        if override is not None and override.display_name:
+            return override.display_name
+        return brand.canonical_name
+
+    def _dualwrite_counterparty(
+        self, *, user_id: int, display_name: str,
+    ) -> Counterparty:
+        """Find-or-create a Counterparty row matching the user's display
+        label for this brand. Dual-write side effect — keeps legacy
+        readers (commit builder, refund matcher, transaction queries
+        joining `Counterparty`) functional until step 4.
+
+        Lookup is case-fold equality with the user's existing
+        Counterparty rows (same rule the pre-Phase-C confirm used). The
+        SQLAlchemy `Counterparty` table stays writable until step 5
+        drops it.
+        """
+        target_fold = display_name.casefold()
         candidates = (
             self.db.query(Counterparty)
             .filter(Counterparty.user_id == user_id)
@@ -426,7 +464,7 @@ class BrandConfirmService:
             if (c.name or "").casefold() == target_fold:
                 return c
         return self.cp_repo.create(
-            user_id=user_id, name=brand.canonical_name, auto_commit=False,
+            user_id=user_id, name=display_name, auto_commit=False,
         )
 
     def _lookup_category_for_brand(
@@ -526,28 +564,37 @@ class BrandConfirmService:
                 brand.id, candidate, exc_info=True,
             )
 
-    def _bind_fingerprint(
+    def _bind_fingerprint_dualwrite(
         self,
         *,
         user_id: int,
         fingerprint: Any,
+        brand_id: int,
         counterparty_id: int,
     ) -> None:
-        """Best-effort `CounterpartyFingerprint` binding.
+        """Best-effort fingerprint binding on BOTH stores.
 
-        Never raises — the binding is a learning side-effect, not part of
-        the confirmation contract. A row can be confirmed even without a
-        fingerprint (degraded normalizer output); we just skip the bind.
+        `brand_fingerprints` is the new authoritative resolver target.
+        `counterparty_fingerprints` continues to be written until step 4
+        so legacy readers (Phase B import_cluster grouping) keep
+        functioning. Each side is independent — failure on one does not
+        block the other; both are learning side effects, never part of
+        the confirmation contract.
         """
         if not fingerprint:
             return
+        fp_str = str(fingerprint)
+        try:
+            self.brand_fp_service.bind(
+                user_id=user_id, fingerprint=fp_str, brand_id=brand_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.cp_fp_service.bind(
                 user_id=user_id,
-                fingerprint=str(fingerprint),
+                fingerprint=fp_str,
                 counterparty_id=counterparty_id,
             )
         except Exception:  # noqa: BLE001
-            # Non-fatal: confirm flow continues, sibling propagation still
-            # works through normalized_data.counterparty_id.
             pass

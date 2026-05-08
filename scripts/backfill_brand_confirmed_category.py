@@ -76,11 +76,18 @@ def backfill(db: Session) -> dict[str, int]:
         category = svc._lookup_category_by_hint(  # noqa: SLF001 — internal but stable
             user_id=session.user_id, brand=brand,
         )
-        counterparty = svc._find_or_create_counterparty(  # noqa: SLF001
+        # Phase C: brand IS the merchant entity; counterparty creation is
+        # a dual-write side effect for legacy reads. The service helper
+        # picks up the user's display label (UserBrandDisplayName) when set.
+        display_name = svc._get_brand_for_user(  # noqa: SLF001
             user_id=session.user_id, brand=brand,
+        )
+        counterparty = svc._dualwrite_counterparty(  # noqa: SLF001
+            user_id=session.user_id, display_name=display_name,
         )
 
         nd["counterparty_id"] = counterparty.id
+        nd["brand_id"] = brand.id
         if category is not None:
             nd["category_id"] = category.id
             counters["filled_with_category"] += 1
@@ -89,9 +96,10 @@ def backfill(db: Session) -> dict[str, int]:
         row.normalized_data_json = nd
         db.add(row)
 
-        svc._bind_fingerprint(  # noqa: SLF001
+        svc._bind_fingerprint_dualwrite(  # noqa: SLF001
             user_id=session.user_id,
             fingerprint=nd.get("fingerprint"),
+            brand_id=brand.id,
             counterparty_id=counterparty.id,
         )
 

@@ -15,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
@@ -66,6 +66,8 @@ class Brand(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    transactions = relationship("Transaction", back_populates="brand")
 
 
 class BrandPattern(Base):

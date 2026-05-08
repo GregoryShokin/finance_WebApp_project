@@ -16,6 +16,7 @@ from app.repositories.debt_partner_repository import DebtPartnerRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
+from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.rule_strength_service import RuleNotFound, RuleStrengthService
 
 try:
@@ -118,6 +119,7 @@ class TransactionService:
         payload["user_id"] = user_id
         payload = self._prepare_payload(payload)
         self._validate_payload(user_id=user_id, payload=payload)
+        self._attach_brand_id_dualwrite(user_id=user_id, payload=payload)
 
         account = self.account_repo.get_by_id_and_user_for_update(account_id, user_id)
         if not account:
@@ -222,6 +224,7 @@ class TransactionService:
             effective["is_regular"] = self._resolve_is_regular(user_id=user_id, category_id=effective.get("category_id"))
 
         self._validate_payload(user_id=user_id, payload=effective)
+        self._attach_brand_id_dualwrite(user_id=user_id, payload=effective)
 
         new_account = self.account_repo.get_by_id_and_user_for_update(effective["account_id"], user_id)
         if not new_account:
@@ -643,6 +646,28 @@ class TransactionService:
                 description = partner.name
         prepared["normalized_description"] = self.enrichment_service.normalize_for_rule(description)
         return prepared
+
+    def _attach_brand_id_dualwrite(
+        self, *, user_id: int, payload: dict[str, Any],
+    ) -> None:
+        """Stamp `brand_id` whenever a `counterparty_id` is present.
+
+        Phase C dual-write: clients still submit `counterparty_id` for
+        regular and refund operations; we mirror that into `brand_id` so
+        analytics, brand-aware queries and the post-Step-4 schema all
+        stay consistent. No-op for transfers, debt, credit and other ops
+        that reject `counterparty_id` upstream.
+        """
+        cp_id = payload.get("counterparty_id")
+        if cp_id in (None, "", 0):
+            payload["brand_id"] = None
+            return
+        if payload.get("brand_id"):
+            return
+        brand_id = resolve_brand_id_for_counterparty(
+            self.db, user_id=user_id, counterparty_id=int(cp_id),
+        )
+        payload["brand_id"] = brand_id
 
     def _validate_payload(self, *, user_id: int, payload: dict[str, Any]) -> None:
         operation_type = payload.get("operation_type")

@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.models.import_row import ImportRow
 from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
+from app.services.brand_fingerprint_service import BrandFingerprintService
 from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
 from app.services.credit_split_service import CreditSplitService
 from app.services.import_post_processor import ImportPostProcessor
@@ -89,6 +90,8 @@ class CommitOrchestrator:
         self.transaction_service = transaction_service
         self.transfer_linker = transfer_linker
         self._counterparty_fp_service = counterparty_fp_service
+        # Phase C dual-write: refund binding writes to both stores.
+        self._brand_fp_service = BrandFingerprintService(db)
         self._prepare_payloads = prepare_payloads_fn
         self._stats = RuleStatsCommitter(db, category_rule_repo=category_rule_repo)
 
@@ -342,23 +345,42 @@ class CommitOrchestrator:
     def _maybe_bind_refund_counterparty(
         self, *, user_id: int, row: ImportRow, normalized: dict[str, Any],
     ) -> None:
-        """For refund rows whose preview resolved a counterparty via brand
-        history, persist the fingerprint→counterparty binding so the next
-        refund of the same merchant resolves directly without brand search.
+        """For refund rows whose preview resolved an entity via brand
+        history, persist the fingerprint binding so the next refund of
+        the same merchant resolves directly without brand search.
+
+        Phase C dual-write: bind on both `counterparty_fingerprints`
+        (legacy) and `brand_fingerprints` (new authoritative store).
+        Step 4 turns off the counterparty side.
         """
         if str(normalized.get("operation_type") or "") != "refund":
             return
-        cp_id = normalized.get("counterparty_id")
         fp = normalized.get("fingerprint")
-        if cp_id in (None, "", 0) or not fp:
+        if not fp:
             return
-        try:
-            self._counterparty_fp_service.bind(
-                user_id=user_id,
-                fingerprint=str(fp),
-                counterparty_id=int(cp_id),
-            )
-        except Exception as exc:  # noqa: BLE001 — never block commit
-            logger.warning(
-                "refund counterparty binding failed row=%s: %s", row.id, exc,
-            )
+        cp_id = normalized.get("counterparty_id")
+        brand_id = normalized.get("brand_id")
+        if cp_id in (None, "", 0) and brand_id in (None, "", 0):
+            return
+        if cp_id not in (None, "", 0):
+            try:
+                self._counterparty_fp_service.bind(
+                    user_id=user_id,
+                    fingerprint=str(fp),
+                    counterparty_id=int(cp_id),
+                )
+            except Exception as exc:  # noqa: BLE001 — never block commit
+                logger.warning(
+                    "refund counterparty binding failed row=%s: %s", row.id, exc,
+                )
+        if brand_id not in (None, "", 0):
+            try:
+                self._brand_fp_service.bind(
+                    user_id=user_id,
+                    fingerprint=str(fp),
+                    brand_id=int(brand_id),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "refund brand binding failed row=%s: %s", row.id, exc,
+                )

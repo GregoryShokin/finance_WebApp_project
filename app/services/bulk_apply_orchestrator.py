@@ -31,6 +31,9 @@ from sqlalchemy.orm import Session
 from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
 from app.schemas.imports import ImportRowUpdateRequest
+from app.services.brand_fingerprint_service import BrandFingerprintService
+from app.services.brand_identifier_service import BrandIdentifierService
+from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
 from app.services.counterparty_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
@@ -57,6 +60,9 @@ class BulkApplyOrchestrator:
         self.category_rule_repo = category_rule_repo
         self._counterparty_fp_service = counterparty_fp_service
         self._counterparty_id_service = counterparty_id_service
+        # Phase C dual-write: every CP binding mirrored to brand_*-tables.
+        self._brand_fp_service = BrandFingerprintService(db)
+        self._brand_id_service = BrandIdentifierService(db)
         # Pass-throughs so the orchestrator stays thin: update_row encodes the
         # full single-row contract; recalculate_summary already lives in
         # ImportService and looks up the session.
@@ -215,19 +221,47 @@ class BulkApplyOrchestrator:
             rules_affected += 1
 
         # Persist counterparty bindings (accumulates across bulk-apply calls).
+        # Phase C dual-write: each CP binding is mirrored to the brand_*
+        # tables via the deterministic CP→Brand resolver, so the brand
+        # store stays current with every cluster apply.
         counterparty_bindings_count = 0
+        cp_to_brand_cache: dict[int, int | None] = {}
+
+        def _brand_for(cp_id: int) -> int | None:
+            if cp_id in cp_to_brand_cache:
+                return cp_to_brand_cache[cp_id]
+            bid = resolve_brand_id_for_counterparty(
+                self.db, user_id=user_id, counterparty_id=cp_id,
+            )
+            cp_to_brand_cache[cp_id] = bid
+            return bid
+
         for cp_id, fps in counterparty_bindings_by_cp.items():
             counterparty_bindings_count += self._counterparty_fp_service.bind_many(
                 user_id=user_id,
                 fingerprints=list(fps),
                 counterparty_id=cp_id,
             )
+            brand_id = _brand_for(cp_id)
+            if brand_id is not None:
+                self._brand_fp_service.bind_many(
+                    user_id=user_id,
+                    fingerprints=list(fps),
+                    brand_id=brand_id,
+                )
         for cp_id, pairs in identifier_bindings_by_cp.items():
             self._counterparty_id_service.bind_many(
                 user_id=user_id,
                 pairs=list(pairs),
                 counterparty_id=cp_id,
             )
+            brand_id = _brand_for(cp_id)
+            if brand_id is not None:
+                self._brand_id_service.bind_many(
+                    user_id=user_id,
+                    pairs=list(pairs),
+                    brand_id=brand_id,
+                )
 
         self.db.commit()
 

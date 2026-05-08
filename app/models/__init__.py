@@ -15,6 +15,9 @@ from app.models.bank import Bank
 from app.models.bank_support_request import BankSupportRequest
 from app.models.base import Base
 from app.models.brand import Brand, BrandPattern
+from app.models.brand_fingerprint import BrandFingerprint
+from app.models.brand_identifier import BrandIdentifier
+from app.models.user_brand_display_name import UserBrandDisplayName
 from app.models.global_pattern import GlobalPattern, GlobalPatternVote
 from app.models.budget import Budget
 from app.models.budget_alert import BudgetAlert
@@ -42,6 +45,8 @@ __all__ = [
     "BankSupportRequest",
     "Base",
     "Brand",
+    "BrandFingerprint",
+    "BrandIdentifier",
     "BrandPattern",
     "GlobalPattern",
     "GlobalPatternVote",
@@ -64,4 +69,5 @@ __all__ = [
     "TransactionCategoryRule",
     "User",
     "UserBrandCategoryOverride",
+    "UserBrandDisplayName",
 ]

@@ -24,6 +24,9 @@ from app.schemas.imports import (
     ImportPreviewSummary,
     ImportRowUpdateRequest,
 )
+from app.services.brand_fingerprint_service import BrandFingerprintService
+from app.services.brand_identifier_service import BrandIdentifierService
+from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
 from app.services.counterparty_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
@@ -136,6 +139,9 @@ class ImportService:
         self._alias_service = FingerprintAliasService(db)
         self._counterparty_fp_service = CounterpartyFingerprintService(db)
         self._counterparty_id_service = CounterpartyIdentifierService(db)
+        # Phase C dual-write: brand-side fingerprint/identifier mirror.
+        self._brand_fp_service = BrandFingerprintService(db)
+        self._brand_id_service = BrandIdentifierService(db)
 
     def upload_source(
         self,
@@ -768,6 +774,24 @@ class ImportService:
             binding_created = before is None
         except ValueError as exc:
             raise ImportValidationError(str(exc)) from exc
+
+        # Phase C dual-write: mirror the binding into brand_fingerprints so
+        # the new resolver picks up this attachment without depending on the
+        # legacy table that step 5 will drop.
+        try:
+            brand_id = resolve_brand_id_for_counterparty(
+                self.db, user_id=user_id, counterparty_id=counterparty_id,
+            )
+            if brand_id is not None:
+                self._brand_fp_service.bind(
+                    user_id=user_id, fingerprint=source_fp, brand_id=brand_id,
+                )
+        except Exception:  # noqa: BLE001 — never block attach on brand mirror
+            logger.warning(
+                "brand_fingerprint mirror failed user=%s row=%s cp=%s",
+                user_id, row_id, counterparty_id,
+                exc_info=True,
+            )
 
         normalized["attached_to_counterparty_id"] = counterparty_id
         normalized["attached_to_counterparty_name"] = cp.name
@@ -2359,6 +2383,10 @@ class ImportService:
             "credit_principal_amount": normalized.get("credit_principal_amount"),
             "credit_interest_amount": normalized.get("credit_interest_amount"),
             "counterparty_id": normalized.get("counterparty_id"),
+            # Phase C dual-write: prefer the resolver/confirm-stamped
+            # brand_id when present. transaction_service derives it from
+            # counterparty_id when absent so commit can't drop the link.
+            "brand_id": normalized.get("brand_id"),
             "debt_partner_id": normalized.get("debt_partner_id"),
             "debt_direction": normalized.get("debt_direction"),
             "needs_review": bool(
@@ -2397,6 +2425,11 @@ class ImportService:
         else:
             base_payload["counterparty_id"] = None
 
+        if base_payload.get("brand_id") not in (None, "", 0):
+            base_payload["brand_id"] = int(base_payload["brand_id"])
+        else:
+            base_payload["brand_id"] = None
+
         if base_payload.get("debt_partner_id") not in (None, "", 0):
             base_payload["debt_partner_id"] = int(base_payload["debt_partner_id"])
         else:
@@ -2404,9 +2437,11 @@ class ImportService:
 
         # §12.2 invariant: debt and counterparty are disjoint. Drop the wrong
         # field at payload assembly so the validator never sees both populated
-        # from a stale normalized_data carrying both fields.
+        # from a stale normalized_data carrying both fields. brand_id rides
+        # along with counterparty_id (debt rows have neither merchant).
         if str(operation_type) == "debt":
             base_payload["counterparty_id"] = None
+            base_payload["brand_id"] = None
         else:
             base_payload["debt_partner_id"] = None
 
@@ -2427,6 +2462,7 @@ class ImportService:
                 part_target_account_id = item.get("target_account_id")
                 part_debt_direction = item.get("debt_direction")
                 part_counterparty_id = item.get("counterparty_id")
+                part_brand_id = item.get("brand_id")
                 part_debt_partner_id = item.get("debt_partner_id")
 
                 if part_op in ("regular", "refund") and part_category_id in (None, "", 0):
@@ -2451,8 +2487,10 @@ class ImportService:
                 # debt parts route to a DebtPartner (the debtor / creditor),
                 # non-debt parts keep Counterparty (the merchant / service).
                 # Drop the wrong field to avoid validator rejection downstream.
+                # brand_id rides with counterparty_id for non-debt parts.
                 if part_op == "debt":
                     part_counterparty_id = None
+                    part_brand_id = None
                 else:
                     part_debt_partner_id = None
 
@@ -2466,6 +2504,7 @@ class ImportService:
                     "target_account_id": int(part_target_account_id) if part_target_account_id not in (None, "", 0) else None,
                     "debt_direction": str(part_debt_direction).lower() if part_debt_direction else None,
                     "counterparty_id": int(part_counterparty_id) if part_counterparty_id not in (None, "", 0) else None,
+                    "brand_id": int(part_brand_id) if part_brand_id not in (None, "", 0) else None,
                     "debt_partner_id": int(part_debt_partner_id) if part_debt_partner_id not in (None, "", 0) else None,
                     # Credit/investment slice fields — not relevant for individual
                     # parts; they always come from the original row, not split.
