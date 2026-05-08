@@ -32,7 +32,6 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models.brand import Brand
-from app.models.counterparty import Counterparty
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
 from app.models.transaction import Transaction
@@ -210,14 +209,8 @@ class Cluster:
     # purchases at that merchant, acting as an expense compensator.
     is_refund: bool = False
     refund_brand: str | None = None
-    # Phase C step 4: refund-history JOIN now keys on Brand. The legacy
-    # `refund_resolved_counterparty_*` fields stay on the dataclass for
-    # one release cycle so out-of-tree consumers don't 5xx — they're
-    # always None now and `refund_resolved_brand_*` is the source of truth.
     refund_resolved_brand_id: int | None = None
     refund_resolved_brand_name: str | None = None
-    refund_resolved_counterparty_id: int | None = None
-    refund_resolved_counterparty_name: str | None = None
 
     @property
     def trust_zone(self) -> str:
@@ -274,9 +267,6 @@ class Cluster:
             "refund_brand": self.refund_brand,
             "refund_resolved_brand_id": self.refund_resolved_brand_id,
             "refund_resolved_brand_name": self.refund_resolved_brand_name,
-            # Legacy mirror — always None post-step-4. Kept until step 5.
-            "refund_resolved_counterparty_id": self.refund_resolved_counterparty_id,
-            "refund_resolved_counterparty_name": self.refund_resolved_counterparty_name,
         }
 
 
@@ -307,51 +297,6 @@ class BrandGroup:
         return {
             "brand_id": self.brand_id,
             "brand_name": self.brand_name,
-            "direction": self.direction,
-            "count": self.count,
-            "total_amount": str(self.total_amount),
-            "fingerprint_cluster_ids": list(self.fingerprint_cluster_ids),
-            "is_mixed_direction": self.is_mixed_direction,
-        }
-
-
-@dataclass(frozen=True)
-class CounterpartyGroup:
-    """Phase 3 — counterparty-centric grouping over fingerprint clusters.
-
-    Emitted when two or more fingerprint clusters are bound to the same
-    counterparty via `CounterpartyFingerprint`. The UI renders one card per
-    counterparty, collapsing all member fingerprints so the user sees
-    "Вкусная точка" once instead of three sub-clusters (different
-    skeletons: "vkusnaya_tochka", "vkusnoitochka", "Вкусная Точка").
-
-    Single-member groups are also emitted so the UI can replace the
-    fingerprint card with a counterparty card (clearer label, history). A
-    counterparty binding is always authoritative — it overrides brand
-    grouping.
-
-    Direction policy. Fingerprint clusters split by direction (one
-    skeleton + income vs same skeleton + expense are different patterns).
-    Counterparty groups do NOT — one counterparty card collects every
-    binding regardless of direction. Sample case: «Отец» as both a sender
-    (income) and a recipient (expense) of personal transfers — same
-    person, one card. `direction` carries the dominant side by row count
-    (used by the UI for badge rendering), `is_mixed_direction=True`
-    signals the card holds both income and expense members.
-    """
-
-    counterparty_id: int
-    counterparty_name: str
-    direction: str
-    count: int
-    total_amount: Decimal
-    fingerprint_cluster_ids: tuple[str, ...]
-    is_mixed_direction: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "counterparty_id": self.counterparty_id,
-            "counterparty_name": self.counterparty_name,
             "direction": self.direction,
             "count": self.count,
             "total_amount": str(self.total_amount),

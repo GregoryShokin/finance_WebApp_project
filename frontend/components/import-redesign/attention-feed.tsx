@@ -15,7 +15,7 @@ import { EditTxRazvorot } from './edit-tx-razvorot';
 import { SplitModal } from './split-modal';
 import { BrandSuggestionsWidget } from './brand-suggestions-widget';
 import { getCategories } from '@/lib/api/categories';
-import { getCounterparties } from '@/lib/api/counterparties';
+import { listBrands } from '@/lib/api/brands';
 import { getDebtPartners } from '@/lib/api/debt-partners';
 import { getAccounts } from '@/lib/api/accounts';
 import type {
@@ -67,7 +67,8 @@ export function AttentionFeed({
   }, [preview, inClusterRowIds]);
 
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: () => getCategories() });
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  // Phase C step 5: brands replaced counterparties as the merchant entity.
+  const counterpartiesQuery = useQuery({ queryKey: ['brands'], queryFn: () => listBrands({ limit: 200 }) });
   const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
   // Spec §13 (v1.20): moderator includes closed accounts as valid transfer targets.
   const accountsQuery = useQuery({
@@ -80,7 +81,7 @@ export function AttentionFeed({
       categories: (categoriesQuery.data ?? []).map((c) => ({
         value: String(c.id), label: c.name, kind: c.kind, hint: c.kind === 'income' ? 'доход' : undefined,
       })),
-      counterparties: (counterpartiesQuery.data ?? []).map((c) => ({ value: String(c.id), label: c.name })),
+      counterparties: (counterpartiesQuery.data ?? []).map((b) => ({ value: String(b.id), label: b.canonical_name })),
       debtPartners: (debtPartnersQuery.data ?? []).map((p) => ({ value: String(p.id), label: p.name })),
       accounts: (accountsQuery.data ?? []).map((a) => ({ value: String(a.id), label: a.name })),
       accountsRaw: accountsQuery.data ?? [],

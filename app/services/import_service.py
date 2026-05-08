@@ -29,7 +29,6 @@ from app.services.brand_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
     BrandIdentifierService,
 )
-from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.fingerprint_alias_service import FingerprintAliasService
 from app.services.import_confidence import ImportConfidenceService
 from app.services.import_extractors import ExtractionResult, ImportExtractorRegistry
@@ -514,9 +513,6 @@ class ImportService:
             "fingerprint_clusters": fp_dicts,
             "brand_clusters": brand_dicts,
             "brand_groups": brand_group_dicts,
-            # Legacy field kept as [] until step 5 to avoid 422 on
-            # out-of-tree clients still expecting it.
-            "counterparty_groups": [],
         }
 
     def get_queue_bulk_clusters(self, *, user_id: int) -> dict[str, Any]:
@@ -560,7 +556,6 @@ class ImportService:
             "fingerprint_clusters": fp_dicts,
             "brand_clusters": brand_dicts,
             "brand_groups": brand_group_dicts,
-            "counterparty_groups": [],
         }
 
     def bulk_apply_cluster(
@@ -590,36 +585,27 @@ class ImportService:
         session_id: int,
         row_id: int,
         target_fingerprint: str | None = None,
-        counterparty_id: int | None = None,
     ) -> dict[str, Any]:
-        """Attach a row to a counterparty (Phase 3) or an existing cluster.
+        """Attach a row to an existing cluster via fingerprint alias.
 
-        Exactly one of `counterparty_id` / `target_fingerprint` must be set.
+        Phase C step 5: the legacy `counterparty_id` path was removed
+        alongside the Counterparty table. Brand-side attachment goes
+        through `BrandConfirmService.confirm_brand_for_row` (the path
+        cluster-grid uses after Step 3) — there is no equivalent
+        attach-by-brand endpoint because brand-confirm already creates
+        the brand_fingerprints binding as a side effect.
 
-        Counterparty path (preferred):
-          1. Verify counterparty belongs to the user.
-          2. Try to resolve a category from the counterparty's existing
-             bindings (look at other fingerprints bound to this counterparty
-             in any of the user's sessions — take the category from the most
-             common rule).
-          3. Create `CounterpartyFingerprint(source_fp → counterparty_id)`.
-          4. Commit the row with that category + counterparty.
-
-        Fingerprint path (legacy):
-          1. Resolve target cluster's metadata from this session's rows or
-             from a rule matching the target's skeleton.
+        Fingerprint path:
+          1. Resolve target cluster's metadata from this session's rows
+             or from a rule matching the target's skeleton.
           2. Create FingerprintAlias(source_fp → target_fp).
           3. Commit the row as a Transaction.
 
         Raises ImportValidationError on any precondition failure.
         """
-        if counterparty_id is None and not target_fingerprint:
+        if not target_fingerprint:
             raise ImportValidationError(
-                "Нужно указать контрагента или целевой кластер"
-            )
-        if counterparty_id is not None and target_fingerprint:
-            raise ImportValidationError(
-                "Нельзя указать одновременно контрагента и кластер"
+                "Нужно указать целевой кластер"
             )
 
         session = self.get_session(user_id=user_id, session_id=session_id)
@@ -641,16 +627,6 @@ class ImportService:
                 "У строки нет fingerprint — пересобери preview и попробуй ещё раз"
             )
 
-        if counterparty_id is not None:
-            return self._attach_via_counterparty(
-                user_id=user_id,
-                session=session,
-                row=row,
-                row_id=row_id,
-                source_fp=source_fp,
-                normalized=normalized,
-                counterparty_id=counterparty_id,
-            )
         return self._attach_via_fingerprint(
             user_id=user_id,
             session=session,
@@ -660,198 +636,6 @@ class ImportService:
             normalized=normalized,
             target_fingerprint=target_fingerprint,
         )
-
-    def _attach_via_counterparty(
-        self,
-        *,
-        user_id: int,
-        session: ImportSession,
-        row: ImportRow,
-        row_id: int,
-        source_fp: str,
-        normalized: dict[str, Any],
-        counterparty_id: int,
-    ) -> dict[str, Any]:
-        # Counterparty must belong to the user.
-        from app.models.counterparty import Counterparty
-        cp = (
-            self.db.query(Counterparty)
-            .filter(Counterparty.id == counterparty_id, Counterparty.user_id == user_id)
-            .first()
-        )
-        if cp is None:
-            raise ImportNotFoundError(f"counterparty {counterparty_id} not found")
-
-        # Phase C step 4: resolve the brand mirroring this counterparty
-        # up-front so all downstream lookups go through the brand-side
-        # store. Same case-fold rule migration 0067 used.
-        resolved_brand_id = resolve_brand_id_for_counterparty(
-            self.db, user_id=user_id, counterparty_id=counterparty_id,
-        )
-        if resolved_brand_id is None:
-            raise ImportValidationError(
-                "Не удалось сопоставить контрагента с брендом — попробуй "
-                "выбрать или создать бренд напрямую через пикер.",
-            )
-
-        # Resolve the brand's prevailing category. Three progressively
-        # weaker sources:
-        #   1. Committed transactions already tagged with this brand —
-        #      ground truth, the user has confirmed these.
-        #   2. Live preview rows across active sessions already pinned to
-        #      this brand via fingerprint binding (brand_fingerprints).
-        #   3. The row's own cluster hint (candidate_category_id).
-        # If none of these yield a category, the binding is still
-        # created — the row stays in the attention bucket.
-        target_category_id: int | None = None
-        target_operation_type: str = "regular"
-
-        from collections import Counter as _Counter
-        from app.models.transaction import Transaction as _Transaction
-        tx_cats = (
-            self.db.query(_Transaction.category_id)
-            .filter(
-                _Transaction.user_id == user_id,
-                _Transaction.brand_id == resolved_brand_id,
-                _Transaction.category_id.isnot(None),
-            )
-            .all()
-        )
-        cat_votes: _Counter[int] = _Counter(
-            int(r[0]) for r in tx_cats if r[0] is not None
-        )
-        if cat_votes:
-            target_category_id = cat_votes.most_common(1)[0][0]
-
-        # Source 2 — live preview rows across all active sessions. Find
-        # every fingerprint already bound to this brand, then pull the
-        # candidate category_id stamped on those rows' normalized_data.
-        if target_category_id is None:
-            bound_fps = self._brand_fp_service.repo.list_by_brand(
-                user_id=user_id, brand_id=resolved_brand_id,
-            )
-            bound_fp_set = {b.fingerprint for b in bound_fps if b.fingerprint}
-
-            if bound_fp_set:
-                all_session_rows = (
-                    self.db.query(ImportRow)
-                    .join(ImportSession, ImportRow.session_id == ImportSession.id)
-                    .filter(ImportSession.user_id == user_id)
-                    .all()
-                )
-                preview_cat_votes: _Counter[int] = _Counter()
-                for sess_row in all_session_rows:
-                    nd = sess_row.normalized_data_json or {}
-                    fp = nd.get("fingerprint") or (nd.get("v2") or {}).get("fingerprint")
-                    if fp not in bound_fp_set:
-                        continue
-                    cat = nd.get("category_id")
-                    if cat is None:
-                        continue
-                    try:
-                        preview_cat_votes[int(cat)] += 1
-                    except (TypeError, ValueError):
-                        continue
-                if preview_cat_votes:
-                    target_category_id = preview_cat_votes.most_common(1)[0][0]
-
-        # Source 3 — row's own cluster hint (candidate_category_id).
-        if target_category_id is None:
-            hint = normalized.get("category_id")
-            if hint is not None:
-                try:
-                    target_category_id = int(hint)
-                except (TypeError, ValueError):
-                    target_category_id = None
-
-        # Create the binding — attachment happens regardless of whether
-        # we resolved a category. The row just won't be marked ready if
-        # category is still unknown.
-        binding_created = False
-        try:
-            before = self._brand_fp_service.repo.get_by_fingerprint(
-                user_id=user_id, fingerprint=source_fp,
-            )
-            self._brand_fp_service.bind(
-                user_id=user_id, fingerprint=source_fp, brand_id=resolved_brand_id,
-            )
-            binding_created = before is None
-        except ValueError as exc:
-            raise ImportValidationError(str(exc)) from exc
-        brand_id = resolved_brand_id  # alias used by row_payload below
-
-        # Stamp `attached_to_brand_*` plus the legacy CP fields so the
-        # moderator UI keeps rendering both labels until step 5. The CP
-        # name comes from the user-facing entity; we already validated
-        # cp belongs to the user, so reading cp.name here is safe.
-        normalized["attached_to_brand_id"] = brand_id
-        normalized["attached_to_counterparty_id"] = counterparty_id
-        normalized["attached_to_counterparty_name"] = cp.name
-        normalized["attached_source_fingerprint"] = source_fp
-        # Clear the detached flag: the user is explicitly re-attaching this
-        # row to a cluster (via its counterparty), so it must leave the
-        # attention bucket and re-enter counterparty-group rendering.
-        # Without clearing, build_bulk_clusters would still exclude the row
-        # from every group — the counterparty card would gain a binding but
-        # no visible member, and the user wouldn't find the row anywhere.
-        normalized.pop("detached_from_cluster", None)
-        row.normalized_data_json = normalized
-        self.db.add(row)
-        self.db.flush()
-
-        existing_op = str(normalized.get("operation_type") or "").lower()
-        user_already_confirmed = bool(normalized.get("user_confirmed_at"))
-
-        if user_already_confirmed:
-            # Row was individually confirmed via the pencil editor — the
-            # user explicitly chose operation_type and category. Preserve
-            # those choices: only attach the brand so the row is grouped
-            # correctly in the UI, without overriding anything else.
-            row_payload = ImportRowUpdateRequest(
-                brand_id=brand_id,
-                action="confirm",
-            )
-        else:
-            # Preserve a refund classification if the row carries one —
-            # attach must not silently demote a refund to a regular row.
-            effective_op = "refund" if existing_op == "refund" else target_operation_type
-
-            # Only auto-confirm the row when a category was resolved.
-            # Without a category the row must stay in the attention bucket
-            # so the user can classify it before commit — we still persist
-            # the brand binding and cluster attachment so next time a
-            # matching row comes in, it lands with the brand pre-filled.
-            if target_category_id is not None:
-                row_payload = ImportRowUpdateRequest(
-                    operation_type=effective_op,
-                    category_id=target_category_id,
-                    brand_id=brand_id,
-                    action="confirm",
-                )
-            else:
-                row_payload = ImportRowUpdateRequest(
-                    operation_type=effective_op,
-                    brand_id=brand_id,
-                )
-        self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
-
-        self.db.commit()
-        self.db.refresh(row)
-        summary = self._recalculate_summary(session.id)
-        session.summary_json = summary
-        self.db.add(session)
-        self.db.commit()
-
-        return {
-            "row_id": row_id,
-            "transaction_id": row.created_transaction_id,
-            "target_fingerprint": None,
-            "counterparty_id": counterparty_id,
-            "alias_created": False,
-            "binding_created": binding_created,
-            "source_fingerprint": source_fp,
-            "summary": summary,
-        }
 
     def _attach_via_fingerprint(
         self,
@@ -965,7 +749,6 @@ class ImportService:
             "row_id": row_id,
             "transaction_id": row.created_transaction_id,
             "target_fingerprint": target_fingerprint,
-            "counterparty_id": None,
             "alias_created": alias_created,
             "binding_created": False,
             "source_fingerprint": source_fp,
@@ -2378,10 +2161,11 @@ class ImportService:
             "transaction_date": ImportService._to_datetime(transaction_date),
             "credit_principal_amount": normalized.get("credit_principal_amount"),
             "credit_interest_amount": normalized.get("credit_interest_amount"),
-            "counterparty_id": normalized.get("counterparty_id"),
-            # Phase C dual-write: prefer the resolver/confirm-stamped
-            # brand_id when present. transaction_service derives it from
-            # counterparty_id when absent so commit can't drop the link.
+            # Phase C step 5: brand_id is the only merchant FK on
+            # Transaction. Counterparty_id was dropped along with the
+            # legacy table; rows still carrying nd.counterparty_id from
+            # before step 5 are ignored — brand_id is what the row
+            # already has from Steps 2-3 dual-write.
             "brand_id": normalized.get("brand_id"),
             "debt_partner_id": normalized.get("debt_partner_id"),
             "debt_direction": normalized.get("debt_direction"),
@@ -2416,11 +2200,6 @@ class ImportService:
         else:
             base_payload["category_id"] = None
 
-        if base_payload.get("counterparty_id") not in (None, "", 0):
-            base_payload["counterparty_id"] = int(base_payload["counterparty_id"])
-        else:
-            base_payload["counterparty_id"] = None
-
         if base_payload.get("brand_id") not in (None, "", 0):
             base_payload["brand_id"] = int(base_payload["brand_id"])
         else:
@@ -2431,12 +2210,10 @@ class ImportService:
         else:
             base_payload["debt_partner_id"] = None
 
-        # §12.2 invariant: debt and counterparty are disjoint. Drop the wrong
-        # field at payload assembly so the validator never sees both populated
-        # from a stale normalized_data carrying both fields. brand_id rides
-        # along with counterparty_id (debt rows have neither merchant).
+        # §12.2 invariant: debt and brand are disjoint. Drop the wrong
+        # field at payload assembly so the validator never sees both
+        # populated from a stale normalized_data carrying both fields.
         if str(operation_type) == "debt":
-            base_payload["counterparty_id"] = None
             base_payload["brand_id"] = None
         else:
             base_payload["debt_partner_id"] = None
@@ -2457,7 +2234,6 @@ class ImportService:
                 part_category_id = item.get("category_id")
                 part_target_account_id = item.get("target_account_id")
                 part_debt_direction = item.get("debt_direction")
-                part_counterparty_id = item.get("counterparty_id")
                 part_brand_id = item.get("brand_id")
                 part_debt_partner_id = item.get("debt_partner_id")
 
@@ -2479,13 +2255,11 @@ class ImportService:
                 else:
                     part_type = base_payload["type"]
 
-                # Counterparty and debt_partner are mutually exclusive per part:
+                # Brand and debt_partner are mutually exclusive per part:
                 # debt parts route to a DebtPartner (the debtor / creditor),
-                # non-debt parts keep Counterparty (the merchant / service).
-                # Drop the wrong field to avoid validator rejection downstream.
-                # brand_id rides with counterparty_id for non-debt parts.
+                # non-debt parts route to a Brand (the merchant). Drop the
+                # wrong field to avoid validator rejection downstream.
                 if part_op == "debt":
-                    part_counterparty_id = None
                     part_brand_id = None
                 else:
                     part_debt_partner_id = None
@@ -2499,7 +2273,6 @@ class ImportService:
                     "category_id": int(part_category_id) if part_category_id not in (None, "", 0) else None,
                     "target_account_id": int(part_target_account_id) if part_target_account_id not in (None, "", 0) else None,
                     "debt_direction": str(part_debt_direction).lower() if part_debt_direction else None,
-                    "counterparty_id": int(part_counterparty_id) if part_counterparty_id not in (None, "", 0) else None,
                     "brand_id": int(part_brand_id) if part_brand_id not in (None, "", 0) else None,
                     "debt_partner_id": int(part_debt_partner_id) if part_debt_partner_id not in (None, "", 0) else None,
                     # Credit/investment slice fields — not relevant for individual

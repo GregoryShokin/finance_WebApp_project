@@ -269,7 +269,7 @@ class ImportSplitItemRequest(BaseModel):
     category_id: int | None = None       # required for regular / refund; optional for debt
     target_account_id: int | None = None  # required when operation_type='transfer'
     debt_direction: str | None = None    # required when operation_type='debt'
-    counterparty_id: int | None = None   # merchant/service for regular/refund parts
+    brand_id: int | None = None          # merchant for regular / refund parts
     debt_partner_id: int | None = None   # debtor/creditor for operation_type='debt'
     amount: Decimal
     description: str | None = None
@@ -280,11 +280,6 @@ class ImportRowUpdateRequest(BaseModel):
     target_account_id: int | None = None
     credit_account_id: int | None = None
     category_id: int | None = None
-    counterparty_id: int | None = None
-    # Phase C step 4: brand_id is the canonical merchant binding.
-    # `counterparty_id` stays in the schema for one release cycle so
-    # external callers (mobile, scripts) don't 422; importer reads it
-    # only as a legacy fallback resolved through the brand link helper.
     brand_id: int | None = None
     debt_partner_id: int | None = None
     amount: Decimal | None = None
@@ -464,25 +459,11 @@ class BulkBrandGroupResponse(BaseModel):
     is_mixed_direction: bool = False
 
 
-class BulkCounterpartyGroupResponse(BaseModel):
-    """Legacy mirror of BulkBrandGroupResponse — emitted as `[]` after step 4
-    so out-of-tree clients don't 422. Step 5 drops the field entirely."""
-
-    counterparty_id: int
-    counterparty_name: str
-    direction: str
-    count: int
-    total_amount: Decimal
-    fingerprint_cluster_ids: list[str]
-
-
 class BulkClustersResponse(BaseModel):
     session_id: int
     fingerprint_clusters: list[BulkFingerprintClusterResponse]
     brand_clusters: list[BulkBrandClusterResponse]
     brand_groups: list[BulkBrandGroupResponse] = []
-    # Legacy field — always [] after step 4. Removed in step 5.
-    counterparty_groups: list[BulkCounterpartyGroupResponse] = []
 
 
 class ImportQueueBulkClustersResponse(BaseModel):
@@ -496,8 +477,6 @@ class ImportQueueBulkClustersResponse(BaseModel):
     fingerprint_clusters: list[BulkFingerprintClusterResponse]
     brand_clusters: list[BulkBrandClusterResponse]
     brand_groups: list[BulkBrandGroupResponse] = []
-    # Legacy field — always [] after step 4. Removed in step 5.
-    counterparty_groups: list[BulkCounterpartyGroupResponse] = []
 
 
 class ImportQueueCommitSessionResult(BaseModel):
@@ -556,10 +535,6 @@ class BulkClusterRowUpdate(BaseModel):
     row_id: int
     operation_type: str | None = None
     category_id: int | None = None
-    counterparty_id: int | None = None
-    # Phase C step 4: bulk-apply emits brand_id directly (Step-3 frontend
-    # already does so). counterparty_id stays accepting for one release
-    # cycle and is resolved via the link helper if brand_id is absent.
     brand_id: int | None = None
     debt_partner_id: int | None = None
     target_account_id: int | None = None
@@ -591,30 +566,25 @@ class BulkApplyResponse(BaseModel):
 
 
 class AttachRowToClusterRequest(BaseModel):
-    """Attach an "Требуют внимания" row to a counterparty or existing cluster.
+    """Attach an "Требуют внимания" row to an existing cluster via
+    fingerprint alias.
 
-    Two modes (exactly one must be provided):
-      * `counterparty_id` — Phase 3 preferred path. Binds the row's fingerprint
-        to the given counterparty; future imports with the same skeleton
-        group under that counterparty automatically. Copies the
-        counterparty's common category (from prior bindings) if known.
-      * `target_fingerprint` — legacy path. Creates a FingerprintAlias and
-        routes the row to that fingerprint's cluster. Kept for backwards
-        compatibility; UI should prefer counterparty_id.
+    Phase C step 5: the legacy `counterparty_id` path was removed
+    alongside the Counterparty table. Brand-side attachment goes
+    through `BrandConfirmService.confirm_brand_for_row`; this endpoint
+    only supports the fingerprint-alias path now.
 
-    Atomic: resolves target metadata, creates binding/alias, commits the row
-    as a regular Transaction.
+    Atomic: resolves target metadata, creates the alias, commits the
+    row as a regular Transaction.
     """
 
-    counterparty_id: int | None = None
-    target_fingerprint: str | None = None
+    target_fingerprint: str
 
 
 class AttachRowToClusterResponse(BaseModel):
     row_id: int
     transaction_id: int | None  # None if validation errored and we rolled back
     target_fingerprint: str | None = None
-    counterparty_id: int | None = None
     alias_created: bool = False
     binding_created: bool = False
     source_fingerprint: str | None
@@ -636,8 +606,7 @@ class BrandConfirmResponse(BaseModel):
     brand_id: int
     brand_slug: str
     brand_canonical_name: str
-    counterparty_id: int | None = None
-    counterparty_name: str | None = None
+    brand_display_name: str | None = None
     category_id: int | None = None
     category_name: str | None = None
     propagated_count: int

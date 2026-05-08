@@ -216,11 +216,6 @@ class BrandConfirmService:
             "brand_slug": brand.slug,
             "brand_canonical_name": brand.canonical_name,
             "brand_display_name": display_name,
-            # counterparty_id / _name kept in the response for one
-            # release cycle so any out-of-tree consumer doesn't 5xx —
-            # always None now, always derivable as `brand_display_name`.
-            "counterparty_id": None,
-            "counterparty_name": display_name,
             "category_id": category.id if category is not None else None,
             "category_name": category.name if category is not None else None,
             "propagated_count": propagated,

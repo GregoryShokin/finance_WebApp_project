@@ -113,7 +113,7 @@ class ImportRowEditor:
 
         for field in (
             "account_id", "target_account_id", "credit_account_id", "category_id",
-            "counterparty_id", "brand_id", "debt_partner_id", "amount",
+            "brand_id", "debt_partner_id", "amount",
             "type", "operation_type",
             "debt_direction", "description", "currency",
             "credit_principal_amount", "credit_interest_amount",
@@ -129,7 +129,7 @@ class ImportRowEditor:
                     "category_id": item.category_id,
                     "target_account_id": item.target_account_id,
                     "debt_direction": item.debt_direction,
-                    "counterparty_id": item.counterparty_id,
+                    "brand_id": item.brand_id,
                     "debt_partner_id": item.debt_partner_id,
                     "amount": str(item.amount),
                     "description": item.description,
@@ -434,7 +434,7 @@ class ImportRowEditor:
                     category_id = item.get("category_id")
                     target_account_id = item.get("target_account_id")
                     debt_direction = item.get("debt_direction")
-                    counterparty_id = item.get("counterparty_id")
+                    brand_id = item.get("brand_id")
                     debt_partner_id = item.get("debt_partner_id")
 
                     if part_op in ("regular", "refund"):
@@ -464,7 +464,7 @@ class ImportRowEditor:
                         "category_id": int(category_id) if category_id not in (None, "", 0) else None,
                         "target_account_id": int(target_account_id) if target_account_id not in (None, "", 0) else None,
                         "debt_direction": str(debt_direction).lower() if debt_direction else None,
-                        "counterparty_id": int(counterparty_id) if counterparty_id not in (None, "", 0) else None,
+                        "brand_id": int(brand_id) if brand_id not in (None, "", 0) else None,
                         "debt_partner_id": int(debt_partner_id) if debt_partner_id not in (None, "", 0) else None,
                         "amount": str(split_amount),
                         "description": description,

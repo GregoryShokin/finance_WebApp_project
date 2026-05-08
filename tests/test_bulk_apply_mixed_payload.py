@@ -18,10 +18,10 @@ from decimal import Decimal
 
 import pytest
 
-import app.models.counterparty_identifier  # noqa: F401  — поднять таблицу
+import app.models.brand_identifier  # noqa: F401  — поднять таблицу
 
+from app.models.brand import Brand
 from app.models.category import Category
-from app.models.counterparty import Counterparty
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
 from app.models.transaction_category_rule import TransactionCategoryRule
@@ -88,9 +88,18 @@ def _make_row(
 
 @pytest.fixture
 def counterparty(db, user):
-    cp = Counterparty(user_id=user.id, name="Озон")
-    db.add(cp); db.commit(); db.refresh(cp)
-    return cp
+    """Phase C step 5: returns a Brand. Fixture name kept for test diff
+    minimality; `_build_request` callers pass `counterparty_id=fixture.id`
+    which the helper routes to `brand_id` on the request shape.
+    """
+    brand = Brand(
+        slug=f"ozon_u{user.id}",
+        canonical_name="Озон",
+        is_global=False,
+        created_by_user_id=user.id,
+    )
+    db.add(brand); db.commit(); db.refresh(brand)
+    return brand
 
 
 def _category(db, user, name, kind="expense", priority="expense_secondary"):
@@ -110,15 +119,10 @@ def _category(db, user, name, kind="expense", priority="expense_secondary"):
 def test_bulk_apply_sets_category_and_brand_on_every_row(
     db, user, counterparty
 ):
-    """Phase C step 4: was `test_bulk_apply_sets_category_and_counterparty_on_every_row`.
-
-    Bulk-apply now writes brand_id only — counterparty_id input is
-    accepted as a legacy hint and resolved to brand via the link
-    helper for one release cycle. Asserts both: legacy CP stamp NOT
-    written and brand_id stamp present.
+    """Phase C step 5: bulk-apply writes brand_id directly. The
+    `counterparty` fixture now returns a Brand; the helper above maps
+    the legacy `counterparty_id=` kwarg into `brand_id` on the request.
     """
-    from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
-
     cat = _category(db, user, "Маркетплейсы")
     session = _make_session(db, user)
     rows = [
@@ -133,7 +137,7 @@ def test_bulk_apply_sets_category_and_brand_on_every_row(
         updates=[
             BulkClusterRowUpdate(
                 row_id=r.id, operation_type="regular",
-                category_id=cat.id, counterparty_id=counterparty.id,
+                category_id=cat.id, brand_id=counterparty.id,
             )
             for r in rows
         ],
@@ -142,19 +146,14 @@ def test_bulk_apply_sets_category_and_brand_on_every_row(
         user_id=user.id, session_id=session.id, payload=request,
     )
 
-    expected_brand_id = resolve_brand_id_for_counterparty(
-        db, user_id=user.id, counterparty_id=counterparty.id,
-    )
-    assert expected_brand_id is not None
+    expected_brand_id = counterparty.id
 
     for r in rows:
         db.refresh(r)
         nd = r.normalized_data_json or {}
         assert nd.get("category_id") == cat.id
         assert nd.get("operation_type") == "regular"
-        # Negative: nd.counterparty_id is no longer stamped by bulk-apply.
-        assert nd.get("counterparty_id") is None
-        # Positive: brand binding is the new merchant key.
+        # Positive: brand binding is the merchant key.
         assert nd.get("brand_id") == expected_brand_id
 
 
@@ -184,19 +183,19 @@ def test_bulk_apply_with_two_categories_creates_two_rules(db, user, counterparty
             # 2 рои в Продукты, 2 в Маркетплейсы — всё в одном payload.
             BulkClusterRowUpdate(
                 row_id=rows[0].id, operation_type="regular",
-                category_id=cat_groceries.id, counterparty_id=counterparty.id,
+                category_id=cat_groceries.id, brand_id=counterparty.id,
             ),
             BulkClusterRowUpdate(
                 row_id=rows[1].id, operation_type="regular",
-                category_id=cat_groceries.id, counterparty_id=counterparty.id,
+                category_id=cat_groceries.id, brand_id=counterparty.id,
             ),
             BulkClusterRowUpdate(
                 row_id=rows[2].id, operation_type="regular",
-                category_id=cat_other.id, counterparty_id=counterparty.id,
+                category_id=cat_other.id, brand_id=counterparty.id,
             ),
             BulkClusterRowUpdate(
                 row_id=rows[3].id, operation_type="regular",
-                category_id=cat_other.id, counterparty_id=counterparty.id,
+                category_id=cat_other.id, brand_id=counterparty.id,
             ),
         ],
     )
@@ -227,7 +226,7 @@ def test_bulk_apply_skips_rule_creation_for_transfer_rows(db, user, counterparty
         cluster_type="fingerprint",
         updates=[BulkClusterRowUpdate(
             row_id=row.id, operation_type="transfer",
-            category_id=None, counterparty_id=counterparty.id,
+            category_id=None, brand_id=counterparty.id,
         )],
     )
     result = ImportService(db).bulk_apply_cluster(

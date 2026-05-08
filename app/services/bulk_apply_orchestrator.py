@@ -36,7 +36,6 @@ from app.services.brand_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
     BrandIdentifierService,
 )
-from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.rule_strength_service import CONFIRM_WEIGHT_WARNING, RuleStrengthService
 
 
@@ -100,23 +99,10 @@ class BulkApplyOrchestrator:
                 skipped.append(row_id)
                 continue
 
-            # Phase C step 4: brand_id is the merchant binding key. Two
-            # input shapes accepted:
-            #   • update.brand_id direct (post-Step-3 frontend);
-            #   • update.counterparty_id legacy — resolved to a brand
-            #     via the deterministic helper for one release cycle.
-            # Resolved here so nd.brand_id is stamped by `update_row`
-            # downstream; the binding accumulator below reuses the
-            # same value.
+            # Phase C step 5: brand_id is the only merchant binding key.
+            # The legacy counterparty_id-to-brand resolver was removed
+            # alongside the Counterparty table.
             update_brand_id = getattr(update, "brand_id", None)
-            if update_brand_id in (None, "", 0):
-                legacy_cp_id = getattr(update, "counterparty_id", None)
-                if legacy_cp_id not in (None, "", 0):
-                    update_brand_id = resolve_brand_id_for_counterparty(
-                        self.db,
-                        user_id=user_id,
-                        counterparty_id=int(legacy_cp_id),
-                    )
 
             row_payload = ImportRowUpdateRequest(
                 operation_type=update.operation_type,

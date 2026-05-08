@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.models.account import Account
 from app.models.capital_snapshot import CapitalSnapshot
-from app.models.counterparty import Counterparty
+from app.models.debt_partner import DebtPartner
 from app.models.real_asset import RealAsset
 from app.models.transaction import Transaction
 
@@ -148,12 +148,22 @@ class CapitalSnapshotService:
     def _sum_counterparty_balances(
         self, user_id: int, as_of_end: datetime
     ) -> tuple[Decimal, Decimal]:
-        counterparties = (
-            self.db.query(Counterparty)
-            .filter(Counterparty.user_id == user_id)
+        """Sum receivables/payables across the user's debt partners.
+
+        Phase C step 5: this used to query `Counterparty` which is gone
+        now. The same accounting lives on `DebtPartner` (introduced
+        2026-04-24 by the DebtPartner split — see CLAUDE.md). Debt
+        transactions reference `debt_partner_id`, never the dropped
+        `counterparty_id`. The function name is kept for back-compat
+        with the snapshot column `counterparty_debt`; rename is a
+        separate cleanup.
+        """
+        partners = (
+            self.db.query(DebtPartner)
+            .filter(DebtPartner.user_id == user_id)
             .all()
         )
-        if not counterparties:
+        if not partners:
             return Decimal("0"), Decimal("0")
 
         debt_txns = (
@@ -161,21 +171,21 @@ class CapitalSnapshotService:
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.operation_type == "debt",
-                Transaction.counterparty_id.isnot(None),
+                Transaction.debt_partner_id.isnot(None),
                 Transaction.transaction_date <= as_of_end,
             )
             .all()
         )
-        tx_by_cp: dict[int, list[Transaction]] = {}
+        tx_by_partner: dict[int, list[Transaction]] = {}
         for tx in debt_txns:
-            tx_by_cp.setdefault(tx.counterparty_id, []).append(tx)
+            tx_by_partner.setdefault(tx.debt_partner_id, []).append(tx)
 
         receivable_total = Decimal("0")
         payable_total = Decimal("0")
-        for cp in counterparties:
-            receivable = Decimal(str(cp.opening_receivable_amount or 0))
-            payable = Decimal(str(cp.opening_payable_amount or 0))
-            for tx in tx_by_cp.get(cp.id, []):
+        for partner in partners:
+            receivable = Decimal(str(partner.opening_receivable_amount or 0))
+            payable = Decimal(str(partner.opening_payable_amount or 0))
+            for tx in tx_by_partner.get(partner.id, []):
                 direction = getattr(tx, "debt_direction", None) or (
                     "borrowed" if tx.type == "income" else "lent"
                 )

@@ -153,16 +153,14 @@ def test_no_brand_cluster_when_only_one_session_has_the_brand(db, user):
 
 
 def test_empty_queue_returns_empty_clusters(db, user):
-    """Phase C step 4: response gained `brand_groups`. The legacy
-    `counterparty_groups` field stays as `[]` for one release cycle so
-    out-of-tree consumers don't 422; step 5 drops it.
+    """Phase C step 5: response shape is brand-only. The legacy
+    `counterparty_groups` field was dropped along with the table.
     """
     payload = ImportService(db).get_queue_bulk_clusters(user_id=user.id)
     assert payload == {
         "fingerprint_clusters": [],
         "brand_clusters": [],
         "brand_groups": [],
-        "counterparty_groups": [],
     }
 
 

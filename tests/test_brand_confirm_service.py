@@ -115,13 +115,11 @@ def test_confirm_predicted_brand_bumps_pattern_and_stamps_row(
     assert result["brand_id"] == brand.id
     assert result["was_override"] is False
     assert result["propagated_count"] == 0  # no sibling rows yet
-    # Phase C step 4: confirmation no longer materializes a Counterparty.
-    # `counterparty_id` is preserved as None for one release cycle so
-    # external callers don't 5xx; `counterparty_name` mirrors the
-    # display label the user actually sees in the moderator.
-    assert result["counterparty_id"] is None
-    assert result["counterparty_name"] == brand.canonical_name
+    # Phase C step 5: response carries brand-side fields only.
     assert result["brand_display_name"] == brand.canonical_name
+    # Negative: legacy CP-shaped fields are no longer in the response shape.
+    assert "counterparty_id" not in result
+    assert "counterparty_name" not in result
 
     db.refresh(row)
     assert row.normalized_data_json["user_confirmed_brand_id"] == brand.id
@@ -135,16 +133,15 @@ def test_confirm_predicted_brand_bumps_pattern_and_stamps_row(
     assert bp.rejections == Decimal("0")
 
 
-def test_confirm_does_not_create_counterparty_phase_c_step4(
+def test_confirm_writes_brand_fingerprint_binding(
     db, user, brand_pattern,
 ):
-    """Phase C step 4: was `test_confirm_creates_counterparty_when_none_exists`.
-    The dual-write CP creation closed in step 4 — confirm now only writes
-    to the brand side. Asserts both: legacy CP NOT created AND brand_id
-    is the row's authoritative merchant key.
+    """Phase C step 5: was `test_confirm_does_not_create_counterparty_phase_c_step4`.
+    The Counterparty table is gone, so the negative `len(cps) == 0`
+    assertion is now structural. Confirm-brand only writes the
+    brand-side binding.
     """
     from app.models.brand_fingerprint import BrandFingerprint
-    from app.models.counterparty import Counterparty
     brand, bp = brand_pattern
     session = _make_session(db, user_id=user.id)
     row = _make_row(
@@ -155,64 +152,7 @@ def test_confirm_does_not_create_counterparty_phase_c_step4(
         user_id=user.id, row_id=row.id, brand_id=brand.id,
     )
 
-    # Negative: no Counterparty row materialised.
-    cps = db.query(Counterparty).filter(
-        Counterparty.user_id == user.id,
-        Counterparty.name == brand.canonical_name,
-    ).all()
-    assert len(cps) == 0
     # Positive: brand_id stamped on the row, brand_fingerprint binding made.
-    db.refresh(row)
-    assert row.normalized_data_json["brand_id"] == brand.id
-    fp = row.normalized_data_json.get("fingerprint")
-    bf = (
-        db.query(BrandFingerprint)
-        .filter(
-            BrandFingerprint.user_id == user.id,
-            BrandFingerprint.fingerprint == fp,
-        )
-        .one()
-    )
-    assert bf.brand_id == brand.id
-
-
-def test_confirm_does_not_touch_pre_existing_counterparty_phase_c_step4(
-    db, user, brand_pattern,
-):
-    """Phase C step 4: was `test_confirm_reuses_existing_counterparty_case_insensitive`.
-    The dual-write CP creation closed — pre-existing legacy CPs are
-    left as-is, never updated, never reused. Brand binding is the sole
-    side effect.
-    """
-    from app.models.brand_fingerprint import BrandFingerprint
-    from app.models.counterparty import Counterparty
-    # User had a legacy «пятёрочка» CP from before Phase C step 4. Step 4
-    # neither references nor mutates it.
-    pre_existing = Counterparty(user_id=user.id, name="пятёрочка")
-    db.add(pre_existing)
-    db.commit()
-    db.refresh(pre_existing)
-
-    brand, bp = brand_pattern
-    session = _make_session(db, user_id=user.id)
-    row = _make_row(
-        db, session_id=session.id, brand_id=brand.id, brand_pattern_id=bp.id,
-    )
-
-    result = BrandConfirmService(db).confirm_brand_for_row(
-        user_id=user.id, row_id=row.id, brand_id=brand.id,
-    )
-
-    # Negative: response no longer carries a non-None counterparty_id.
-    assert result["counterparty_id"] is None
-    # The legacy CP is unchanged — no new row, the existing one stays.
-    cps = db.query(Counterparty).filter(
-        Counterparty.user_id == user.id,
-    ).all()
-    assert len(cps) == 1
-    assert cps[0].id == pre_existing.id
-    assert cps[0].name == "пятёрочка"
-    # Positive: brand binding lives in brand_fingerprints, not on the CP row.
     db.refresh(row)
     assert row.normalized_data_json["brand_id"] == brand.id
     fp = row.normalized_data_json.get("fingerprint")
@@ -525,16 +465,13 @@ def test_override_is_used_on_subsequent_confirm(
 
 
 def test_confirm_creates_brand_fingerprint_binding(db, user, brand_pattern):
-    """Phase C step 4: was `test_confirm_creates_fingerprint_binding`.
-    The CP-fp binding closed in step 4 — confirm now binds only on the
-    brand_fingerprints store. Asserts both: legacy CP-fp binding NOT
-    created AND brand_fingerprint binding present and correctly keyed.
+    """Phase C step 5: brand_fingerprints is the only store for the
+    fingerprint→merchant binding. The legacy
+    counterparty_fingerprints table was dropped, so the
+    structural-negative assertion is implicit (no module to query).
     """
     from app.repositories.brand_fingerprint_repository import (
         BrandFingerprintRepository,
-    )
-    from app.repositories.counterparty_fingerprint_repository import (
-        CounterpartyFingerprintRepository,
     )
     brand, bp = brand_pattern
     session = _make_session(db, user_id=user.id)
@@ -547,12 +484,6 @@ def test_confirm_creates_brand_fingerprint_binding(db, user, brand_pattern):
     )
 
     fp = row.normalized_data_json.get("fingerprint")
-
-    # Negative: counterparty_fingerprints is no longer written by confirm.
-    cp_binding = CounterpartyFingerprintRepository(db).get_by_fingerprint(
-        user_id=user.id, fingerprint=fp,
-    )
-    assert cp_binding is None
 
     # Positive: brand_fingerprints carries the binding to the chosen brand.
     brand_binding = BrandFingerprintRepository(db).get_by_fingerprint(
@@ -596,14 +527,16 @@ def test_confirm_propagates_to_sibling_rows_with_same_predicted_brand(
     for r in rows:
         db.refresh(r)
         assert r.normalized_data_json.get("user_confirmed_brand_id") == brand.id
-        # Each sibling inherits both counterparty and category.
-        assert r.normalized_data_json.get("counterparty_id") == result["counterparty_id"]
+        # Phase C step 5: each sibling inherits brand_id + category only.
+        # Counterparty stamps no longer flow through propagation.
+        assert r.normalized_data_json.get("brand_id") == brand.id
         assert r.normalized_data_json.get("category_id") == cat.id
+        assert "counterparty_id" not in r.normalized_data_json
 
     db.refresh(other_row)
     assert "user_confirmed_brand_id" not in other_row.normalized_data_json
-    # And the unrelated row stays untouched.
-    assert other_row.normalized_data_json.get("counterparty_id") is None
+    # And the unrelated row stays untouched (brand_id absent).
+    assert other_row.normalized_data_json.get("brand_id") is None
 
 
 def test_confirm_clears_prior_rejection_marker(db, user, brand_pattern):

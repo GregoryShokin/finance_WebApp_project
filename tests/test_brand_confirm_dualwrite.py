@@ -20,8 +20,6 @@ import pytest
 from app.models.brand import Brand
 from app.models.brand_fingerprint import BrandFingerprint
 from app.models.category import Category
-from app.models.counterparty import Counterparty
-from app.models.counterparty_fingerprint import CounterpartyFingerprint
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
 from app.models.user import User
@@ -102,16 +100,18 @@ def test_confirm_stamps_brand_only_on_row(db, user, global_brand):
     assert nd["brand_id"] == global_brand.id
     assert nd["user_confirmed_brand_id"] == global_brand.id
     assert result["brand_id"] == global_brand.id
-    # Negative: nd.counterparty_id no longer stamped, response field is None.
+    # Negative: nd.counterparty_id absent and absent from the response.
     assert "counterparty_id" not in nd
-    assert result["counterparty_id"] is None
+    assert "counterparty_id" not in result
 
 
 def test_confirm_binds_fingerprint_on_brand_store_only(
     db, user, global_brand,
 ):
-    """Phase C step 4: was `test_confirm_binds_fingerprint_on_both_stores`.
-    The CP-fp write closed — `brand_fingerprints` is the sole store.
+    """Phase C step 5: brand_fingerprints is the sole binding store.
+    The CounterpartyFingerprint table was dropped, so the negative
+    assertion is structural (no model to query) — the only invariant
+    left is that brand_fingerprints carries the binding.
     """
     _, row = _make_active_row(
         db, user_id=user.id, brand_id=global_brand.id,
@@ -122,7 +122,7 @@ def test_confirm_binds_fingerprint_on_brand_store_only(
         user_id=user.id, row_id=row.id, brand_id=global_brand.id,
     )
 
-    # Positive: brand_fingerprints carries the binding.
+    # Positive: brand_fingerprints carries the binding to the chosen brand.
     bf = (
         db.query(BrandFingerprint)
         .filter(
@@ -132,17 +132,6 @@ def test_confirm_binds_fingerprint_on_brand_store_only(
         .one()
     )
     assert bf.brand_id == global_brand.id
-
-    # Negative: counterparty_fingerprints is no longer written.
-    cp_fp = (
-        db.query(CounterpartyFingerprint)
-        .filter(
-            CounterpartyFingerprint.user_id == user.id,
-            CounterpartyFingerprint.fingerprint == "fp_dualwrite_002",
-        )
-        .first()
-    )
-    assert cp_fp is None
 
 
 def test_confirm_returns_user_display_name_without_counterparty_shadow(
@@ -169,15 +158,11 @@ def test_confirm_returns_user_display_name_without_counterparty_shadow(
         user_id=user.id, row_id=row.id, brand_id=global_brand.id,
     )
 
-    # Positive: display label flows through the response unchanged.
+    # Positive: display label flows through the response unchanged —
+    # this is the only public surface clients need post-step-5.
     assert result["brand_display_name"] == "Пятёрочка у дома"
-    # The legacy counterparty_name response field also mirrors the
-    # display label so older clients still render the user's label.
-    assert result["counterparty_name"] == "Пятёрочка у дома"
-
-    # Negative: no Counterparty row materialised for this user/brand.
-    cps = db.query(Counterparty).filter(Counterparty.user_id == user.id).all()
-    assert cps == []
+    # Negative: counterparty_name is no longer in the response shape.
+    assert "counterparty_name" not in result
 
 
 def test_confirm_falls_back_to_canonical_name_without_override(

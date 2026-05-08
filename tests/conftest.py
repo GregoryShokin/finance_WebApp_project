@@ -21,7 +21,6 @@ import app.models.transaction  # noqa: F401
 import app.models.budget  # noqa: F401
 import app.models.budget_alert  # noqa: F401
 import app.models.goal  # noqa: F401
-import app.models.counterparty  # noqa: F401
 import app.models.brand  # noqa: F401
 import app.models.brand_fingerprint  # noqa: F401
 import app.models.brand_identifier  # noqa: F401
@@ -30,8 +29,9 @@ import app.models.import_session  # noqa: F401
 import app.models.import_row  # noqa: F401
 import app.models.transaction_category_rule  # noqa: F401
 import app.models.fingerprint_alias  # noqa: F401
-import app.models.counterparty_fingerprint  # noqa: F401
-import app.models.counterparty_identifier  # noqa: F401
+# Phase C step 5: Counterparty + counterparty_fingerprint + counterparty_identifier
+# models removed alongside the dropped tables. BrandFingerprint /
+# BrandIdentifier above are the live equivalents.
 try:
     import app.models.real_asset  # noqa: F401
     import app.models.installment_purchase  # noqa: F401

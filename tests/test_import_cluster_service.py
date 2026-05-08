@@ -437,11 +437,14 @@ class TestClusterDictSerialization:
         assert d["total_amount"] == "150.00"
         assert d["rule_source"] == "identifier"
         assert d["confidence"] == 0.92
-        # Refund keys present (default-false) — defends the API contract
-        # against accidental removal during refactors.
+        # Refund keys present (default-None/False) — defends the API
+        # contract against accidental removal during refactors.
         assert d["is_refund"] is False
         assert d["refund_brand"] is None
-        assert d["refund_resolved_counterparty_id"] is None
+        assert d["refund_resolved_brand_id"] is None
+        assert d["refund_resolved_brand_name"] is None
+        # Phase C step 5: legacy counterparty mirror dropped.
+        assert "refund_resolved_counterparty_id" not in d
 
 
 # ---------------------------------------------------------------------------
@@ -468,14 +471,13 @@ class TestRefundClusters:
         # No purchase history → brand/category stay empty, confidence
         # should NOT be elevated to 0.95.
         assert c.refund_resolved_brand_id is None
-        assert c.refund_resolved_counterparty_id is None  # legacy mirror
         assert c.candidate_category_id is None
         assert c.confidence < 0.95
 
     def test_refund_inherits_category_from_history(self):
-        """Phase C step 4: refund-history JOIN flipped from Counterparty
-        to Brand. Asserts the resolved fields land on
-        `refund_resolved_brand_*`; legacy CP mirror stays None."""
+        """Phase C step 5: refund-history JOIN keys on Brand. The legacy
+        CP mirror was dropped from the dataclass; only the brand fields
+        exist on the cluster shape."""
         rows = [_row(1, "fp-r", direction="income", skeleton="возврат ozon",
                      is_refund=True, refund_brand="ozon")]
         svc = _make_svc(rows)
@@ -484,9 +486,6 @@ class TestRefundClusters:
         assert len(clusters) == 1
         c = clusters[0]
         assert c.is_refund is True
-        # Negative: legacy CP-keyed mirror is always None after step 4.
-        assert c.refund_resolved_counterparty_id is None
-        assert c.refund_resolved_counterparty_name is None
         # Positive: brand-keyed fields are the source of truth.
         assert c.refund_resolved_brand_id == 42
         assert c.refund_resolved_brand_name == "OZON"
@@ -504,7 +503,6 @@ class TestRefundClusters:
         svc._resolve_refund_brand.assert_not_called()
         assert clusters[0].is_refund is False
         assert clusters[0].refund_resolved_brand_id is None
-        assert clusters[0].refund_resolved_counterparty_id is None
 
     def test_bucket_flag_set_from_any_row(self):
         # Even if only one row carries the is_refund flag, the whole cluster

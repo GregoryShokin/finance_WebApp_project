@@ -43,7 +43,7 @@ import {
   updateImportRow,
 } from '@/lib/api/imports';
 import { createCategory, getCategories } from '@/lib/api/categories';
-import { createCounterparty, getCounterparties } from '@/lib/api/counterparties';
+import { listBrands } from '@/lib/api/brands';
 import { createAccount, getAccounts } from '@/lib/api/accounts';
 import { getDebtPartners } from '@/lib/api/debt-partners';
 import type { CreateAccountPayload } from '@/types/account';
@@ -297,8 +297,6 @@ function CreateEntityFab() {
   );
 }
 
-// Suppress unused-import warning for entity helpers referenced by other files.
-void createCounterparty;
 
 function getOrigin(e: React.MouseEvent<HTMLButtonElement>) {
   const r = e.currentTarget.getBoundingClientRect();
@@ -392,7 +390,12 @@ function BucketPanel({
 
   // Lookup maps for chip rendering
   const categoriesQuery     = useQuery({ queryKey: ['categories'],     queryFn: () => getCategories() });
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  // Phase C step 5: brands replaced counterparties as the merchant entity.
+  // The chip rendering below resolves nd.brand_id via this map.
+  const brandsListQuery = useQuery({
+    queryKey: ['brands'],
+    queryFn: () => listBrands({ limit: 200 }),
+  });
   // Spec §13 (v1.20): cluster modal includes closed accounts as valid targets.
   const accountsQuery       = useQuery({
     queryKey: ['accounts', 'with-closed'],
@@ -406,9 +409,9 @@ function BucketPanel({
   }, [categoriesQuery.data]);
   const counterpartiesById = useMemo(() => {
     const m = new Map<number, string>();
-    for (const c of counterpartiesQuery.data ?? []) m.set(c.id, c.name);
+    for (const b of brandsListQuery.data ?? []) m.set(b.id, b.canonical_name);
     return m;
-  }, [counterpartiesQuery.data]);
+  }, [brandsListQuery.data]);
   const accountsById = useMemo(() => {
     const m = new Map<number, string>();
     for (const a of accountsQuery.data ?? []) m.set(a.id, a.name);
@@ -561,9 +564,14 @@ function BucketRow({
   const t = mapOperationToType(opType, nd);
   const typeOpt = TYPE_OPTIONS.find((x) => x.value === t) ?? TYPE_OPTIONS[0];
   const splitItems = (nd.split_items as ImportSplitItem[] | undefined) ?? null;
-  const cpName = (nd.counterparty_id as number | null) != null
-    ? counterpartiesById.get(nd.counterparty_id as number)
-    : null;
+  // Phase C step 5: brand_id replaces counterparty_id. Fallback to the
+  // cached display fields stamped by the resolver for rows without a
+  // bound brand id.
+  const cpName = (nd.brand_id as number | null) != null
+    ? counterpartiesById.get(nd.brand_id as number)
+        ?? (nd.brand_canonical_name as string | undefined)
+        ?? null
+    : (nd.brand_canonical_name as string | undefined) ?? null;
 
   return (
     <div className="grid grid-cols-[80px_1fr_auto_auto] items-start gap-3 rounded-xl px-3 py-2.5 transition hover:bg-bg-surface2">
@@ -790,7 +798,12 @@ function ParkedPanel({
 
   // Shared entity lists for EditTxRazvorot / SplitModal
   const categoriesQuery     = useQuery({ queryKey: ['categories'],     queryFn: () => getCategories() });
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  // Phase C step 5: brands replaced counterparties as the merchant entity.
+  // The chip rendering below resolves nd.brand_id via this map.
+  const brandsListQuery = useQuery({
+    queryKey: ['brands'],
+    queryFn: () => listBrands({ limit: 200 }),
+  });
   const debtPartnersQuery   = useQuery({ queryKey: ['debt-partners'],  queryFn: () => getDebtPartners() });
   // Spec §13 (v1.20): cluster modal includes closed accounts as valid targets.
   const accountsQuery       = useQuery({
@@ -800,11 +813,14 @@ function ParkedPanel({
 
   const opts = useMemo(() => ({
     categories:    (categoriesQuery.data ?? []).map((c) => ({ value: String(c.id), label: c.name, kind: (c.kind as 'income' | 'expense') })),
-    counterparties:(counterpartiesQuery.data ?? []).map((c) => ({ value: String(c.id), label: c.name })),
+    // Phase C step 5: brand-derived options drive the merchant pickers.
+    // The legacy `counterparties` key name is preserved one release so
+    // EditTxRazvorot / SplitModal don't need a coordinated rename.
+    counterparties:(brandsListQuery.data ?? []).map((b) => ({ value: String(b.id), label: b.canonical_name })),
     debtPartners:  (debtPartnersQuery.data ?? []).map((p: { id: number; name: string }) => ({ value: String(p.id), label: p.name })),
     accounts:      (accountsQuery.data ?? []).map((a) => ({ value: String(a.id), label: a.name })),
     accountsRaw:   accountsQuery.data ?? [],
-  }), [categoriesQuery.data, counterpartiesQuery.data, debtPartnersQuery.data, accountsQuery.data]);
+  }), [categoriesQuery.data, brandsListQuery.data, debtPartnersQuery.data, accountsQuery.data]);
 
   const invalidate = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['imports', 'parked-queue'] });
@@ -825,9 +841,8 @@ function ParkedPanel({
         action: 'confirm',
         operation_type: nd.operation_type as string | undefined,
         category_id: nd.category_id as number | null | undefined,
-        counterparty_id: nd.counterparty_id as number | null | undefined,
-        // Phase C dual-write: preserve nd.brand_id alongside nd.counterparty_id
-        // so the row's brand stamp survives this confirm round-trip.
+        // Phase C step 5: brand_id is the merchant binding — counterparty_id
+        // input no longer accepted by the API.
         brand_id: nd.brand_id as number | null | undefined,
         debt_partner_id: nd.debt_partner_id as number | null | undefined,
         target_account_id: nd.target_account_id as number | null | undefined,

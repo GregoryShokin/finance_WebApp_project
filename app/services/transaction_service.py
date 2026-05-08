@@ -11,12 +11,10 @@ from app.models.category import Category
 from app.models.transaction import Transaction
 from app.repositories.account_repository import AccountRepository
 from app.repositories.category_repository import CategoryRepository
-from app.repositories.counterparty_repository import CounterpartyRepository
 from app.repositories.debt_partner_repository import DebtPartnerRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
-from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.rule_strength_service import RuleNotFound, RuleStrengthService
 
 try:
@@ -77,7 +75,6 @@ class TransactionService:
         self.transaction_repo = TransactionRepository(db)
         self.account_repo = AccountRepository(db)
         self.category_repo = CategoryRepository(db)
-        self.counterparty_repo = CounterpartyRepository(db)
         self.debt_partner_repo = DebtPartnerRepository(db)
         self.enrichment_service = TransactionEnrichmentService(db)
         self.category_rule_repo = TransactionCategoryRuleRepository(db)
@@ -429,7 +426,7 @@ class TransactionService:
             "target_account_id": resolved_target_account_id,
             "credit_account_id": resolved_credit_account_id,
             "category_id": pick("category_id", transaction.category_id, allow_none=True),
-            "counterparty_id": pick("counterparty_id", transaction.counterparty_id, allow_none=True),
+            "brand_id": pick("brand_id", getattr(transaction, "brand_id", None), allow_none=True),
             "debt_partner_id": pick("debt_partner_id", getattr(transaction, "debt_partner_id", None), allow_none=True),
             "goal_id": pick("goal_id", getattr(transaction, "goal_id", None), allow_none=True),
             "amount": pick("amount", transaction.amount),
@@ -650,39 +647,22 @@ class TransactionService:
     def _resolve_brand_for_payload(
         self, *, user_id: int, payload: dict[str, Any],
     ) -> None:
-        """Phase C step 4: ensure `brand_id` is the only merchant FK
-        on the produced Transaction. Three cases:
-
-          • client submits `brand_id` directly → keep it, drop any
-            `counterparty_id` so the new column is the source of truth.
-          • client submits only `counterparty_id` (legacy) → resolve
-            the brand from it via the link helper, drop the CP field.
-          • neither set → both stay None (transfers, debt, etc.).
+        """Phase C step 5: brand_id is the sole merchant FK. The legacy
+        counterparty_id-to-brand resolver was removed alongside the
+        Counterparty table. Any leftover counterparty_id key in the
+        payload is silently dropped — clients should submit brand_id.
         """
-        # Brand_id provided wins outright.
-        if payload.get("brand_id") not in (None, "", 0):
-            payload["counterparty_id"] = None
-            return
-
-        cp_id = payload.get("counterparty_id")
-        if cp_id in (None, "", 0):
+        # Strip the legacy field unconditionally so it never reaches
+        # the Transaction insert (the column doesn't exist anymore).
+        payload.pop("counterparty_id", None)
+        if payload.get("brand_id") in (None, "", 0):
             payload["brand_id"] = None
-            payload["counterparty_id"] = None
-            return
-
-        # Legacy counterparty submission — resolve to a brand and drop
-        # the CP stamp so we don't write to the dead column.
-        brand_id = resolve_brand_id_for_counterparty(
-            self.db, user_id=user_id, counterparty_id=int(cp_id),
-        )
-        payload["brand_id"] = brand_id
-        payload["counterparty_id"] = None
 
     def _validate_payload(self, *, user_id: int, payload: dict[str, Any]) -> None:
         operation_type = payload.get("operation_type")
         target_account_id = payload.get("target_account_id")
         category_id = payload.get("category_id")
-        counterparty_id = payload.get("counterparty_id")
+        brand_id = payload.get("brand_id")
         debt_partner_id = payload.get("debt_partner_id")
         transaction_type = payload.get("type")
         debt_direction = payload.get("debt_direction")
@@ -711,35 +691,33 @@ class TransactionService:
             raise TransactionValidationError("Счёт назначения можно указывать только для переводов.")
 
         # Debt operations route to a DebtPartner (a debtor / creditor), NOT
-        # a Counterparty (a merchant / service). Keeping the two entities
-        # apart prevents "Пятёрочка" from ever appearing in a debt UI and
-        # vice versa. counterparty_id is not accepted on debt rows.
+        # a Brand (a merchant / service). Keeping the two entities apart
+        # prevents «Пятёрочка» from ever appearing in a debt UI and vice
+        # versa. brand_id is not accepted on debt rows.
         if operation_type == "debt":
             if debt_partner_id in (None, "", 0):
                 raise TransactionValidationError(
                     "Для долга нужно указать дебитора / кредитора."
                 )
-            if counterparty_id not in (None, "", 0):
+            if brand_id not in (None, "", 0):
                 raise TransactionValidationError(
-                    "Для долга указывается дебитор / кредитор, а не контрагент."
+                    "Для долга указывается дебитор / кредитор, а не бренд."
                 )
             if debt_direction not in {"lent", "borrowed", "repaid", "collected"}:
                 raise TransactionValidationError(
                     "Для долга нужно выбрать корректное направление."
                 )
-        # Counterparty is allowed on any operation that represents an
-        # interaction with a real entity — regular purchases (merchant) and
-        # refunds (reversal from the same merchant). It is NOT meaningful on
-        # transfers (internal money move between user's own accounts),
-        # credit disbursement/early repayment (bank is the account owner,
-        # not a merchant), investment buy/sell (instrument, not a person),
-        # or adjustments. Those paths reject counterparty_id to prevent
-        # accidental binding to an unrelated party. Debt is handled above.
+        # Brand is allowed on any operation that represents an
+        # interaction with a real merchant — regular purchases and
+        # refunds. It is NOT meaningful on transfers, credit
+        # disbursement/early repayment, investment buy/sell, or
+        # adjustments. Those paths reject brand_id to prevent
+        # accidental binding to an unrelated party. Debt handled above.
         elif operation_type in ("transfer", "credit_disbursement", "credit_early_repayment",
                                 "investment_buy", "investment_sell", "adjustment"):
-            if counterparty_id not in (None, "", 0):
+            if brand_id not in (None, "", 0):
                 raise TransactionValidationError(
-                    "Контрагент не применим к этому типу операции."
+                    "Бренд не применим к этому типу операции."
                 )
 
         # debt_partner_id only valid on operation_type='debt'.
@@ -748,10 +726,19 @@ class TransactionService:
                 "Дебитор / кредитор применим только к долговым операциям."
             )
 
-        if counterparty_id not in (None, "", 0):
-            counterparty = self.counterparty_repo.get_by_id_and_user(int(counterparty_id), user_id)
-            if counterparty is None:
-                raise TransactionValidationError("Контрагент не найден.")
+        if brand_id not in (None, "", 0):
+            from app.models.brand import Brand
+            brand = (
+                self.db.query(Brand)
+                .filter(Brand.id == int(brand_id))
+                .first()
+            )
+            if brand is None:
+                raise TransactionValidationError("Бренд не найден.")
+            # Private brands belong to one user; global brands are visible
+            # to everyone. Reject access to another user's private brand.
+            if not brand.is_global and brand.created_by_user_id != user_id:
+                raise TransactionValidationError("Бренд недоступен.")
 
         if debt_partner_id not in (None, "", 0):
             partner = self.debt_partner_repo.get_by_id_and_user(int(debt_partner_id), user_id)

@@ -3,28 +3,28 @@
 /**
  * Entity-aware selects for the import moderator (warm redesign, 2026-04-30).
  *
- * Wraps <CreatableSelect> with 4 ready-to-use variants:
- *   • CategorySelect      — opens existing CategoryDialog (full kind+priority form)
- *   • CounterpartySelect  — inline create (name only)
- *   • DebtPartnerSelect   — inline create (name only; opening balances = 0)
- *   • AccountSelect       — opens existing AccountDialog (4+ required fields)
+ * Wraps <CreatableSelect> with the variants the live moderator uses:
+ *   • CategorySelect    — opens existing CategoryDialog (full kind+priority form)
+ *   • BrandSelect       — inline create (Phase C successor to CounterpartySelect)
+ *   • DebtPartnerSelect — inline create (name only; opening balances = 0)
+ *   • AccountSelect     — opens existing AccountDialog (4+ required fields)
  *
- * After a successful create, all four variants invalidate their query keys and
+ * After a successful create, all variants invalidate their query keys and
  * call setValue on the new id so the row immediately reflects the choice.
+ *
+ * Phase C step 5: CounterpartySelect was removed alongside the dropped
+ * Counterparty table. BrandSelect covers the same UX surface for the
+ * merchant entity.
  */
 
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
-import { Pencil } from 'lucide-react';
-
 import { CreatableSelect, type CreatableOption } from '@/components/ui/creatable-select';
 import { AccountDialog } from '@/components/accounts/account-dialog';
 import { CategoryDialog } from '@/components/categories/category-dialog';
-import { CounterpartyDialog } from '@/components/counterparties/counterparty-dialog';
 import { createCategory } from '@/lib/api/categories';
-import { createCounterparty, updateCounterparty } from '@/lib/api/counterparties';
 import { createBrand, type Brand } from '@/lib/api/brands';
 import { createDebtPartner } from '@/lib/api/debt-partners';
 import { createAccount } from '@/lib/api/accounts';
@@ -34,7 +34,6 @@ import type {
   CategoryPriority,
   CreateCategoryPayload,
 } from '@/types/category';
-import type { Counterparty } from '@/types/counterparty';
 import type { DebtPartner } from '@/types/debt-partner';
 import type { Account, CreateAccountPayload } from '@/types/account';
 
@@ -119,94 +118,8 @@ export function CategorySelect({
 // Counterparty
 // ──────────────────────────────────────────────────────────────────────────
 
-export function CounterpartySelect({
-  value,
-  options,
-  onChange,
-  width,
-  placeholder = '— контрагент —',
-  disabled = false,
-}: {
-  value: number | null | undefined;
-  options: CreatableOption[];
-  onChange: (id: number) => void;
-  width?: number | string;
-  placeholder?: string;
-  disabled?: boolean;
-}) {
-  const queryClient = useQueryClient();
-  const [editOpen, setEditOpen] = useState(false);
-
-  const createMut = useMutation({
-    mutationFn: (name: string) => createCounterparty({ name }),
-    onSuccess: async (cp) => {
-      await queryClient.invalidateQueries({ queryKey: ['counterparties'] });
-      toast.success(`Контрагент «${cp.name}» создан`);
-    },
-    onError: (e: Error) => toast.error(e.message || 'Не удалось создать контрагента'),
-  });
-
-  const updateMut = useMutation({
-    mutationFn: ({ id, name }: { id: number; name: string }) => updateCounterparty(id, { name }),
-    onSuccess: async (cp) => {
-      await queryClient.invalidateQueries({ queryKey: ['counterparties'] });
-      toast.success(`Контрагент переименован в «${cp.name}»`);
-      setEditOpen(false);
-    },
-    onError: (e: Error) => toast.error(e.message || 'Не удалось обновить контрагента'),
-  });
-
-  // Initial value for the edit dialog — the currently selected counterparty's
-  // name. Pulled from the options prop to avoid a second fetch.
-  const currentName =
-    value != null ? options.find((o) => o.value === String(value))?.label ?? '' : '';
-
-  return (
-    <>
-      <div className="flex items-center gap-1">
-        <div className="min-w-0 flex-1">
-          <CreatableSelect
-            value={value != null ? String(value) : null}
-            options={options}
-            onChange={(v) => onChange(Number(v))}
-            placeholder={placeholder}
-            width={width}
-            disabled={disabled}
-            createMode={{
-              kind: 'inline',
-              onCreate: async (name) => {
-                const cp: Counterparty = await createMut.mutateAsync(name);
-                return { value: String(cp.id), label: cp.name };
-              },
-            }}
-          />
-        </div>
-        {value != null && !disabled ? (
-          <button
-            type="button"
-            onClick={() => setEditOpen(true)}
-            title="Переименовать контрагента"
-            aria-label="Переименовать контрагента"
-            className="grid size-7 shrink-0 place-items-center rounded-md border border-line bg-bg-surface text-ink-3 transition hover:border-ink-3 hover:bg-bg-surface2 hover:text-ink"
-          >
-            <Pencil className="size-3.5" />
-          </button>
-        ) : null}
-      </div>
-
-      <CounterpartyDialog
-        open={editOpen}
-        mode="edit"
-        draft={{ name: currentName }}
-        isSubmitting={updateMut.isPending}
-        onClose={() => setEditOpen(false)}
-        onSubmit={(values) => {
-          if (value != null) updateMut.mutate({ id: value, name: values.name });
-        }}
-      />
-    </>
-  );
-}
+// CounterpartySelect was removed in Phase C step 5 — see the BrandSelect
+// below for the live merchant picker.
 
 // ──────────────────────────────────────────────────────────────────────────
 // Brand (Phase C — successor to CounterpartySelect for the import moderator).

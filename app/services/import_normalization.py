@@ -431,7 +431,7 @@ def apply_decisions(
         category_id=category_id,
         operation_type=operation_type,
         type=transaction_type,
-        counterparty_id=None,
+        brand_id=None,
         debt_partner_id=None,
         requires_credit_split=requires_credit_split,
         credit_account_id=None,

@@ -36,7 +36,6 @@ class Transaction(Base):
     target_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     credit_account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True)
-    counterparty_id: Mapped[int | None] = mapped_column(ForeignKey("counterparties.id", ondelete="SET NULL"), nullable=True, index=True)
     brand_id: Mapped[int | None] = mapped_column(ForeignKey("brands.id", ondelete="SET NULL"), nullable=True, index=True)
     debt_partner_id: Mapped[int | None] = mapped_column(ForeignKey("debt_partners.id", ondelete="SET NULL"), nullable=True, index=True)
 
@@ -83,7 +82,6 @@ class Transaction(Base):
     target_account = relationship("Account", foreign_keys=[target_account_id])
     credit_account = relationship("Account", foreign_keys=[credit_account_id])
     category = relationship("Category", back_populates="transactions")
-    counterparty = relationship("Counterparty", back_populates="transactions")
     brand = relationship("Brand", back_populates="transactions")
     debt_partner = relationship("DebtPartner", back_populates="transactions")
     goal = relationship("Goal", back_populates="transactions", foreign_keys=[goal_id])
@@ -94,12 +92,12 @@ class Transaction(Base):
 
 
     @property
-    def counterparty_name(self) -> str | None:
-        return self.counterparty.name if self.counterparty else None
-
-    @property
     def brand_name(self) -> str | None:
         return self.brand.canonical_name if self.brand else None
+
+    # Phase C step 5: counterparty_name removed alongside the FK column.
+    # Read paths use brand_name; per-user override (UserBrandDisplayName)
+    # is resolved at the API/service layer where user_id is in scope.
 
     @property
     def debt_partner_name(self) -> str | None:

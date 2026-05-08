@@ -103,7 +103,7 @@ class DecisionRow:
     category_id: int | None
     operation_type: str
     type: str                              # "income" | "expense"
-    counterparty_id: int | None
+    brand_id: int | None
     debt_partner_id: int | None
     requires_credit_split: bool
     credit_account_id: int | None

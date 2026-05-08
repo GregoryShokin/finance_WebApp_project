@@ -111,20 +111,22 @@ Three distinct states, two boolean flags:
 
 **Migration 0057** added `is_closed` (NOT NULL DEFAULT FALSE) and `closed_at` (DATE NULL) with `ix_accounts_is_closed`. Backfill is conservative: existing rows stay `is_closed=False`. Users explicitly mark closure via UI.
 
-### Counterparty vs DebtPartner (decision 2026-04-24)
+### Brand vs DebtPartner (decision 2026-05-08, Phase C merge)
 
 Two disjoint entity tables, never mixed:
 
-- **`Counterparty`** — merchants / services / employers the user interacts with financially: «Пятёрочка», «Яндекс Такси», «Арендодатель» (as landlord receiving rent), «Мегафон». Referenced from `Transaction.counterparty_id`. Used in the import moderator, cluster grouping (via `CounterpartyFingerprint` / `CounterpartyIdentifier`), and non-debt transaction forms.
+- **`Brand`** — merchants / services / employers the user interacts with financially: «Пятёрочка», «Яндекс Такси», «Арендодатель» (as landlord receiving rent), «Мегафон». Referenced from `Transaction.brand_id`. Used in the import moderator, cluster grouping (via `BrandFingerprint` / `BrandIdentifier`), and non-debt transaction forms. Per-user display label override via `UserBrandDisplayName`. Globals seeded by `scripts/seed_brand_registry.py`; privates user-created. See [Brand Registry spec](financeapp-vault/14-Specifications/Спецификация — Brand Registry.md).
 - **`DebtPartner`** — debtors / creditors for operation_type='debt' transactions: «Паша», «Отец», «Влад». Referenced from `Transaction.debt_partner_id`. Has `opening_receivable_amount` + `opening_payable_amount` for starting balances; running balances are computed on read by summing debt transactions.
 
 **Invariant** (enforced by `TransactionService._validate_payload`):
-- `operation_type='debt'` ⇒ `debt_partner_id` required, `counterparty_id` rejected.
-- Any other `operation_type` ⇒ `debt_partner_id` rejected; `counterparty_id` accepted for regular / refund only.
+- `operation_type='debt'` ⇒ `debt_partner_id` required, `brand_id` rejected.
+- Any other `operation_type` ⇒ `debt_partner_id` rejected; `brand_id` accepted for regular / refund only.
 
 `ImportSplitItemRequest` (schemas/imports.py) carries both fields per-part; the split handler routes each part's chosen field to the matching Transaction column.
 
-Historical note: before 2026-04-24, debtors lived in `counterparties` (alongside merchants). Migration `0051_debt_partners.py` + `scripts/split_counterparties_into_debt_partners.py` moved them into the new table, clearing `counterparty_id` on existing debt rows and deleting debt-only Counterparty records. Mixed-role names (same person as both merchant and debtor) live in BOTH tables as independent objects — intentionally, since the two relationships are accounted for separately.
+**Historical note — Phase C merge (2026-05-08):** The legacy `Counterparty` entity was the merchant table before this merge. It was abolished by migrations `0067_merge_counterparty_into_brand.py` (data move + new schema) and `0068_drop_counterparties.py` (DROP TABLE). Every `Counterparty` mapped to a `Brand` (existing global / private match by case-fold name, or new private brand created), with a `UserBrandDisplayName` row preserving the per-user label when the CP name differed from the matched canonical name. Pre-flight tripwire in `0068.upgrade()` aborts if any `transactions.counterparty_id IS NOT NULL AND brand_id IS NULL` — that would mean a write site was missed. See Brand Registry spec §16 for the full step-by-step migration history.
+
+Earlier note (2026-04-24, before Phase C): the DebtPartner split moved debtors out of the legacy `counterparties` table when it still existed. Migration `0051_debt_partners.py` did that move; the now-deleted `scripts/split_counterparties_into_debt_partners.py` was a one-shot helper. After Phase C, both halves of that historical split remain — DebtPartner is unchanged, Counterparty is gone, Brand is the merchant entity.
 
 ### Credit Payment Model (decision 2026-04-19)
 

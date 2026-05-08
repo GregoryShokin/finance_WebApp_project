@@ -27,7 +27,7 @@ import { TxRow } from './tx-row';
 import { EditTxRazvorot } from './edit-tx-razvorot';
 import { SplitModal } from './split-modal';
 import { getCategories } from '@/lib/api/categories';
-import { getCounterparties } from '@/lib/api/counterparties';
+import { listBrands } from '@/lib/api/brands';
 import { getDebtPartners } from '@/lib/api/debt-partners';
 import { getAccounts } from '@/lib/api/accounts';
 import type { ImportPreviewResponse, ImportPreviewRow } from '@/types/import';
@@ -82,7 +82,8 @@ export function ChronologicalView({
   }, [explicitRows, preview]);
 
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: () => getCategories() });
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  // Phase C step 5: brands replaced counterparties as the merchant entity.
+  const counterpartiesQuery = useQuery({ queryKey: ['brands'], queryFn: () => listBrands({ limit: 200 }) });
   const debtPartnersQuery = useQuery({ queryKey: ['debt-partners'], queryFn: getDebtPartners });
   const accountsQuery = useQuery({
     queryKey: ['accounts', 'with-closed'],
@@ -94,7 +95,7 @@ export function ChronologicalView({
       categories: (categoriesQuery.data ?? []).map((c) => ({
         value: String(c.id), label: c.name, kind: c.kind, hint: c.kind === 'income' ? 'доход' : undefined,
       })),
-      counterparties: (counterpartiesQuery.data ?? []).map((c) => ({ value: String(c.id), label: c.name })),
+      counterparties: (counterpartiesQuery.data ?? []).map((b) => ({ value: String(b.id), label: b.canonical_name })),
       debtPartners: (debtPartnersQuery.data ?? []).map((p) => ({ value: String(p.id), label: p.name })),
       accounts: (accountsQuery.data ?? []).map((a) => ({ value: String(a.id), label: a.name })),
       accountsRaw: accountsQuery.data ?? [],
