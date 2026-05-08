@@ -794,7 +794,7 @@ function CounterpartyPreview({ sessionId }: { sessionId: number }) {
   if (groups.length === 0) {
     return (
       <div className="px-4 pb-4 text-center text-xs text-ink-3">
-        Контрагенты ещё не выделены — продолжи разбор, и они появятся.
+        Бренды ещё не выделены — продолжи разбор, и они появятся.
       </div>
     );
   }
@@ -802,7 +802,7 @@ function CounterpartyPreview({ sessionId }: { sessionId: number }) {
   return (
     <div className="overflow-hidden rounded-xl border border-line bg-bg-surface">
       <div className="border-b border-line px-3.5 py-2 text-[11px] uppercase tracking-wider text-ink-3">
-        Контрагенты в выписке
+        Бренды в выписке
       </div>
       {groups.slice(0, 6).map((g, i) => (
         <div

@@ -24,7 +24,8 @@ import {
   CategorySelect,
   DebtPartnerSelect,
 } from '@/components/import/entity-selects';
-import { CounterpartyRazvorotButton } from './counterparty-razvorot-button';
+// CounterpartyRazvorotButton removed in v1.24 — Brand-Counterparty UI
+// unification (Option B). Brand picker is the sole entry point.
 import { fmtDateTime, fmtRubSigned } from './format';
 import {
   TYPE_OPTIONS,
@@ -42,7 +43,6 @@ import {
   investmentDirToOperationType,
 } from './option-sets';
 import {
-  attachRowToCounterparty,
   confirmRowBrand,
   excludeImportRow,
   parkImportRow,
@@ -195,16 +195,8 @@ export function TxRow({
 
   // ── Mutations ────────────────────────────────────────────────────────────
 
-  // Immediately creates a CounterpartyFingerprint binding when the user picks
-  // a counterparty — this is what moves the row from AttentionFeed into the
-  // counterparty group card in ClusterGrid. Selecting a counterparty is
-  // treated as a standalone action, not gated on the full confirm flow.
-  const attachMut = useMutation({
-    mutationFn: (cpId: number) => attachRowToCounterparty(effectiveSessionId, row.id, cpId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
-    },
-  });
+  // attachMut (CounterpartyFingerprint quick-binding) removed in v1.24 —
+  // brand-picker handles binding through brand-confirm path.
 
   const patchMut = useMutation({
     mutationFn: (payload: ImportRowUpdatePayload) => updateImportRow(row.id, payload),
@@ -639,13 +631,11 @@ export function TxRow({
         )}
 
         <div className="ml-auto flex items-center gap-1.5">
-          <CounterpartyRazvorotButton
-            value={counterpartyId}
-            options={options.counterparties}
-            onChange={(id) => { setCounterpartyId(id); attachMut.mutate(id); }}
-            disabled={cpDisabled}
-            compact
-          />
+          {/* v1.24 Brand-Counterparty unification: the 👤 quick-pick was a
+              parallel entry that wrote nd.counterparty_id without going
+              through Brand. Removed — «Выбрать бренд» pill above (brand
+              picker) is the sole entry point and creates Brand →
+              Counterparty in one step via confirm_brand_for_row. */}
 
           <button
             type="button"

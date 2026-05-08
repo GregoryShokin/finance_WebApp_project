@@ -39,10 +39,12 @@ import { EditTxRazvorot } from './edit-tx-razvorot';
 import {
   attachRowToCounterparty,
   bulkApplyCluster,
+  confirmRowBrand,
   detachImportRowFromCluster,
   excludeImportRow,
   parkImportRow,
 } from '@/lib/api/imports';
+import { applyBrandToSession, createBrand, listBrands } from '@/lib/api/brands';
 import { getCategories } from '@/lib/api/categories';
 import { getCounterparties } from '@/lib/api/counterparties';
 import type {
@@ -735,6 +737,42 @@ function ClusterModal({
     );
     const freshPreConfirmed = visibleRowIds.filter((id) => !isFreshEligible(id)).length;
 
+    // ── v1.24 Brand-Counterparty UI unification ────────────────────────
+    // The «Бренд (необязательно)» picker (former «Контрагент») resolves
+    // to a Brand entity. Brand-confirm path (a) creates Counterparty by
+    // name (find-or-create), (b) stamps nd.counterparty_id, (c) binds
+    // CounterpartyFingerprint, (d) auto-learns a text-pattern from the
+    // skeleton — single canonical path replacing the parallel
+    // counterparty-only stamping flow. Non-eligible rows (debt/transfer)
+    // still take the fingerprint-binding-only path below to preserve
+    // §12.2 (debt rows MUST have counterparty_id=NULL on Transaction).
+    let resolvedBrandId: number | null = null;
+    if (bulkCounterpartyId) {
+      const cpName = counterpartyOptions.find(
+        (o) => Number(o.value) === bulkCounterpartyId,
+      )?.label;
+      if (cpName) {
+        try {
+          const matches = await listBrands({ q: cpName, limit: 50 });
+          const cpNameLower = cpName.toLowerCase();
+          let brand = matches.find(
+            (b) => b.canonical_name.toLowerCase() === cpNameLower,
+          );
+          if (!brand) {
+            brand = await createBrand({
+              canonical_name: cpName,
+              category_hint: null,
+            });
+          }
+          resolvedBrandId = brand.id;
+        } catch (err) {
+          // Non-fatal — fall back to legacy counterparty path. Toast at
+          // higher severity if Brand creation actually 4xx'd.
+          console.error('Brand resolve failed', err);
+        }
+      }
+    }
+
     // Two cases: (a) some regular rows are checked → run bulk-apply for them;
     // (b) only non-regular rows visible → they're already saved, just close.
     if (freshCheckedIds.length === 0) {
@@ -777,6 +815,17 @@ function ClusterModal({
       );
       return;
     }
+    // Brand-confirm BEFORE bulk-apply when a brand was resolved. This
+    // sets nd.counterparty_id + binds fingerprint + learns text-pattern.
+    // bulk-apply that follows only has to set category + operation_type.
+    if (resolvedBrandId !== null) {
+      await Promise.allSettled(
+        freshCheckedIds.map((rowId) =>
+          confirmRowBrand(rowId, resolvedBrandId!, null),
+        ),
+      );
+    }
+
     const updates: BulkClusterRowUpdate[] = freshCheckedIds.map((row_id) => {
       const rowFresh = freshRowsById.get(row_id) ?? rowsById.get(row_id);
       const rowNd = (rowFresh?.normalized_data ?? {}) as Record<string, unknown>;
@@ -788,7 +837,11 @@ function ClusterModal({
         row_id,
         operation_type: existingOp === 'refund' ? 'refund' : 'regular',
         category_id: perRowCat.get(row_id) ?? effectiveBulkCat ?? ndCat ?? null,
-        counterparty_id: bulkCounterpartyId,
+        // counterparty_id: when a brand was confirmed above it's already
+        // stamped via brand-confirm; passing it again would no-op but
+        // also overwrite if user later edited the per-row name. When no
+        // brand was resolved, fall back to legacy direct stamp.
+        counterparty_id: resolvedBrandId !== null ? null : bulkCounterpartyId,
       };
     });
     try {
@@ -808,6 +861,16 @@ function ClusterModal({
         cluster_type: card.clusterType,
         updates,
       });
+      // Cross-session brand sweep — picks up matching rows in OTHER active
+      // sessions (e.g. same merchant in two different bank statements).
+      // Best-effort, non-fatal.
+      if (resolvedBrandId !== null) {
+        try {
+          await applyBrandToSession(resolvedBrandId);
+        } catch (err) {
+          console.warn('cross-session brand sweep failed', err);
+        }
+      }
       toast.success(`Подтверждено ${resp.confirmed_count} строк`);
       invalidate();
       onClose();
@@ -924,7 +987,7 @@ function ClusterModal({
                   onChange={(id) => { setBulkCategoryId(id); setUserPickedBulkCategory(true); }}
                 />
               </ControlField>
-              <ControlField label="Контрагент (необязательно)">
+              <ControlField label="Бренд (необязательно)">
                 <CounterpartySelect
                   value={bulkCounterpartyId}
                   options={counterpartyOptions}
