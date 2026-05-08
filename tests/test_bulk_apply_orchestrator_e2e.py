@@ -204,11 +204,19 @@ def _build_request(
 def test_bulk_apply_binds_each_unique_fingerprint_in_cluster(
     db, user, counterparty, grocery_category
 ):
-    """T1+T2: четыре рои — три одинаковых skeleton ("Пятёрочка ул.Ленина 5") +
-    один уникальный ("Пятёрочка ул.Тверская 12"). Bulk-apply на трёх
-    одинаковых должен создать ОДИН fingerprint binding (один уникальный fp
-    в кластере), а не три. Identifier binding не появляется (нет phone/
-    contract в описании)."""
+    """T1+T2: four rows — three identical skeleton ("Пятёрочка ул.Ленина 5") +
+    one unique ("Пятёрочка ул.Тверская 12"). Bulk-apply on the three
+    identical rows must create ONE fingerprint binding (one unique fp in
+    the cluster), not three.
+
+    Phase C step 4: bindings live in `brand_fingerprints` only. Asserts
+    both: legacy `counterparty_fingerprints` is NOT written (write side
+    closed) AND `brand_fingerprints` carries the binding to the brand
+    derived from the legacy counterparty_id input.
+    """
+    from app.models.brand_fingerprint import BrandFingerprint
+    from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
+
     session = _make_session(db, user, account_id=1)
 
     pyat_a1 = _make_row(db, session, row_index=0,
@@ -226,9 +234,9 @@ def test_bulk_apply_binds_each_unique_fingerprint_in_cluster(
     assert pyat_a1.normalized_data_json["fingerprint"] == \
            pyat_a2.normalized_data_json["fingerprint"] == \
            pyat_a3.normalized_data_json["fingerprint"], (
-        "Три одинаковых описания должны иметь одинаковый fingerprint"
+        "Three identical descriptions must share one fingerprint"
     )
-    assert fp_a != fp_b, "Разные skeleton → разные fingerprint"
+    assert fp_a != fp_b, "Different skeletons → different fingerprints"
 
     request = _build_request(
         cluster_key=fp_a, cluster_type="fingerprint",
@@ -243,26 +251,48 @@ def test_bulk_apply_binds_each_unique_fingerprint_in_cluster(
     assert result["confirmed_count"] == 3
     assert result["skipped_row_ids"] == []
     assert result["rules_affected"] == 1, (
-        "Один уникальный fingerprint в кластере → одно правило"
+        "One unique fingerprint in cluster → one rule"
     )
 
-    # Биндинг создан для fp_a, но не для fp_b (его в кластере не было).
-    bindings = (
+    expected_brand_id = resolve_brand_id_for_counterparty(
+        db, user_id=user.id, counterparty_id=counterparty.id,
+    )
+    assert expected_brand_id is not None
+
+    # Negative: counterparty_fingerprints is no longer written by bulk-apply.
+    cp_bindings = (
         db.query(CounterpartyFingerprint)
         .filter(CounterpartyFingerprint.user_id == user.id)
         .all()
     )
-    assert len(bindings) == 1
-    assert bindings[0].fingerprint == fp_a
-    assert bindings[0].counterparty_id == counterparty.id
+    assert cp_bindings == []
+
+    # Positive: brand_fingerprints carries the unique-fp binding to the
+    # resolved brand. fp_b (not in the cluster) stays unbound.
+    brand_bindings = (
+        db.query(BrandFingerprint)
+        .filter(BrandFingerprint.user_id == user.id)
+        .all()
+    )
+    assert len(brand_bindings) == 1
+    assert brand_bindings[0].fingerprint == fp_a
+    assert brand_bindings[0].brand_id == expected_brand_id
 
 
 def test_bulk_apply_creates_identifier_binding_for_phone(
     db, user, counterparty, grocery_category
 ):
-    """T1: для строки с телефоном создаётся cross-account binding в
-    `counterparty_identifiers`. Это обеспечивает резолв counterparty
-    при импорте с другого аккаунта/банка."""
+    """T1: a row with a phone token must create a cross-account binding so
+    the same recipient resolves when the user later imports from a
+    different account/bank.
+
+    Phase C step 4: bindings live in `brand_identifiers` only. Asserts
+    both: legacy `counterparty_identifiers` is NOT written AND
+    `brand_identifiers` carries the binding to the resolved brand.
+    """
+    from app.models.brand_identifier import BrandIdentifier
+    from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
+
     session = _make_session(db, user, account_id=1)
 
     row = _make_row(
@@ -277,22 +307,36 @@ def test_bulk_apply_creates_identifier_binding_for_phone(
         cluster_key=row.normalized_data_json["fingerprint"],
         rows=[row],
         counterparty_id=counterparty.id,
-        category_id=None,  # transfer-row не нуждается в категории
+        category_id=None,  # transfer row needs no category
         operation_type="transfer",
     )
     ImportService(db).bulk_apply_cluster(
         user_id=user.id, session_id=session.id, payload=request,
     )
 
-    id_bindings = (
+    expected_brand_id = resolve_brand_id_for_counterparty(
+        db, user_id=user.id, counterparty_id=counterparty.id,
+    )
+    assert expected_brand_id is not None
+
+    # Negative: counterparty_identifiers is no longer written.
+    cp_id_bindings = (
         db.query(CounterpartyIdentifier)
         .filter(CounterpartyIdentifier.user_id == user.id)
         .all()
     )
-    assert len(id_bindings) == 1
-    assert id_bindings[0].identifier_kind == "phone"
-    assert id_bindings[0].identifier_value == "+79161234567"
-    assert id_bindings[0].counterparty_id == counterparty.id
+    assert cp_id_bindings == []
+
+    # Positive: brand_identifiers holds the cross-account binding.
+    brand_id_bindings = (
+        db.query(BrandIdentifier)
+        .filter(BrandIdentifier.user_id == user.id)
+        .all()
+    )
+    assert len(brand_id_bindings) == 1
+    assert brand_id_bindings[0].identifier_kind == "phone"
+    assert brand_id_bindings[0].identifier_value == "+79161234567"
+    assert brand_id_bindings[0].brand_id == expected_brand_id
 
 
 def test_bulk_apply_creates_rule_with_full_confirms_delta(
@@ -335,12 +379,21 @@ def test_bulk_apply_creates_rule_with_full_confirms_delta(
 # ---------------------------------------------------------------------------
 
 
-def test_reimport_resolves_counterparty_from_first_session_binding(
+def test_reimport_resolves_brand_from_first_session_binding(
     db, user, counterparty, grocery_category
 ):
-    """T3: после bulk-apply на сессии A, при импорте сессии B с тем же
-    мерчантом `CounterpartyFingerprintService.resolve_many` возвращает тот
-    же counterparty_id. Никаких дублей counterparty не создаётся."""
+    """T3: after bulk-apply on session A, importing session B with the same
+    merchant must resolve to the same Brand via `BrandFingerprintService`.
+
+    Phase C step 4: was `test_reimport_resolves_counterparty_from_first_session_binding`.
+    The reimport-resolution invariant moved from CP-fp store to brand-fp
+    store. Asserts both: legacy cp_fp_service.resolve_many returns empty
+    (no CP-side write happened) AND brand_fp_service.resolve_many
+    returns the brand resolved from the input counterparty.
+    """
+    from app.services.brand_fingerprint_service import BrandFingerprintService
+    from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
+
     session_a = _make_session(db, user, account_id=1)
     rows_a = [
         _make_row(db, session_a, row_index=i,
@@ -358,20 +411,30 @@ def test_reimport_resolves_counterparty_from_first_session_binding(
         user_id=user.id, session_id=session_a.id, payload=request,
     )
 
-    # Сессия B с тем же мерчантом, тот же account → тот же fingerprint.
+    expected_brand_id = resolve_brand_id_for_counterparty(
+        db, user_id=user.id, counterparty_id=counterparty.id,
+    )
+    assert expected_brand_id is not None
+
+    # Session B with the same merchant — same account → same fingerprint.
     session_b = _make_session(db, user, account_id=1)
     row_b = _make_row(db, session_b, row_index=0,
                       description="Пятёрочка ул.Ленина 5")
     assert row_b.normalized_data_json["fingerprint"] == fp
 
-    fp_service = CounterpartyFingerprintService(db)
-    resolved = fp_service.resolve_many(user_id=user.id, fingerprints=[fp])
-    assert resolved == {fp: counterparty.id}, (
-        "Повторный импорт того же мерчанта обязан резолвиться в counterparty "
-        "из первой сессии"
-    )
+    # Negative: legacy CP-fp service no longer holds the binding.
+    cp_fp_service = CounterpartyFingerprintService(db)
+    cp_resolved = cp_fp_service.resolve_many(user_id=user.id, fingerprints=[fp])
+    assert cp_resolved == {}
 
-    # Counterparty не задублировался.
+    # Positive: brand-fp service resolves the same fingerprint to the brand.
+    brand_fp_service = BrandFingerprintService(db)
+    brand_resolved = brand_fp_service.resolve_many(
+        user_id=user.id, fingerprints=[fp],
+    )
+    assert brand_resolved == {fp: expected_brand_id}
+
+    # Counterparty table unchanged — only the original fixture row.
     cps = db.query(Counterparty).filter(Counterparty.user_id == user.id).all()
     assert len(cps) == 1
 
@@ -399,7 +462,7 @@ def test_identifier_binding_resolves_across_accounts(
         user_id=user.id, session_id=session_a.id, payload=request,
     )
 
-    # Другой аккаунт → fingerprint точно другой; но identifier_value тот же.
+    # Different account → different fingerprint; identifier_value is the same.
     session_b = _make_session(db, user, account_id=2)
     row_b = _make_row(
         db, session_b, row_index=0,
@@ -408,14 +471,32 @@ def test_identifier_binding_resolves_across_accounts(
     )
     assert row_b.normalized_data_json["fingerprint"] != \
            row_a.normalized_data_json["fingerprint"], (
-        "Разные account_id обязаны дать разные fingerprint"
+        "Different account_id must produce different fingerprints"
     )
 
-    id_service = CounterpartyIdentifierService(db)
-    resolved = id_service.resolve_many(
+    # Phase C step 4: was `assert resolved == {("phone", ...): cp.id}`
+    # via CounterpartyIdentifierService. The identifier-binding store is
+    # now `brand_identifiers`. Asserts both: legacy CP-id store empty
+    # AND brand-id store carries the cross-account binding.
+    from app.services.brand_identifier_service import BrandIdentifierService
+    from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
+
+    expected_brand_id = resolve_brand_id_for_counterparty(
+        db, user_id=user.id, counterparty_id=counterparty.id,
+    )
+    assert expected_brand_id is not None
+
+    cp_id_service = CounterpartyIdentifierService(db)
+    cp_resolved = cp_id_service.resolve_many(
         user_id=user.id, pairs=[("phone", "+79161234567")],
     )
-    assert resolved == {("phone", "+79161234567"): counterparty.id}
+    assert cp_resolved == {}
+
+    brand_id_service = BrandIdentifierService(db)
+    brand_resolved = brand_id_service.resolve_many(
+        user_id=user.id, pairs=[("phone", "+79161234567")],
+    )
+    assert brand_resolved == {("phone", "+79161234567"): expected_brand_id}
 
 
 # ---------------------------------------------------------------------------
@@ -492,14 +573,37 @@ def test_bulk_apply_skips_already_committed_rows(
 # ---------------------------------------------------------------------------
 
 
-def test_refund_cluster_overrides_inherit_counterparty_and_category(
+def test_refund_cluster_overrides_inherit_brand_and_category(
     db, user, regular_account, counterparty, grocery_category
 ):
-    """T5: если в истории пользователя есть expense-транзакции в категорию
-    'Продукты' с counterparty 'Пятёрочка', то refund-кластер с тем же
-    brand'ом получает counterparty_id и category_id из истории через
-    `apply_refund_cluster_overrides`."""
-    # Сидируем историю: 3 expense-покупки KOFEMOLOKO в категории Продукты.
+    """T5: when the user's history has expense transactions to «Продукты»
+    for a given merchant, a refund cluster matching the same brand
+    inherits brand_id + category_id from history via
+    `apply_refund_cluster_overrides`.
+
+    Phase C step 4: was `test_refund_cluster_overrides_inherit_counterparty_and_category`.
+    The refund-history JOIN now keys on Transaction.brand_id ↔
+    Brand.canonical_name. Asserts both: legacy nd.counterparty_id is
+    NOT stamped AND nd.brand_id mirrors the brand resolved from history.
+    """
+    from app.models.brand import Brand
+    from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
+
+    # Seed a Brand with canonical_name matching the refund_brand token so
+    # the description-LIKE filter hits and the JOIN groups everything.
+    brand = Brand(
+        slug=f"kofemoloko_u{user.id}",
+        canonical_name="KOFEMOLOKO",
+        is_global=False,
+        created_by_user_id=user.id,
+    )
+    db.add(brand)
+    db.commit()
+    db.refresh(brand)
+
+    # Seed history: 3 KOFEMOLOKO purchases in «Продукты». Both brand_id
+    # and counterparty_id populated to mirror what the dual-write era
+    # (Steps 2-3) produced.
     for i in range(3):
         tx = Transaction(
             user_id=user.id,
@@ -509,6 +613,7 @@ def test_refund_cluster_overrides_inherit_counterparty_and_category(
             amount=Decimal("500.00"),
             currency="RUB",
             counterparty_id=counterparty.id,
+            brand_id=brand.id,
             category_id=grocery_category.id,
             description=f"KOFEMOLOKO покупка {i}",
             normalized_description="kofemoloko",
@@ -517,7 +622,7 @@ def test_refund_cluster_overrides_inherit_counterparty_and_category(
         db.add(tx)
     db.commit()
 
-    # Сессия с refund-кластером того же brand.
+    # Refund cluster of the same brand.
     session = _make_session(db, user, account_id=regular_account.id)
     refund_row = _make_row(
         db, session, row_index=0,
@@ -538,11 +643,13 @@ def test_refund_cluster_overrides_inherit_counterparty_and_category(
     assert nd.get("type") == "income"
     assert nd.get("direction") == "income"
     assert nd.get("category_id") == grocery_category.id, (
-        "refund-кластер должен унаследовать категорию покупки того же brand'а"
+        "refund cluster must inherit category from the same-brand purchase history"
     )
-    assert nd.get("counterparty_id") == counterparty.id, (
-        "и counterparty с purchase-стороны того же brand'а"
-    )
+    # Negative: counterparty_id is no longer stamped on refund rows.
+    assert nd.get("counterparty_id") in (None, "", 0)
+    # Positive: brand_id IS the inherited merchant key, matching the
+    # brand discovered by the refund-history JOIN.
+    assert nd.get("brand_id") == brand.id
 
 
 def test_refund_cluster_without_purchase_history_does_not_inherit(

@@ -165,13 +165,14 @@ def _make_svc_with_rows(row_objects: list) -> ImportClusterService:
     )
     svc.global_patterns = MagicMock()
     svc.global_patterns.get_matching_pattern.return_value = None
-    svc.counterparty_fp_service = MagicMock()
-    svc.counterparty_fp_service.resolve_many.return_value = {}
-    # `counterparty_id_service` is consumed by `_group_by_counterparty` (called
-    # from build_bulk_clusters once it has live clusters). Without this mock
-    # the path raises AttributeError before any of our assertions run.
-    svc.counterparty_id_service = MagicMock()
-    svc.counterparty_id_service.resolve_many.return_value = {}
+    # Phase C step 4: legacy `counterparty_fp_service` / `counterparty_id_service`
+    # were replaced with the brand-side equivalents on the constructor.
+    # `_group_by_brand_binding` (called from build_bulk_clusters) reads from
+    # both, so each needs a mock returning an empty resolve.
+    svc.brand_fp_service = MagicMock()
+    svc.brand_fp_service.resolve_many.return_value = {}
+    svc.brand_id_service = MagicMock()
+    svc.brand_id_service.resolve_many.return_value = {}
     return svc
 
 

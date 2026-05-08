@@ -113,7 +113,8 @@ class ImportRowEditor:
 
         for field in (
             "account_id", "target_account_id", "credit_account_id", "category_id",
-            "counterparty_id", "debt_partner_id", "amount", "type", "operation_type",
+            "counterparty_id", "brand_id", "debt_partner_id", "amount",
+            "type", "operation_type",
             "debt_direction", "description", "currency",
             "credit_principal_amount", "credit_interest_amount",
         ):

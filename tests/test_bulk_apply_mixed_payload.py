@@ -107,9 +107,18 @@ def _category(db, user, name, kind="expense", priority="expense_secondary"):
 # ---------------------------------------------------------------------------
 
 
-def test_bulk_apply_sets_category_and_counterparty_on_every_row(
+def test_bulk_apply_sets_category_and_brand_on_every_row(
     db, user, counterparty
 ):
+    """Phase C step 4: was `test_bulk_apply_sets_category_and_counterparty_on_every_row`.
+
+    Bulk-apply now writes brand_id only — counterparty_id input is
+    accepted as a legacy hint and resolved to brand via the link
+    helper for one release cycle. Asserts both: legacy CP stamp NOT
+    written and brand_id stamp present.
+    """
+    from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
+
     cat = _category(db, user, "Маркетплейсы")
     session = _make_session(db, user)
     rows = [
@@ -133,12 +142,20 @@ def test_bulk_apply_sets_category_and_counterparty_on_every_row(
         user_id=user.id, session_id=session.id, payload=request,
     )
 
+    expected_brand_id = resolve_brand_id_for_counterparty(
+        db, user_id=user.id, counterparty_id=counterparty.id,
+    )
+    assert expected_brand_id is not None
+
     for r in rows:
         db.refresh(r)
         nd = r.normalized_data_json or {}
         assert nd.get("category_id") == cat.id
-        assert nd.get("counterparty_id") == counterparty.id
         assert nd.get("operation_type") == "regular"
+        # Negative: nd.counterparty_id is no longer stamped by bulk-apply.
+        assert nd.get("counterparty_id") is None
+        # Positive: brand binding is the new merchant key.
+        assert nd.get("brand_id") == expected_brand_id
 
 
 # ---------------------------------------------------------------------------

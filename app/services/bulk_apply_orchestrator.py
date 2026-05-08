@@ -100,12 +100,24 @@ class BulkApplyOrchestrator:
                 skipped.append(row_id)
                 continue
 
-            # Phase C step 4: brand_id is the merchant binding key.
-            # update.counterparty_id stays None for the new frontend
-            # (cluster-grid passes null after Step 3); when an
-            # external caller still sends it we silently ignore it
-            # rather than write to the dead store.
+            # Phase C step 4: brand_id is the merchant binding key. Two
+            # input shapes accepted:
+            #   • update.brand_id direct (post-Step-3 frontend);
+            #   • update.counterparty_id legacy — resolved to a brand
+            #     via the deterministic helper for one release cycle.
+            # Resolved here so nd.brand_id is stamped by `update_row`
+            # downstream; the binding accumulator below reuses the
+            # same value.
             update_brand_id = getattr(update, "brand_id", None)
+            if update_brand_id in (None, "", 0):
+                legacy_cp_id = getattr(update, "counterparty_id", None)
+                if legacy_cp_id not in (None, "", 0):
+                    update_brand_id = resolve_brand_id_for_counterparty(
+                        self.db,
+                        user_id=user_id,
+                        counterparty_id=int(legacy_cp_id),
+                    )
+
             row_payload = ImportRowUpdateRequest(
                 operation_type=update.operation_type,
                 category_id=update.category_id,
@@ -165,20 +177,10 @@ class BulkApplyOrchestrator:
                     "original_description": original_desc,
                 })
 
-            # Resolve the brand binding for this row. Step 4 accepts:
-            #   • update.brand_id direct (post-Step-3 frontend);
-            #   • update.counterparty_id legacy (out-of-tree caller) —
-            #     resolved to a brand via the deterministic helper for
-            #     one release cycle, then dropped in step 5.
-            row_brand_id: int | None = None
-            if update_brand_id not in (None, "", 0):
-                row_brand_id = int(update_brand_id)
-            elif getattr(update, "counterparty_id", None) not in (None, "", 0):
-                row_brand_id = resolve_brand_id_for_counterparty(
-                    self.db,
-                    user_id=user_id,
-                    counterparty_id=int(update.counterparty_id),
-                )
+            # Resolved above when building row_payload — re-use it.
+            row_brand_id = (
+                int(update_brand_id) if update_brand_id not in (None, "", 0) else None
+            )
 
             # Phase C step 4: fingerprint → Brand binding. Every fingerprint
             # in the cluster gets bound so future imports of ANY skeleton

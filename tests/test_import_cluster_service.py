@@ -456,45 +456,54 @@ class TestRefundClusters:
         rows = [_row(1, "fp-r", direction="income", skeleton="отмена оплаты kofemoloko",
                      is_refund=True, refund_brand="kofemoloko")]
         svc = _make_svc(rows)
-        svc._resolve_refund_counterparty = MagicMock(return_value=(None, None, None))
+        # Phase C step 4: was `_resolve_refund_counterparty`, returning
+        # (cp_id, cp_name, cat_id). Now `_resolve_refund_brand`,
+        # returning (brand_id, brand_name, cat_id).
+        svc._resolve_refund_brand = MagicMock(return_value=(None, None, None))
         clusters = svc.build_clusters(_session())
         assert len(clusters) == 1
         c = clusters[0]
         assert c.is_refund is True
         assert c.refund_brand == "kofemoloko"
-        # No purchase history → counterparty/category stay empty, confidence
+        # No purchase history → brand/category stay empty, confidence
         # should NOT be elevated to 0.95.
-        assert c.refund_resolved_counterparty_id is None
+        assert c.refund_resolved_brand_id is None
+        assert c.refund_resolved_counterparty_id is None  # legacy mirror
         assert c.candidate_category_id is None
         assert c.confidence < 0.95
 
     def test_refund_inherits_category_from_history(self):
-        # Refund cluster with known brand + purchase history at that brand →
-        # counterparty + category inherited, confidence lifted to ≥ 0.95 so
-        # the cluster lands in green zone.
+        """Phase C step 4: refund-history JOIN flipped from Counterparty
+        to Brand. Asserts the resolved fields land on
+        `refund_resolved_brand_*`; legacy CP mirror stays None."""
         rows = [_row(1, "fp-r", direction="income", skeleton="возврат ozon",
                      is_refund=True, refund_brand="ozon")]
         svc = _make_svc(rows)
-        svc._resolve_refund_counterparty = MagicMock(return_value=(42, "OZON", 7))
+        svc._resolve_refund_brand = MagicMock(return_value=(42, "OZON", 7))
         clusters = svc.build_clusters(_session())
         assert len(clusters) == 1
         c = clusters[0]
         assert c.is_refund is True
-        assert c.refund_resolved_counterparty_id == 42
-        assert c.refund_resolved_counterparty_name == "OZON"
+        # Negative: legacy CP-keyed mirror is always None after step 4.
+        assert c.refund_resolved_counterparty_id is None
+        assert c.refund_resolved_counterparty_name is None
+        # Positive: brand-keyed fields are the source of truth.
+        assert c.refund_resolved_brand_id == 42
+        assert c.refund_resolved_brand_name == "OZON"
         assert c.candidate_category_id == 7
         assert c.confidence >= 0.95
 
     def test_non_refund_cluster_untouched_by_override(self):
         # A regular expense cluster must not trigger the refund lookup even
-        # if `_resolve_refund_counterparty` is present on the service.
+        # if `_resolve_refund_brand` is present on the service.
         rows = [_row(1, "fp-p", direction="expense", skeleton="магазин pyaterochka",
                      is_refund=False, refund_brand=None)]
         svc = _make_svc(rows)
-        svc._resolve_refund_counterparty = MagicMock(return_value=(42, "OZON", 7))
+        svc._resolve_refund_brand = MagicMock(return_value=(42, "OZON", 7))
         clusters = svc.build_clusters(_session())
-        svc._resolve_refund_counterparty.assert_not_called()
+        svc._resolve_refund_brand.assert_not_called()
         assert clusters[0].is_refund is False
+        assert clusters[0].refund_resolved_brand_id is None
         assert clusters[0].refund_resolved_counterparty_id is None
 
     def test_bucket_flag_set_from_any_row(self):
@@ -508,7 +517,10 @@ class TestRefundClusters:
                  is_refund=False, refund_brand=None),
         ]
         svc = _make_svc(rows)
-        svc._resolve_refund_counterparty = MagicMock(return_value=(None, None, None))
+        # Phase C step 4: was `_resolve_refund_counterparty`, returning
+        # (cp_id, cp_name, cat_id). Now `_resolve_refund_brand`,
+        # returning (brand_id, brand_name, cat_id).
+        svc._resolve_refund_brand = MagicMock(return_value=(None, None, None))
         clusters = svc.build_clusters(_session())
         assert len(clusters) == 1
         assert clusters[0].is_refund is True
@@ -523,7 +535,10 @@ class TestRefundClusters:
                      skeleton="отмена операции оплаты kofemoloko volgodonsk rus",
                      is_refund=False, refund_brand=None)]
         svc = _make_svc(rows)
-        svc._resolve_refund_counterparty = MagicMock(return_value=(None, None, None))
+        # Phase C step 4: was `_resolve_refund_counterparty`, returning
+        # (cp_id, cp_name, cat_id). Now `_resolve_refund_brand`,
+        # returning (brand_id, brand_name, cat_id).
+        svc._resolve_refund_brand = MagicMock(return_value=(None, None, None))
         clusters = svc.build_clusters(_session())
         assert len(clusters) == 1
         assert clusters[0].is_refund is True
@@ -540,13 +555,22 @@ class TestRefundClusters:
         rows[0].normalized_data["operation_type"] = "refund"
         rows[0].normalized_data_json = rows[0].normalized_data
         svc = _make_svc(rows)
-        svc._resolve_refund_counterparty = MagicMock(return_value=(None, None, None))
+        # Phase C step 4: was `_resolve_refund_counterparty`, returning
+        # (cp_id, cp_name, cat_id). Now `_resolve_refund_brand`,
+        # returning (brand_id, brand_name, cat_id).
+        svc._resolve_refund_brand = MagicMock(return_value=(None, None, None))
         clusters = svc.build_clusters(_session())
         assert clusters[0].is_refund is True
 
 
 class TestCounterpartyRefundMerge:
-    """_group_by_counterparty folds refund income groups into expense."""
+    """Phase C step 4: was `_group_by_counterparty`, now `_group_by_brand_binding`.
+    All these tests previously asserted `g.counterparty_id` / `g.counterparty_name`;
+    after the read-flip the same fold semantics live on `BrandGroup`
+    keyed by `brand_id` / `brand_name`. The mocks were rewritten to
+    target the brand-side services + Brand row lookup. The legacy class
+    name is preserved so blame history connects the two contracts.
+    """
 
     def _mk_cluster(self, *, fp: str, direction: str, is_refund: bool, count: int, amount: str) -> Cluster:
         return Cluster(
@@ -567,32 +591,46 @@ class TestCounterpartyRefundMerge:
             is_refund=is_refund,
         )
 
-    def _mk_service(self, *, cp_id: int, cp_name: str, bindings: dict[str, int]) -> ImportClusterService:
+    def _mk_service(self, *, brand_id: int, brand_name: str, bindings: dict[str, int]) -> ImportClusterService:
+        from app.models.brand import Brand
+        from app.models.user_brand_display_name import UserBrandDisplayName
+
         svc = object.__new__(ImportClusterService)
+        # `db.query(<model>)` returns a fluent chain; the production code
+        # calls `.query(Brand).filter(...).all()` AND
+        # `.query(UserBrandDisplayName).filter(...).all()`. Route those
+        # two via a side-effect dispatch so the same mock can answer both.
+        brand_row = SimpleNamespace(
+            id=brand_id, canonical_name=brand_name, is_global=False,
+            created_by_user_id=1,
+        )
+
+        def _query(model):
+            chain = MagicMock()
+            if model is Brand:
+                chain.filter.return_value.all.return_value = [brand_row]
+            elif model is UserBrandDisplayName:
+                chain.filter.return_value.all.return_value = []
+            else:
+                chain.filter.return_value.all.return_value = []
+            return chain
+
         svc.db = MagicMock()
-        # Counterparty row lookup
-        cp_row = SimpleNamespace(id=cp_id, name=cp_name, user_id=1)
-        svc.db.query.return_value.filter.return_value.all.return_value = [cp_row]
-        # counterparty_fp_service.resolve_many returns the bindings as-is.
-        svc.counterparty_fp_service = MagicMock()
-        svc.counterparty_fp_service.resolve_many.return_value = bindings
-        # counterparty_id_service is also queried in _group_by_counterparty
-        # for identifier-based bindings (phone/contract/IBAN). These tests
-        # work with fingerprint-only bindings, so an empty resolver suffices.
-        svc.counterparty_id_service = MagicMock()
-        svc.counterparty_id_service.resolve_many.return_value = {}
+        svc.db.query.side_effect = _query
+        # brand_fp_service.resolve_many returns the bindings as-is.
+        svc.brand_fp_service = MagicMock()
+        svc.brand_fp_service.resolve_many.return_value = bindings
+        # brand_id_service is also queried for identifier-based bindings
+        # (phone/contract/IBAN). These tests use fingerprint-only bindings.
+        svc.brand_id_service = MagicMock()
+        svc.brand_id_service.resolve_many.return_value = {}
         return svc
 
     def test_refund_income_folds_into_expense_card(self):
         # 64 expense operations + 1 refund income operation, both bound to
-        # the same counterparty. Expected: ONE counterparty group with
-        # count=65, direction='expense', total_amount = gross - refund.
-        # NOTE post-rewrite: this still works, but no longer via a refund-
-        # specific path — a counterparty card unconditionally collects all
-        # bindings of any direction (one card per counterparty). Refund-
-        # income just happens to be income whose `direction` is income but
-        # which lands in the same bucket as the matching expense.
-        cp_id = 23
+        # the same brand. Expected: ONE BrandGroup with count=65,
+        # direction='expense', total_amount = gross - refund.
+        brand_id = 23
         expense_fp = "ee184aa77eb46323"
         refund_fp = "f1782a30fff516de"
         expense_cluster = self._mk_cluster(
@@ -603,16 +641,20 @@ class TestCounterpartyRefundMerge:
             fp=refund_fp, direction="income", is_refund=True,
             count=1, amount="700",
         )
-        bindings = {expense_fp: cp_id, refund_fp: cp_id}
-        svc = self._mk_service(cp_id=cp_id, cp_name="Кофе Молоко", bindings=bindings)
+        bindings = {expense_fp: brand_id, refund_fp: brand_id}
+        svc = self._mk_service(
+            brand_id=brand_id, brand_name="Кофе Молоко", bindings=bindings,
+        )
 
-        groups = svc._group_by_counterparty(
+        groups = svc._group_by_brand_binding(
             [expense_cluster, refund_cluster], user_id=1,
         )
 
         assert len(groups) == 1
         g = groups[0]
-        assert g.counterparty_id == cp_id
+        # New brand-keyed fields:
+        assert g.brand_id == brand_id
+        assert g.brand_name == "Кофе Молоко"
         assert g.direction == "expense"  # dominant by count
         assert g.is_mixed_direction is True
         assert g.count == 65
@@ -620,31 +662,32 @@ class TestCounterpartyRefundMerge:
         assert set(g.fingerprint_cluster_ids) == {expense_fp, refund_fp}
 
     def test_refund_without_matching_expense_stays_standalone(self):
-        # Refund income group but no expense group for the same counterparty.
+        # Refund income group but no expense group for the same brand.
         # Single-direction → not mixed, direction stays income.
-        cp_id = 99
+        brand_id = 99
         refund_fp = "orphan-refund"
         refund_cluster = self._mk_cluster(
             fp=refund_fp, direction="income", is_refund=True,
             count=1, amount="500",
         )
-        bindings = {refund_fp: cp_id}
-        svc = self._mk_service(cp_id=cp_id, cp_name="Новый контрагент", bindings=bindings)
+        bindings = {refund_fp: brand_id}
+        svc = self._mk_service(
+            brand_id=brand_id, brand_name="Новый бренд", bindings=bindings,
+        )
 
-        groups = svc._group_by_counterparty([refund_cluster], user_id=1)
+        groups = svc._group_by_brand_binding([refund_cluster], user_id=1)
 
         assert len(groups) == 1
         assert groups[0].direction == "income"
         assert groups[0].count == 1
         assert groups[0].is_mixed_direction is False
+        assert groups[0].brand_id == brand_id
 
     def test_regular_income_merged_with_expense_into_one_card(self):
-        # Post-rewrite (spec v1.4 §6.3): a counterparty card is direction-
+        # Post-rewrite (spec v1.4 §6.3): a brand card is direction-
         # agnostic. Same person sending you money AND receiving money from
-        # you is one «Отец» card with both sides folded in — splitting them
-        # by direction was misleading because there's only one human, one
-        # relationship.
-        cp_id = 77
+        # you is one «Отец» card with both sides folded in.
+        brand_id = 77
         expense_fp = "e-fp"
         income_fp = "i-fp"
         expense_cluster = self._mk_cluster(
@@ -655,30 +698,29 @@ class TestCounterpartyRefundMerge:
             fp=income_fp, direction="income", is_refund=False,
             count=2, amount="50000",
         )
-        bindings = {expense_fp: cp_id, income_fp: cp_id}
-        svc = self._mk_service(cp_id=cp_id, cp_name="Отец", bindings=bindings)
+        bindings = {expense_fp: brand_id, income_fp: brand_id}
+        svc = self._mk_service(
+            brand_id=brand_id, brand_name="Отец", bindings=bindings,
+        )
 
-        groups = svc._group_by_counterparty(
+        groups = svc._group_by_brand_binding(
             [expense_cluster, income_cluster], user_id=1,
         )
 
         assert len(groups) == 1
         g = groups[0]
-        assert g.counterparty_id == cp_id
+        assert g.brand_id == brand_id
         # Dominant by count is expense (5 > 2).
         assert g.direction == "expense"
         assert g.is_mixed_direction is True
         assert g.count == 7
-        # Display total = expense_sum - income_sum = 1000 - 50000 = -49000
-        # Negative net is OK — UI renders signed value with «доход/расход»
-        # context informed by is_mixed_direction.
+        # Display total = expense_sum - income_sum = 1000 - 50000 = -49000.
         assert g.total_amount == Decimal("-49000")
         assert set(g.fingerprint_cluster_ids) == {expense_fp, income_fp}
 
     def test_mixed_direction_dominant_income_uses_income_label(self):
-        # Same merge rule but with income members dominant by count: the
-        # card's display direction follows dominance, not insertion order.
-        cp_id = 88
+        # Same merge rule but with income members dominant by count.
+        brand_id = 88
         expense_fp = "e-fp-2"
         income_fp = "i-fp-2"
         expense_cluster = self._mk_cluster(
@@ -689,10 +731,12 @@ class TestCounterpartyRefundMerge:
             fp=income_fp, direction="income", is_refund=False,
             count=8, amount="120000",
         )
-        bindings = {expense_fp: cp_id, income_fp: cp_id}
-        svc = self._mk_service(cp_id=cp_id, cp_name="Заказчик", bindings=bindings)
+        bindings = {expense_fp: brand_id, income_fp: brand_id}
+        svc = self._mk_service(
+            brand_id=brand_id, brand_name="Заказчик", bindings=bindings,
+        )
 
-        groups = svc._group_by_counterparty(
+        groups = svc._group_by_brand_binding(
             [expense_cluster, income_cluster], user_id=1,
         )
 
@@ -705,7 +749,7 @@ class TestCounterpartyRefundMerge:
 
     def test_pure_expense_card_is_not_marked_mixed(self):
         # No income members → not mixed, direction = expense.
-        cp_id = 55
+        brand_id = 55
         fp1 = "fp1"
         fp2 = "fp2"
         c1 = self._mk_cluster(
@@ -716,10 +760,12 @@ class TestCounterpartyRefundMerge:
             fp=fp2, direction="expense", is_refund=False,
             count=4, amount="200",
         )
-        bindings = {fp1: cp_id, fp2: cp_id}
-        svc = self._mk_service(cp_id=cp_id, cp_name="Магазин", bindings=bindings)
+        bindings = {fp1: brand_id, fp2: brand_id}
+        svc = self._mk_service(
+            brand_id=brand_id, brand_name="Магазин", bindings=bindings,
+        )
 
-        groups = svc._group_by_counterparty([c1, c2], user_id=1)
+        groups = svc._group_by_brand_binding([c1, c2], user_id=1)
 
         assert len(groups) == 1
         assert groups[0].direction == "expense"

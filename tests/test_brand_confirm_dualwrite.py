@@ -1,18 +1,17 @@
-"""Phase C step 2 contract: brand confirm dual-writes both stores.
+"""Phase C step 4 contract: brand confirm writes Brand only.
 
-The Phase C invariant we're protecting: every brand confirm leaves the
-counterparty side AND the brand side in sync. If only one is written,
-the next moderator action that reads the other store sees stale data
-and the same drift bug Phase C is supposed to fix returns.
+This file was originally Step 2's dual-write contract suite (CP shadow
+created alongside Brand). Step 4 closed the CP write side, so the
+original assertions were flipped + paired with positive brand-side
+assertions to preserve coverage.
 
 Cases covered:
-  • confirm stamps `nd.brand_id` AND `nd.counterparty_id`
-  • confirm binds the fingerprint to BOTH `brand_fingerprints` and
-    `counterparty_fingerprints`
-  • confirm with UserBrandDisplayName uses the override label for the
-    Counterparty shadow row's name (so legacy lists still show «Пятёрочка
-    у дома», not «Пятёрочка»)
-  • confirm response carries `brand_display_name` field
+  • confirm stamps `nd.brand_id` and does NOT touch `nd.counterparty_id`
+  • confirm binds the fingerprint on `brand_fingerprints` only —
+    `counterparty_fingerprints` stays empty (write side closed)
+  • confirm with UserBrandDisplayName surfaces the override label in the
+    response, no Counterparty row materialised
+  • confirm response carries `brand_display_name` field unchanged
 """
 from __future__ import annotations
 
@@ -83,9 +82,11 @@ def _make_active_row(db, *, user_id, brand_id, fingerprint, skeleton):
     return sess, row
 
 
-def test_confirm_stamps_both_brand_and_counterparty_on_row(
-    db, user, global_brand,
-):
+def test_confirm_stamps_brand_only_on_row(db, user, global_brand):
+    """Phase C step 4: was `test_confirm_stamps_both_brand_and_counterparty_on_row`.
+    The CP-side dual-write closed in step 4 — confirm now stamps
+    nd.brand_id only and the response's counterparty_id is None.
+    """
     _, row = _make_active_row(
         db, user_id=user.id, brand_id=global_brand.id,
         fingerprint="fp_pyat_001", skeleton="pyat_skel",
@@ -97,16 +98,21 @@ def test_confirm_stamps_both_brand_and_counterparty_on_row(
 
     db.refresh(row)
     nd = row.normalized_data_json
+    # Positive: brand stamps present.
     assert nd["brand_id"] == global_brand.id
     assert nd["user_confirmed_brand_id"] == global_brand.id
-    assert nd["counterparty_id"] is not None
     assert result["brand_id"] == global_brand.id
-    assert result["counterparty_id"] == nd["counterparty_id"]
+    # Negative: nd.counterparty_id no longer stamped, response field is None.
+    assert "counterparty_id" not in nd
+    assert result["counterparty_id"] is None
 
 
-def test_confirm_binds_fingerprint_on_both_stores(
+def test_confirm_binds_fingerprint_on_brand_store_only(
     db, user, global_brand,
 ):
+    """Phase C step 4: was `test_confirm_binds_fingerprint_on_both_stores`.
+    The CP-fp write closed — `brand_fingerprints` is the sole store.
+    """
     _, row = _make_active_row(
         db, user_id=user.id, brand_id=global_brand.id,
         fingerprint="fp_dualwrite_002", skeleton="other_skel",
@@ -116,14 +122,18 @@ def test_confirm_binds_fingerprint_on_both_stores(
         user_id=user.id, row_id=row.id, brand_id=global_brand.id,
     )
 
+    # Positive: brand_fingerprints carries the binding.
     bf = (
         db.query(BrandFingerprint)
         .filter(
             BrandFingerprint.user_id == user.id,
             BrandFingerprint.fingerprint == "fp_dualwrite_002",
         )
-        .first()
+        .one()
     )
+    assert bf.brand_id == global_brand.id
+
+    # Negative: counterparty_fingerprints is no longer written.
     cp_fp = (
         db.query(CounterpartyFingerprint)
         .filter(
@@ -132,15 +142,18 @@ def test_confirm_binds_fingerprint_on_both_stores(
         )
         .first()
     )
-    assert bf is not None
-    assert bf.brand_id == global_brand.id
-    assert cp_fp is not None
-    assert cp_fp.counterparty_id is not None
+    assert cp_fp is None
 
 
-def test_confirm_uses_user_display_name_for_counterparty_shadow(
+def test_confirm_returns_user_display_name_without_counterparty_shadow(
     db, user, global_brand,
 ):
+    """Phase C step 4: was `test_confirm_uses_user_display_name_for_counterparty_shadow`.
+    The Counterparty shadow row is no longer created. The user's
+    display label still surfaces via the response's `brand_display_name`
+    field; clients that need to render the per-user label read it
+    directly instead of going through a CP join.
+    """
     db.add(UserBrandDisplayName(
         user_id=user.id, brand_id=global_brand.id,
         display_name="Пятёрочка у дома",
@@ -156,13 +169,15 @@ def test_confirm_uses_user_display_name_for_counterparty_shadow(
         user_id=user.id, row_id=row.id, brand_id=global_brand.id,
     )
 
-    cp = (
-        db.query(Counterparty)
-        .filter(Counterparty.id == result["counterparty_id"])
-        .one()
-    )
-    assert cp.name == "Пятёрочка у дома"
+    # Positive: display label flows through the response unchanged.
     assert result["brand_display_name"] == "Пятёрочка у дома"
+    # The legacy counterparty_name response field also mirrors the
+    # display label so older clients still render the user's label.
+    assert result["counterparty_name"] == "Пятёрочка у дома"
+
+    # Negative: no Counterparty row materialised for this user/brand.
+    cps = db.query(Counterparty).filter(Counterparty.user_id == user.id).all()
+    assert cps == []
 
 
 def test_confirm_falls_back_to_canonical_name_without_override(
