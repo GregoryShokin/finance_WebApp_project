@@ -512,17 +512,31 @@ class TransactionEnrichmentService:
                 if card_only:
                     all_credit_targets = card_only
 
-            # Prefer same-bank: extract first token from source name (e.g. "Озон Дебет" → "озон")
+            # Prefer same-bank: extract first token from source name (e.g. "Озон Дебет" → "озон").
+            # When the source has a recognizable bank prefix, ONLY same-bank
+            # credit accounts are valid auto-targets — «Погашение кредита по
+            # договору №X» from Ozon Дебет MUST resolve to an Ozon credit
+            # account (the contract is Ozon's), never to a credit card at
+            # an unrelated bank just because that's the only credit_card
+            # the user has. Cross-bank fallback was a v1.21 race bug:
+            # accounts created in any order, target enrichment ran before
+            # the same-bank credit account existed, T-Bank stamp stuck.
             source_account = next((a for a in accounts if a.id == source_account_id), None)
-            if source_account and all_credit_targets:
+            source_prefix: str | None = None
+            if source_account:
                 source_tokens = [t for t in (source_account.name or "").lower().split() if len(t) >= 3]
                 source_prefix = source_tokens[0] if source_tokens else None
-                if source_prefix:
-                    same_bank = [a for a in all_credit_targets if source_prefix in (a.name or "").lower()]
-                    if len(same_bank) == 1:
-                        return same_bank[0].id, 0.92, f"кредитный счёт того же банка ({source_prefix})"
-                    if len(same_bank) > 1:
-                        all_credit_targets = same_bank
+
+            if source_prefix and all_credit_targets:
+                same_bank = [a for a in all_credit_targets if source_prefix in (a.name or "").lower()]
+                if len(same_bank) == 1:
+                    return same_bank[0].id, 0.92, f"кредитный счёт того же банка ({source_prefix})"
+                if len(same_bank) > 1:
+                    all_credit_targets = same_bank
+                else:
+                    # No same-bank credit account → don't auto-stamp a
+                    # cross-bank target. User picks manually.
+                    all_credit_targets = []
 
             if len(all_credit_targets) == 1:
                 return all_credit_targets[0].id, 0.82, "единственный подходящий кредитный счёт"
