@@ -30,6 +30,9 @@ class TransactionCreateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    # Phase C dual-write: clients can submit brand_id directly. When omitted
+    # and counterparty_id is set, the service derives brand_id automatically.
+    brand_id: int | None = None
     debt_partner_id: int | None = None
     goal_id: int | None = None
     amount: Decimal = Field(gt=0)
@@ -64,6 +67,7 @@ class TransactionUpdateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    brand_id: int | None = None
     debt_partner_id: int | None = None
     goal_id: int | None = None
     amount: Decimal | None = Field(default=None, gt=0)
@@ -117,6 +121,7 @@ class TransactionResponse(BaseModel):
     goal_id: int | None = None
     category_id: int | None
     counterparty_id: int | None
+    brand_id: int | None = None
     debt_partner_id: int | None = None
     category_priority: CategoryPriority | None = None
     amount: Decimal
@@ -127,6 +132,7 @@ class TransactionResponse(BaseModel):
     type: TransactionType
     operation_type: TransactionOperationType
     counterparty_name: str | None = None
+    brand_name: str | None = None
     debt_partner_name: str | None = None
     description: str | None
     normalized_description: str | None
