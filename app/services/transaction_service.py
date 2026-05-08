@@ -119,7 +119,7 @@ class TransactionService:
         payload["user_id"] = user_id
         payload = self._prepare_payload(payload)
         self._validate_payload(user_id=user_id, payload=payload)
-        self._attach_brand_id_dualwrite(user_id=user_id, payload=payload)
+        self._resolve_brand_for_payload(user_id=user_id, payload=payload)
 
         account = self.account_repo.get_by_id_and_user_for_update(account_id, user_id)
         if not account:
@@ -224,7 +224,7 @@ class TransactionService:
             effective["is_regular"] = self._resolve_is_regular(user_id=user_id, category_id=effective.get("category_id"))
 
         self._validate_payload(user_id=user_id, payload=effective)
-        self._attach_brand_id_dualwrite(user_id=user_id, payload=effective)
+        self._resolve_brand_for_payload(user_id=user_id, payload=effective)
 
         new_account = self.account_repo.get_by_id_and_user_for_update(effective["account_id"], user_id)
         if not new_account:
@@ -647,27 +647,36 @@ class TransactionService:
         prepared["normalized_description"] = self.enrichment_service.normalize_for_rule(description)
         return prepared
 
-    def _attach_brand_id_dualwrite(
+    def _resolve_brand_for_payload(
         self, *, user_id: int, payload: dict[str, Any],
     ) -> None:
-        """Stamp `brand_id` whenever a `counterparty_id` is present.
+        """Phase C step 4: ensure `brand_id` is the only merchant FK
+        on the produced Transaction. Three cases:
 
-        Phase C dual-write: clients still submit `counterparty_id` for
-        regular and refund operations; we mirror that into `brand_id` so
-        analytics, brand-aware queries and the post-Step-4 schema all
-        stay consistent. No-op for transfers, debt, credit and other ops
-        that reject `counterparty_id` upstream.
+          • client submits `brand_id` directly → keep it, drop any
+            `counterparty_id` so the new column is the source of truth.
+          • client submits only `counterparty_id` (legacy) → resolve
+            the brand from it via the link helper, drop the CP field.
+          • neither set → both stay None (transfers, debt, etc.).
         """
+        # Brand_id provided wins outright.
+        if payload.get("brand_id") not in (None, "", 0):
+            payload["counterparty_id"] = None
+            return
+
         cp_id = payload.get("counterparty_id")
         if cp_id in (None, "", 0):
             payload["brand_id"] = None
+            payload["counterparty_id"] = None
             return
-        if payload.get("brand_id"):
-            return
+
+        # Legacy counterparty submission — resolve to a brand and drop
+        # the CP stamp so we don't write to the dead column.
         brand_id = resolve_brand_id_for_counterparty(
             self.db, user_id=user_id, counterparty_id=int(cp_id),
         )
         payload["brand_id"] = brand_id
+        payload["counterparty_id"] = None
 
     def _validate_payload(self, *, user_id: int, payload: dict[str, Any]) -> None:
         operation_type = payload.get("operation_type")

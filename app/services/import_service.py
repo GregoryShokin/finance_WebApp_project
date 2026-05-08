@@ -25,13 +25,11 @@ from app.schemas.imports import (
     ImportRowUpdateRequest,
 )
 from app.services.brand_fingerprint_service import BrandFingerprintService
-from app.services.brand_identifier_service import BrandIdentifierService
-from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
-from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
-from app.services.counterparty_identifier_service import (
+from app.services.brand_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
-    CounterpartyIdentifierService,
+    BrandIdentifierService,
 )
+from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.fingerprint_alias_service import FingerprintAliasService
 from app.services.import_confidence import ImportConfidenceService
 from app.services.import_extractors import ExtractionResult, ImportExtractorRegistry
@@ -137,9 +135,8 @@ class ImportService:
         self.category_rule_repo = TransactionCategoryRuleRepository(db)
         self.transfer_matcher = TransferMatcherService(db)
         self._alias_service = FingerprintAliasService(db)
-        self._counterparty_fp_service = CounterpartyFingerprintService(db)
-        self._counterparty_id_service = CounterpartyIdentifierService(db)
-        # Phase C dual-write: brand-side fingerprint/identifier mirror.
+        # Phase C step 4: brand-side fingerprint/identifier services are
+        # the only entity-binding stores. CP-side services were removed.
         self._brand_fp_service = BrandFingerprintService(db)
         self._brand_id_service = BrandIdentifierService(db)
 
@@ -490,7 +487,7 @@ class ImportService:
 
         session = self.get_session(user_id=user_id, session_id=session_id)
         cluster_svc = ImportClusterService(self.db)
-        fp_clusters, brand_clusters, counterparty_groups = cluster_svc.build_bulk_clusters(session)
+        fp_clusters, brand_clusters, brand_groups = cluster_svc.build_bulk_clusters(session)
 
         fp_dicts = []
         for c in fp_clusters:
@@ -511,12 +508,15 @@ class ImportService:
                 "identifier_value": c.identifier_value,
             })
         brand_dicts = [b.to_dict() for b in brand_clusters]
-        counterparty_dicts = [g.to_dict() for g in counterparty_groups]
+        brand_group_dicts = [g.to_dict() for g in brand_groups]
         return {
             "session_id": session.id,
             "fingerprint_clusters": fp_dicts,
             "brand_clusters": brand_dicts,
-            "counterparty_groups": counterparty_dicts,
+            "brand_groups": brand_group_dicts,
+            # Legacy field kept as [] until step 5 to avoid 422 on
+            # out-of-tree clients still expecting it.
+            "counterparty_groups": [],
         }
 
     def get_queue_bulk_clusters(self, *, user_id: int) -> dict[str, Any]:
@@ -532,7 +532,7 @@ class ImportService:
         from app.services.import_cluster_service import ImportClusterService
 
         cluster_svc = ImportClusterService(self.db)
-        fp_clusters, brand_clusters, counterparty_groups = (
+        fp_clusters, brand_clusters, brand_groups = (
             cluster_svc.build_bulk_clusters_for_user(user_id=user_id)
         )
 
@@ -555,11 +555,12 @@ class ImportService:
                 "identifier_value": c.identifier_value,
             })
         brand_dicts = [b.to_dict() for b in brand_clusters]
-        counterparty_dicts = [g.to_dict() for g in counterparty_groups]
+        brand_group_dicts = [g.to_dict() for g in brand_groups]
         return {
             "fingerprint_clusters": fp_dicts,
             "brand_clusters": brand_dicts,
-            "counterparty_groups": counterparty_dicts,
+            "brand_groups": brand_group_dicts,
+            "counterparty_groups": [],
         }
 
     def bulk_apply_cluster(
@@ -576,8 +577,6 @@ class ImportService:
             self.db,
             import_repo=self.import_repo,
             category_rule_repo=self.category_rule_repo,
-            counterparty_fp_service=self._counterparty_fp_service,
-            counterparty_id_service=self._counterparty_id_service,
             update_row_fn=self.update_row,
             recalculate_summary_fn=self._recalculate_summary,
             get_session_fn=self.get_session,
@@ -683,20 +682,27 @@ class ImportService:
         if cp is None:
             raise ImportNotFoundError(f"counterparty {counterparty_id} not found")
 
-        # Resolve the counterparty's prevailing category. We look in three
-        # progressively weaker sources:
-        #   1. Committed transactions already tagged with this counterparty —
+        # Phase C step 4: resolve the brand mirroring this counterparty
+        # up-front so all downstream lookups go through the brand-side
+        # store. Same case-fold rule migration 0067 used.
+        resolved_brand_id = resolve_brand_id_for_counterparty(
+            self.db, user_id=user_id, counterparty_id=counterparty_id,
+        )
+        if resolved_brand_id is None:
+            raise ImportValidationError(
+                "Не удалось сопоставить контрагента с брендом — попробуй "
+                "выбрать или создать бренд напрямую через пикер.",
+            )
+
+        # Resolve the brand's prevailing category. Three progressively
+        # weaker sources:
+        #   1. Committed transactions already tagged with this brand —
         #      ground truth, the user has confirmed these.
-        #   2. Live preview rows across the user's active import sessions that
-        #      are already pinned to this counterparty via their fingerprint
-        #      binding and carry a candidate category_id. This covers the
-        #      common case where the user tagged a cluster "Кофейни" in the
-        #      current session but hasn't committed yet — the counterparty
-        #      effectively has a category, it just isn't in `transactions`.
+        #   2. Live preview rows across active sessions already pinned to
+        #      this brand via fingerprint binding (brand_fingerprints).
         #   3. The row's own cluster hint (candidate_category_id).
-        # If none of these yield a category, the binding is still created —
-        # the row just stays in the attention bucket for the user to classify
-        # manually later. No "category required" block.
+        # If none of these yield a category, the binding is still
+        # created — the row stays in the attention bucket.
         target_category_id: int | None = None
         target_operation_type: str = "regular"
 
@@ -706,7 +712,7 @@ class ImportService:
             self.db.query(_Transaction.category_id)
             .filter(
                 _Transaction.user_id == user_id,
-                _Transaction.counterparty_id == counterparty_id,
+                _Transaction.brand_id == resolved_brand_id,
                 _Transaction.category_id.isnot(None),
             )
             .all()
@@ -717,12 +723,12 @@ class ImportService:
         if cat_votes:
             target_category_id = cat_votes.most_common(1)[0][0]
 
-        # Source 2 — live preview rows across all active sessions. Find every
-        # fingerprint already bound to this counterparty, then pull the
+        # Source 2 — live preview rows across all active sessions. Find
+        # every fingerprint already bound to this brand, then pull the
         # candidate category_id stamped on those rows' normalized_data.
         if target_category_id is None:
-            bound_fps = self._counterparty_fp_service.repo.list_by_counterparty(
-                user_id=user_id, counterparty_id=counterparty_id,
+            bound_fps = self._brand_fp_service.repo.list_by_brand(
+                user_id=user_id, brand_id=resolved_brand_id,
             )
             bound_fp_set = {b.fingerprint for b in bound_fps if b.fingerprint}
 
@@ -758,41 +764,27 @@ class ImportService:
                 except (TypeError, ValueError):
                     target_category_id = None
 
-        # Create the binding — the counterparty attachment happens regardless
-        # of whether we resolved a category. The row just won't be marked
-        # ready if category is still unknown.
+        # Create the binding — attachment happens regardless of whether
+        # we resolved a category. The row just won't be marked ready if
+        # category is still unknown.
         binding_created = False
         try:
-            before = self._counterparty_fp_service.repo.get_by_fingerprint(
+            before = self._brand_fp_service.repo.get_by_fingerprint(
                 user_id=user_id, fingerprint=source_fp,
             )
-            self._counterparty_fp_service.bind(
-                user_id=user_id,
-                fingerprint=source_fp,
-                counterparty_id=counterparty_id,
+            self._brand_fp_service.bind(
+                user_id=user_id, fingerprint=source_fp, brand_id=resolved_brand_id,
             )
             binding_created = before is None
         except ValueError as exc:
             raise ImportValidationError(str(exc)) from exc
+        brand_id = resolved_brand_id  # alias used by row_payload below
 
-        # Phase C dual-write: mirror the binding into brand_fingerprints so
-        # the new resolver picks up this attachment without depending on the
-        # legacy table that step 5 will drop.
-        try:
-            brand_id = resolve_brand_id_for_counterparty(
-                self.db, user_id=user_id, counterparty_id=counterparty_id,
-            )
-            if brand_id is not None:
-                self._brand_fp_service.bind(
-                    user_id=user_id, fingerprint=source_fp, brand_id=brand_id,
-                )
-        except Exception:  # noqa: BLE001 — never block attach on brand mirror
-            logger.warning(
-                "brand_fingerprint mirror failed user=%s row=%s cp=%s",
-                user_id, row_id, counterparty_id,
-                exc_info=True,
-            )
-
+        # Stamp `attached_to_brand_*` plus the legacy CP fields so the
+        # moderator UI keeps rendering both labels until step 5. The CP
+        # name comes from the user-facing entity; we already validated
+        # cp belongs to the user, so reading cp.name here is safe.
+        normalized["attached_to_brand_id"] = brand_id
         normalized["attached_to_counterparty_id"] = counterparty_id
         normalized["attached_to_counterparty_name"] = cp.name
         normalized["attached_source_fingerprint"] = source_fp
@@ -811,35 +803,35 @@ class ImportService:
         user_already_confirmed = bool(normalized.get("user_confirmed_at"))
 
         if user_already_confirmed:
-            # Row was individually confirmed via the pencil editor — the user
-            # explicitly chose operation_type and category. Preserve those
-            # choices: only attach the counterparty so the row is grouped
+            # Row was individually confirmed via the pencil editor — the
+            # user explicitly chose operation_type and category. Preserve
+            # those choices: only attach the brand so the row is grouped
             # correctly in the UI, without overriding anything else.
             row_payload = ImportRowUpdateRequest(
-                counterparty_id=counterparty_id,
+                brand_id=brand_id,
                 action="confirm",
             )
         else:
-            # Preserve a refund classification if the row carries one — attach
-            # must not silently demote a refund to a regular income row.
+            # Preserve a refund classification if the row carries one —
+            # attach must not silently demote a refund to a regular row.
             effective_op = "refund" if existing_op == "refund" else target_operation_type
 
-            # Only auto-confirm the row when a category was resolved. Without
-            # a category the row must stay in the attention bucket so the user
-            # can classify it before commit — we still persist the counterparty
-            # binding and cluster attachment so next time a matching row comes
-            # in, it lands with the counterparty pre-filled.
+            # Only auto-confirm the row when a category was resolved.
+            # Without a category the row must stay in the attention bucket
+            # so the user can classify it before commit — we still persist
+            # the brand binding and cluster attachment so next time a
+            # matching row comes in, it lands with the brand pre-filled.
             if target_category_id is not None:
                 row_payload = ImportRowUpdateRequest(
                     operation_type=effective_op,
                     category_id=target_category_id,
-                    counterparty_id=counterparty_id,
+                    brand_id=brand_id,
                     action="confirm",
                 )
             else:
                 row_payload = ImportRowUpdateRequest(
                     operation_type=effective_op,
-                    counterparty_id=counterparty_id,
+                    brand_id=brand_id,
                 )
         self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
 
@@ -876,7 +868,7 @@ class ImportService:
             raise ImportValidationError("Строка уже относится к этому кластеру")
 
         target_category_id: int | None = None
-        target_counterparty_id: int | None = None
+        target_brand_id: int | None = None
         target_operation_type: str | None = None
         target_skeleton: str | None = None
 
@@ -898,7 +890,10 @@ class ImportService:
                     target_category_id = int(cat)
                 except (TypeError, ValueError):
                     continue
-                target_counterparty_id = c_norm.get("counterparty_id")
+                # Phase C step 4: pull brand_id rather than counterparty_id.
+                # Older active rows may still carry only counterparty_id —
+                # those flow through the next attach via the link helper.
+                target_brand_id = c_norm.get("brand_id")
                 target_operation_type = c_norm.get("operation_type") or "regular"
                 target_skeleton = c_norm.get("skeleton") or (c_norm.get("v2") or {}).get("skeleton")
                 break
@@ -954,7 +949,7 @@ class ImportService:
         row_payload = ImportRowUpdateRequest(
             operation_type=effective_op_fp,
             category_id=target_category_id,
-            counterparty_id=target_counterparty_id,
+            brand_id=target_brand_id,
             action="confirm",
         )
         self.update_row(user_id=user_id, row_id=row_id, payload=row_payload)
@@ -1383,12 +1378,15 @@ class ImportService:
             raise ImportValidationError("Импортированную строку нельзя открепить.")
         nd = dict(row.normalized_data_json or {})
         nd["detached_from_cluster"] = True
-        # Cluster-inherited fields (category + counterparty) belong to the
+        # Cluster-inherited fields (category + brand) belong to the
         # cluster's context — once the row is standalone the user must
         # re-decide. Drop them so the attention UI shows a blank slate
-        # instead of silently committing the auto-inherited values.
+        # instead of silently committing the auto-inherited values. The
+        # legacy CP stamp is also cleared if present so older rows reach
+        # the same blank-slate state.
         nd["category_id"] = None
-        nd["counterparty_id"] = None
+        nd["brand_id"] = None
+        nd.pop("counterparty_id", None)
         row = self.import_repo.update_row(
             row, normalized_data=nd, status="warning", review_required=True,
         )
@@ -2053,7 +2051,6 @@ class ImportService:
             category_rule_repo=self.category_rule_repo,
             transaction_service=self.transaction_service,
             transfer_linker=self.transfer_linker,
-            counterparty_fp_service=self._counterparty_fp_service,
             prepare_payloads_fn=self._prepare_transaction_payloads,
         )
         counters = orchestrator.commit_rows(user_id=user_id, rows=import_rows)
@@ -2221,7 +2218,6 @@ class ImportService:
             category_rule_repo=self.category_rule_repo,
             transaction_service=self.transaction_service,
             transfer_linker=self.transfer_linker,
-            counterparty_fp_service=self._counterparty_fp_service,
             prepare_payloads_fn=self._prepare_transaction_payloads,
         )
 

@@ -281,6 +281,11 @@ class ImportRowUpdateRequest(BaseModel):
     credit_account_id: int | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    # Phase C step 4: brand_id is the canonical merchant binding.
+    # `counterparty_id` stays in the schema for one release cycle so
+    # external callers (mobile, scripts) don't 422; importer reads it
+    # only as a legacy fallback resolved through the brand link helper.
+    brand_id: int | None = None
     debt_partner_id: int | None = None
     amount: Decimal | None = None
     type: str | None = None
@@ -443,10 +448,25 @@ class BulkBrandClusterResponse(BaseModel):
     fingerprint_cluster_ids: list[str]
 
 
+class BulkBrandGroupResponse(BaseModel):
+    """Phase C step 4 successor to BulkCounterpartyGroupResponse. Several
+    fingerprint clusters bound to the same Brand collapse under one UI card
+    labelled with the brand display name (UserBrandDisplayName when set,
+    else canonical_name) instead of a merchant skeleton.
+    """
+
+    brand_id: int
+    brand_name: str
+    direction: str
+    count: int
+    total_amount: Decimal
+    fingerprint_cluster_ids: list[str]
+    is_mixed_direction: bool = False
+
+
 class BulkCounterpartyGroupResponse(BaseModel):
-    """Phase 3 — counterparty-centric grouping. Several fingerprint clusters
-    bound to the same counterparty collapse under one UI card labelled with
-    the counterparty name instead of a merchant skeleton."""
+    """Legacy mirror of BulkBrandGroupResponse — emitted as `[]` after step 4
+    so out-of-tree clients don't 422. Step 5 drops the field entirely."""
 
     counterparty_id: int
     counterparty_name: str
@@ -460,6 +480,8 @@ class BulkClustersResponse(BaseModel):
     session_id: int
     fingerprint_clusters: list[BulkFingerprintClusterResponse]
     brand_clusters: list[BulkBrandClusterResponse]
+    brand_groups: list[BulkBrandGroupResponse] = []
+    # Legacy field — always [] after step 4. Removed in step 5.
     counterparty_groups: list[BulkCounterpartyGroupResponse] = []
 
 
@@ -467,12 +489,14 @@ class ImportQueueBulkClustersResponse(BaseModel):
     """Cross-session bulk clusters (v1.23). Same shape as BulkClustersResponse
     but session-agnostic — the queue groups rows from all preview-ready
     sessions of the user under one set of cluster cards. Brand groups
-    naturally span sessions (same `extract_brand` token across two banks
-    rolls into one BrandCluster); counterparty groups always have, since
-    `CounterpartyFingerprint` is user-scoped."""
+    span sessions naturally (one `BrandFingerprint` row per (user, fp)
+    pair, regardless of which session emitted it).
+    """
 
     fingerprint_clusters: list[BulkFingerprintClusterResponse]
     brand_clusters: list[BulkBrandClusterResponse]
+    brand_groups: list[BulkBrandGroupResponse] = []
+    # Legacy field — always [] after step 4. Removed in step 5.
     counterparty_groups: list[BulkCounterpartyGroupResponse] = []
 
 
@@ -533,6 +557,10 @@ class BulkClusterRowUpdate(BaseModel):
     operation_type: str | None = None
     category_id: int | None = None
     counterparty_id: int | None = None
+    # Phase C step 4: bulk-apply emits brand_id directly (Step-3 frontend
+    # already does so). counterparty_id stays accepting for one release
+    # cycle and is resolved via the link helper if brand_id is absent.
+    brand_id: int | None = None
     debt_partner_id: int | None = None
     target_account_id: int | None = None
     credit_account_id: int | None = None

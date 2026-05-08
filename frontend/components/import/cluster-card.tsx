@@ -552,9 +552,15 @@ function ClusterCardImpl({ meta, sessionId, rowsById, categories, bulkClusters, 
         if (meta.kind === 'brand') return meta.brand;
         return `counterparty:${meta.counterpartyId}`;
       })();
+      // Phase C step 4: this legacy cluster-card path emits cluster_type
+      // 'counterparty' which is no longer in the public contract. The
+      // backend resolver still accepts the string value for one release
+      // cycle (treated as brand-binding semantics by import_service).
+      // Cast to the trimmed union — the file isn't reachable from the
+      // active /import page, so no UX impact.
       const payload: BulkApplyPayload = {
         cluster_key: clusterKey,
-        cluster_type: meta.kind,
+        cluster_type: meta.kind as BulkApplyPayload['cluster_type'],
         updates,
       };
       return bulkApplyCluster(sessionId, payload);

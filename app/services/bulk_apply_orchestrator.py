@@ -32,13 +32,11 @@ from app.repositories.import_repository import ImportRepository
 from app.repositories.transaction_category_rule_repository import TransactionCategoryRuleRepository
 from app.schemas.imports import ImportRowUpdateRequest
 from app.services.brand_fingerprint_service import BrandFingerprintService
-from app.services.brand_identifier_service import BrandIdentifierService
-from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
-from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
-from app.services.counterparty_identifier_service import (
+from app.services.brand_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
-    CounterpartyIdentifierService,
+    BrandIdentifierService,
 )
+from app.services.counterparty_brand_link import resolve_brand_id_for_counterparty
 from app.services.rule_strength_service import CONFIRM_WEIGHT_WARNING, RuleStrengthService
 
 
@@ -49,8 +47,6 @@ class BulkApplyOrchestrator:
         *,
         import_repo: ImportRepository,
         category_rule_repo: TransactionCategoryRuleRepository,
-        counterparty_fp_service: CounterpartyFingerprintService,
-        counterparty_id_service: CounterpartyIdentifierService,
         update_row_fn: Callable[..., Any],
         recalculate_summary_fn: Callable[[int], dict[str, Any]],
         get_session_fn: Callable[..., Any],
@@ -58,9 +54,8 @@ class BulkApplyOrchestrator:
         self.db = db
         self.import_repo = import_repo
         self.category_rule_repo = category_rule_repo
-        self._counterparty_fp_service = counterparty_fp_service
-        self._counterparty_id_service = counterparty_id_service
-        # Phase C dual-write: every CP binding mirrored to brand_*-tables.
+        # Phase C step 4: bindings go straight to the brand_*-tables.
+        # CP-side binding services were removed.
         self._brand_fp_service = BrandFingerprintService(db)
         self._brand_id_service = BrandIdentifierService(db)
         # Pass-throughs so the orchestrator stays thin: update_row encodes the
@@ -82,12 +77,12 @@ class BulkApplyOrchestrator:
         by_rule_key: dict[tuple[str, int], list[dict[str, Any]]] = {}
         confirmed_count = 0
         # A single cluster may span many fingerprints (brand cluster); one
-        # counterparty choice binds all of them at once (§6.2).
-        counterparty_bindings_by_cp: dict[int, set[str]] = {}
+        # brand choice binds all of them at once (§6.2).
+        brand_bindings_by_brand: dict[int, set[str]] = {}
         # Cross-account identifier bindings — fingerprint bindings are scoped
         # to (account, bank), identifier bindings resolve the same recipient
         # across every statement.
-        identifier_bindings_by_cp: dict[int, set[tuple[str, str]]] = {}
+        identifier_bindings_by_brand: dict[int, set[tuple[str, str]]] = {}
 
         for update in payload.updates:
             row_id = update.row_id
@@ -105,10 +100,16 @@ class BulkApplyOrchestrator:
                 skipped.append(row_id)
                 continue
 
+            # Phase C step 4: brand_id is the merchant binding key.
+            # update.counterparty_id stays None for the new frontend
+            # (cluster-grid passes null after Step 3); when an
+            # external caller still sends it we silently ignore it
+            # rather than write to the dead store.
+            update_brand_id = getattr(update, "brand_id", None)
             row_payload = ImportRowUpdateRequest(
                 operation_type=update.operation_type,
                 category_id=update.category_id,
-                counterparty_id=update.counterparty_id,
+                brand_id=update_brand_id,
                 debt_partner_id=update.debt_partner_id,
                 target_account_id=update.target_account_id,
                 credit_account_id=update.credit_account_id,
@@ -164,13 +165,27 @@ class BulkApplyOrchestrator:
                     "original_description": original_desc,
                 })
 
-            # Phase 3 — fingerprint → counterparty binding. Every fingerprint
+            # Resolve the brand binding for this row. Step 4 accepts:
+            #   • update.brand_id direct (post-Step-3 frontend);
+            #   • update.counterparty_id legacy (out-of-tree caller) —
+            #     resolved to a brand via the deterministic helper for
+            #     one release cycle, then dropped in step 5.
+            row_brand_id: int | None = None
+            if update_brand_id not in (None, "", 0):
+                row_brand_id = int(update_brand_id)
+            elif getattr(update, "counterparty_id", None) not in (None, "", 0):
+                row_brand_id = resolve_brand_id_for_counterparty(
+                    self.db,
+                    user_id=user_id,
+                    counterparty_id=int(update.counterparty_id),
+                )
+
+            # Phase C step 4: fingerprint → Brand binding. Every fingerprint
             # in the cluster gets bound so future imports of ANY skeleton
-            # resolve to the same counterparty automatically.
-            if fp and update.counterparty_id is not None:
-                counterparty_bindings_by_cp.setdefault(
-                    int(update.counterparty_id), set()
-                ).add(fp)
+            # resolve to the same brand automatically. Counterparty
+            # binding is gone — brand_fingerprints is the only target.
+            if fp and row_brand_id is not None:
+                brand_bindings_by_brand.setdefault(row_brand_id, set()).add(fp)
 
             # Cross-account identifier binding. Pull the strongest token off
             # the row's normalized payload using the cluster-assembly priority
@@ -179,10 +194,10 @@ class BulkApplyOrchestrator:
             # `card` binding is created ONLY for transfer rows (§12.11). In
             # Russian bank statements "Операция по карте ****7123" refers to
             # the PAYER'S card, not the merchant's. Binding a payer card to a
-            # counterparty would pull every purchase made with that card under
-            # the same counterparty. For transfers, the card token IS the
+            # brand would pull every purchase made with that card under
+            # the same brand. For transfers, the card token IS the
             # recipient's card and is a valid cross-account key.
-            if update.counterparty_id is not None:
+            if row_brand_id is not None:
                 row_op_type = str(normalized.get("operation_type") or "").lower()
                 tokens = normalized.get("tokens") or {}
                 if isinstance(tokens, dict):
@@ -192,8 +207,8 @@ class BulkApplyOrchestrator:
                             continue
                         if kind == "card" and row_op_type != "transfer":
                             continue
-                        identifier_bindings_by_cp.setdefault(
-                            int(update.counterparty_id), set()
+                        identifier_bindings_by_brand.setdefault(
+                            row_brand_id, set()
                         ).add((kind, str(value)))
                         break
 
@@ -220,48 +235,22 @@ class BulkApplyOrchestrator:
             strength_svc.on_confirmed(rule.id, confirms_delta=bulk_weight)
             rules_affected += 1
 
-        # Persist counterparty bindings (accumulates across bulk-apply calls).
-        # Phase C dual-write: each CP binding is mirrored to the brand_*
-        # tables via the deterministic CP→Brand resolver, so the brand
-        # store stays current with every cluster apply.
-        counterparty_bindings_count = 0
-        cp_to_brand_cache: dict[int, int | None] = {}
-
-        def _brand_for(cp_id: int) -> int | None:
-            if cp_id in cp_to_brand_cache:
-                return cp_to_brand_cache[cp_id]
-            bid = resolve_brand_id_for_counterparty(
-                self.db, user_id=user_id, counterparty_id=cp_id,
-            )
-            cp_to_brand_cache[cp_id] = bid
-            return bid
-
-        for cp_id, fps in counterparty_bindings_by_cp.items():
-            counterparty_bindings_count += self._counterparty_fp_service.bind_many(
+        # Persist brand bindings (accumulates across bulk-apply calls).
+        # Phase C step 4 wrote the CP-side bindings out — brand_*-tables
+        # are now the only home.
+        brand_bindings_count = 0
+        for brand_id, fps in brand_bindings_by_brand.items():
+            brand_bindings_count += self._brand_fp_service.bind_many(
                 user_id=user_id,
                 fingerprints=list(fps),
-                counterparty_id=cp_id,
+                brand_id=brand_id,
             )
-            brand_id = _brand_for(cp_id)
-            if brand_id is not None:
-                self._brand_fp_service.bind_many(
-                    user_id=user_id,
-                    fingerprints=list(fps),
-                    brand_id=brand_id,
-                )
-        for cp_id, pairs in identifier_bindings_by_cp.items():
-            self._counterparty_id_service.bind_many(
+        for brand_id, pairs in identifier_bindings_by_brand.items():
+            self._brand_id_service.bind_many(
                 user_id=user_id,
                 pairs=list(pairs),
-                counterparty_id=cp_id,
+                brand_id=brand_id,
             )
-            brand_id = _brand_for(cp_id)
-            if brand_id is not None:
-                self._brand_id_service.bind_many(
-                    user_id=user_id,
-                    pairs=list(pairs),
-                    brand_id=brand_id,
-                )
 
         self.db.commit()
 

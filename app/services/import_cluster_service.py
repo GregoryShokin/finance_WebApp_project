@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.models.brand import Brand
 from app.models.counterparty import Counterparty
 from app.models.import_row import ImportRow
 from app.models.import_session import ImportSession
@@ -43,8 +44,6 @@ from app.repositories.transaction_category_rule_repository import (
 )
 from app.services.bank_mechanics_service import BankMechanicsResult, BankMechanicsService
 from app.services.brand_extractor_service import extract_brand
-from app.services.counterparty_fingerprint_service import CounterpartyFingerprintService
-from app.services.counterparty_identifier_service import CounterpartyIdentifierService
 from app.services.global_pattern_service import GlobalPatternService
 from app.services.import_normalizer_v2 import (
     is_refund_like as v2_is_refund_like,
@@ -211,6 +210,12 @@ class Cluster:
     # purchases at that merchant, acting as an expense compensator.
     is_refund: bool = False
     refund_brand: str | None = None
+    # Phase C step 4: refund-history JOIN now keys on Brand. The legacy
+    # `refund_resolved_counterparty_*` fields stay on the dataclass for
+    # one release cycle so out-of-tree consumers don't 5xx — they're
+    # always None now and `refund_resolved_brand_*` is the source of truth.
+    refund_resolved_brand_id: int | None = None
+    refund_resolved_brand_name: str | None = None
     refund_resolved_counterparty_id: int | None = None
     refund_resolved_counterparty_name: str | None = None
 
@@ -267,8 +272,46 @@ class Cluster:
             "global_pattern_total_confirms": self.global_pattern_total_confirms,
             "is_refund": self.is_refund,
             "refund_brand": self.refund_brand,
+            "refund_resolved_brand_id": self.refund_resolved_brand_id,
+            "refund_resolved_brand_name": self.refund_resolved_brand_name,
+            # Legacy mirror — always None post-step-4. Kept until step 5.
             "refund_resolved_counterparty_id": self.refund_resolved_counterparty_id,
             "refund_resolved_counterparty_name": self.refund_resolved_counterparty_name,
+        }
+
+
+@dataclass(frozen=True)
+class BrandGroup:
+    """Phase C step 4 successor to CounterpartyGroup. Aggregates fingerprint
+    clusters bound to the same Brand via `BrandFingerprint` /
+    `BrandIdentifier`. Same shape as the legacy group, FK key renamed.
+
+    Single-member groups are still emitted — the brand label beats the raw
+    skeleton in the UI.
+
+    Direction policy is unchanged: one Brand = one card, regardless of
+    direction. `direction` carries the dominant side by row count;
+    `is_mixed_direction` is True when both income and expense members exist
+    (e.g. «Озон» purchases AND «Озон» refunds under one card).
+    """
+
+    brand_id: int
+    brand_name: str
+    direction: str
+    count: int
+    total_amount: Decimal
+    fingerprint_cluster_ids: tuple[str, ...]
+    is_mixed_direction: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "brand_id": self.brand_id,
+            "brand_name": self.brand_name,
+            "direction": self.direction,
+            "count": self.count,
+            "total_amount": str(self.total_amount),
+            "fingerprint_cluster_ids": list(self.fingerprint_cluster_ids),
+            "is_mixed_direction": self.is_mixed_direction,
         }
 
 
@@ -388,8 +431,12 @@ class ImportClusterService:
         self.category_repo = CategoryRepository(db)
         self.bank_mechanics = BankMechanicsService(db)
         self.global_patterns = GlobalPatternService(db)
-        self.counterparty_fp_service = CounterpartyFingerprintService(db)
-        self.counterparty_id_service = CounterpartyIdentifierService(db)
+        # Phase C step 4: brand-side fingerprint/identifier services are
+        # the only entity-binding stores in the cluster builder.
+        from app.services.brand_fingerprint_service import BrandFingerprintService
+        from app.services.brand_identifier_service import BrandIdentifierService
+        self.brand_fp_service = BrandFingerprintService(db)
+        self.brand_id_service = BrandIdentifierService(db)
 
     # ------------------------------------------------------------------
     # Public API
@@ -541,21 +588,23 @@ class ImportClusterService:
             global_boost = 0.04 * min(global_match.user_count, 5) if global_match else 0.0
             boosted_confidence = min(1.0, confidence + mech.confidence_boost + global_boost) if (mech.label or global_match) else confidence
 
-            # Refund override (И-09). When the cluster reads as a reversal, we
-            # look up the counterparty + dominant category from the user's
-            # purchase history for the same brand and use that instead of the
-            # rule/bank/global chain. Rationale: a refund's income-direction
-            # fingerprint will almost never match any existing rule (rules are
-            # trained on expense rows), so without this override refund
-            # clusters land in red zone with no category — forcing the user to
-            # classify every single one manually. We want a refund of a known
-            # merchant to flow through automatically into the same category
-            # bucket as its purchases, acting as an expense compensator.
-            refund_cp_id: int | None = None
-            refund_cp_name: str | None = None
+            # Refund override (И-09). When the cluster reads as a reversal,
+            # we look up the brand + dominant category from the user's
+            # purchase history for the same brand name and use that instead
+            # of the rule/bank/global chain. Rationale: a refund's
+            # income-direction fingerprint will almost never match any
+            # existing rule (rules are trained on expense rows), so without
+            # this override refund clusters land in red zone with no
+            # category — forcing the user to classify every single one
+            # manually. We want a refund of a known merchant to flow
+            # through automatically into the same category bucket as its
+            # purchases, acting as an expense compensator. Phase C step 4:
+            # the JOIN keys on Brand instead of Counterparty.
+            refund_brand_id: int | None = None
+            refund_brand_name: str | None = None
             if bucket.is_refund and bucket.refund_brand:
-                refund_cp_id, refund_cp_name, refund_cat_id = (
-                    self._resolve_refund_counterparty(
+                refund_brand_id, refund_brand_name, refund_cat_id = (
+                    self._resolve_refund_brand(
                         user_id=session.user_id, brand=bucket.refund_brand,
                     )
                 )
@@ -604,8 +653,8 @@ class ImportClusterService:
                     global_pattern_total_confirms=global_match.total_confirms if global_match else 0,
                     is_refund=bucket.is_refund,
                     refund_brand=bucket.refund_brand,
-                    refund_resolved_counterparty_id=refund_cp_id,
-                    refund_resolved_counterparty_name=refund_cp_name,
+                    refund_resolved_brand_id=refund_brand_id,
+                    refund_resolved_brand_name=refund_brand_name,
                 )
             )
 
@@ -616,7 +665,7 @@ class ImportClusterService:
 
     def build_bulk_clusters(
         self, session: ImportSession,
-    ) -> tuple[list[Cluster], list[BrandCluster], list[CounterpartyGroup]]:
+    ) -> tuple[list[Cluster], list[BrandCluster], list[BrandGroup]]:
         """Return clusters eligible for bulk-confirm, plus brand-level groups
         — for a single session.
 
@@ -643,7 +692,7 @@ class ImportClusterService:
 
     def build_bulk_clusters_for_user(
         self, *, user_id: int,
-    ) -> tuple[list[Cluster], list[BrandCluster], list[CounterpartyGroup]]:
+    ) -> tuple[list[Cluster], list[BrandCluster], list[BrandGroup]]:
         """Cross-session bulk clusters (v1.23). Aggregates fingerprint
         clusters across every preview-ready session of the user, then runs
         the same brand / counterparty grouping as the single-session path.
@@ -765,7 +814,7 @@ class ImportClusterService:
         live_clusters: list[Cluster],
         *,
         user_id: int,
-    ) -> tuple[list[Cluster], list[BrandCluster], list[CounterpartyGroup]]:
+    ) -> tuple[list[Cluster], list[BrandCluster], list[BrandGroup]]:
         """Cross-session-safe aggregation. Takes a list of already-filtered
         live fingerprint clusters (output of `_compute_session_live_clusters`,
         possibly concatenated across sessions) and runs:
@@ -809,14 +858,15 @@ class ImportClusterService:
         #     groups) — so the frontend can look them up by fingerprint when
         #     expanding a brand card. Without this, the brand card would list
         #     row_ids the frontend can't resolve to a cluster.
-        # Phase 3 — third aggregation layer: counterparty groups. A fingerprint
-        # bound to a counterparty is always rendered under that counterparty
-        # in the UI, regardless of brand. Counterparty wins over brand.
-        counterparty_groups = self._group_by_counterparty(
+        # Phase C step 4: third aggregation layer is now Brand groups (was
+        # Counterparty groups). A fingerprint bound to a Brand is always
+        # rendered under that Brand in the UI, regardless of which raw
+        # brand-key the cluster picked — explicit binding wins.
+        brand_binding_groups = self._group_by_brand_binding(
             live_clusters, user_id=user_id,
         )
-        counterparty_bound_fps: set[str] = {
-            fp for g in counterparty_groups for fp in g.fingerprint_cluster_ids
+        brand_bound_fps: set[str] = {
+            fp for g in brand_binding_groups for fp in g.fingerprint_cluster_ids
         }
 
         eligible_fps = {c.fingerprint for c in eligible}
@@ -826,13 +876,13 @@ class ImportClusterService:
         # view shouldn't double-count them).
         for b in brand_clusters:
             for fp in b.fingerprint_cluster_ids:
-                if fp in counterparty_bound_fps:
+                if fp in brand_bound_fps:
                     continue
                 if fp not in eligible_fps:
                     aux_fps.add(fp)
-        # Aux from counterparty groups — same reason the brand layer needs
+        # Aux from brand-binding groups — same reason the brand layer needs
         # them: UI must be able to resolve each member fingerprint's rows.
-        for g in counterparty_groups:
+        for g in brand_binding_groups:
             for fp in g.fingerprint_cluster_ids:
                 if fp not in eligible_fps:
                     aux_fps.add(fp)
@@ -847,7 +897,7 @@ class ImportClusterService:
         for b in brand_clusters:
             remaining_fps = tuple(
                 fp for fp in b.fingerprint_cluster_ids
-                if fp not in counterparty_bound_fps
+                if fp not in brand_bound_fps
             )
             if not remaining_fps:
                 continue
@@ -871,7 +921,7 @@ class ImportClusterService:
                 fingerprint_cluster_ids=remaining_fps,
             ))
 
-        return eligible + aux_clusters, filtered_brand_clusters, counterparty_groups
+        return eligible + aux_clusters, filtered_brand_clusters, brand_binding_groups
 
     @staticmethod
     def _group_by_brand(clusters: list[Cluster]) -> list[BrandCluster]:
@@ -915,85 +965,84 @@ class ImportClusterService:
         brand_clusters.sort(key=lambda b: (-b.count, b.brand))
         return brand_clusters
 
-    def _group_by_counterparty(
+    def _group_by_brand_binding(
         self, clusters: list[Cluster], *, user_id: int,
-    ) -> list[CounterpartyGroup]:
-        """Aggregate fingerprint clusters by their bound counterparty.
+    ) -> list[BrandGroup]:
+        """Aggregate fingerprint clusters by their bound Brand.
 
-        Each fingerprint is resolved through `CounterpartyFingerprintService`;
-        only those bound to a counterparty participate. The resulting groups
-        collapse all fingerprints sharing one counterparty under a single
-        card in the UI.
+        Phase C step 4 successor to `_group_by_counterparty`. Each fingerprint
+        is resolved through `BrandFingerprintService` /
+        `BrandIdentifierService`; only those bound to a Brand participate.
+        The resulting groups collapse all fingerprints sharing one brand
+        under a single card in the UI.
 
-        Single-member groups are still emitted — the counterparty label ("Вкусная
-        точка") beats the raw skeleton in the UI even when only one
-        fingerprint is bound so far.
+        Single-member groups are still emitted — the brand label («Вкусная
+        точка») beats the raw skeleton even when only one fingerprint is
+        bound so far.
+
+        Identifier binding takes precedence over fingerprint binding —
+        cross-account and cross-bank, so a phone/contract/IBAN bound on
+        one statement resolves on the next.
         """
         if not clusters:
             return []
-        # Identifier binding takes precedence — it's cross-account and
-        # cross-bank, so a phone/contract/IBAN bound on one statement resolves
-        # on the next. Fingerprint binding is the fallback for skeleton/brand
-        # clusters without an identifier (or with an unsupported one).
         id_pairs: list[tuple[str, str]] = [
             (c.identifier_key, c.identifier_value)
             for c in clusters
             if c.identifier_key and c.identifier_value
         ]
-        id_map = self.counterparty_id_service.resolve_many(
+        id_map = self.brand_id_service.resolve_many(
             user_id=user_id, pairs=id_pairs,
         )
-        fp_map = self.counterparty_fp_service.resolve_many(
+        fp_map = self.brand_fp_service.resolve_many(
             user_id=user_id,
             fingerprints=[c.fingerprint for c in clusters],
         )
-        # Per-cluster resolved counterparty_id: identifier wins when present.
-        cluster_cp: dict[str, int] = {}
+        # Per-cluster resolved brand_id: identifier wins when present.
+        cluster_brand: dict[str, int] = {}
         for c in clusters:
             if c.identifier_key and c.identifier_value:
-                cp = id_map.get((c.identifier_key, c.identifier_value))
-                if cp is not None:
-                    cluster_cp[c.fingerprint] = cp
+                bid = id_map.get((c.identifier_key, c.identifier_value))
+                if bid is not None:
+                    cluster_brand[c.fingerprint] = bid
                     continue
-            cp = fp_map.get(c.fingerprint)
-            if cp is not None:
-                cluster_cp[c.fingerprint] = cp
-        if not cluster_cp:
+            bid = fp_map.get(c.fingerprint)
+            if bid is not None:
+                cluster_brand[c.fingerprint] = bid
+        if not cluster_brand:
             return []
-        # Name lookup for each counterparty_id referenced.
-        cp_ids = set(cluster_cp.values())
-        cp_rows = (
-            self.db.query(Counterparty)
-            .filter(Counterparty.id.in_(cp_ids), Counterparty.user_id == user_id)
+        # Name + per-user display-label lookup for each Brand id referenced.
+        brand_ids = set(cluster_brand.values())
+        brand_rows = (
+            self.db.query(Brand)
+            .filter(Brand.id.in_(brand_ids))
             .all()
         )
-        cp_by_id = {cp.id: cp for cp in cp_rows}
+        brand_by_id = {b.id: b for b in brand_rows}
+        # Per-user display-name overrides — when set, the user sees their
+        # own label («Пятёрочка у дома») instead of the brand canonical.
+        from app.repositories.user_brand_display_name_repository import (
+            UserBrandDisplayNameRepository,
+        )
+        display_repo = UserBrandDisplayNameRepository(self.db)
+        display_overrides: dict[int, str] = {}
+        for udn in display_repo.list_for_user(user_id=user_id):
+            display_overrides[udn.brand_id] = udn.display_name
 
-        # Bucket clusters by counterparty_id ONLY — direction does NOT split.
-        # One counterparty = one card, regardless of direction. Sample case
-        # «Отец» as both a sender and recipient of personal transfers: same
-        # person, one card, mixed direction. The fingerprint clustering layer
-        # below still splits by direction (one skeleton + income vs same
-        # skeleton + expense are separate fingerprints), but at the
-        # counterparty layer we collapse them.
-        #
-        # Refund handling is no longer a special case — refund-income simply
-        # joins the expense bucket of the same counterparty like any other
-        # income binding would. The display direction (`direction` field) is
-        # the dominant side by row count; if both income and expense members
-        # exist, `is_mixed_direction=True` so the UI can render a mixed-mode
-        # badge instead of a single-direction one.
+        # Bucket clusters by brand_id ONLY — direction does NOT split.
+        # One brand = one card, regardless of direction. Same policy the
+        # CounterpartyGroup era used for «Отец» (income + expense).
         buckets: dict[int, list[Cluster]] = {}
         for cluster in clusters:
-            cp_id = cluster_cp.get(cluster.fingerprint)
-            if cp_id is None:
+            bid = cluster_brand.get(cluster.fingerprint)
+            if bid is None:
                 continue
-            if cp_id not in cp_by_id:
-                continue  # counterparty deleted; ignore binding
-            buckets.setdefault(cp_id, []).append(cluster)
+            if bid not in brand_by_id:
+                continue  # brand deleted; ignore binding
+            buckets.setdefault(bid, []).append(cluster)
 
-        groups: list[CounterpartyGroup] = []
-        for cp_id, members in buckets.items():
+        groups: list[BrandGroup] = []
+        for bid, members in buckets.items():
             total_count = sum(m.count for m in members)
             expense_members = [m for m in members if m.direction == "expense"]
             income_members = [m for m in members if m.direction == "income"]
@@ -1006,32 +1055,26 @@ class ImportClusterService:
                 (m.total_amount for m in income_members), Decimal("0")
             )
 
-            # Display direction = dominant by row count. Ties go to expense
-            # (cards with as many incomes as expenses are rare; default to
-            # expense so the UI shows expense-kind categories — refund cards
-            # behaved this way before the rewrite).
             is_mixed = bool(expense_members) and bool(income_members)
             if expense_count >= income_count:
                 direction = "expense"
-                # Net spend: gross expense minus any income (refunds, partial
-                # repayments). Subtitle shows what the user effectively paid.
                 total_amount = expense_sum - income_sum
             else:
                 direction = "income"
-                # Net inflow: gross income minus any outflow back to the same
-                # counterparty.
                 total_amount = income_sum - expense_sum
 
-            groups.append(CounterpartyGroup(
-                counterparty_id=cp_id,
-                counterparty_name=cp_by_id[cp_id].name,
+            brand = brand_by_id[bid]
+            display_name = display_overrides.get(bid) or brand.canonical_name
+            groups.append(BrandGroup(
+                brand_id=bid,
+                brand_name=display_name,
                 direction=direction,
                 count=total_count,
                 total_amount=total_amount,
                 fingerprint_cluster_ids=tuple(m.fingerprint for m in members),
                 is_mixed_direction=is_mixed,
             ))
-        groups.sort(key=lambda g: (-g.count, g.counterparty_name))
+        groups.sort(key=lambda g: (-g.count, g.brand_name))
         return groups
 
     # ------------------------------------------------------------------
@@ -1195,22 +1238,25 @@ class ImportClusterService:
 
         return None, None, "none", _CONF_FLOOR, _ID_MATCH_ABSENT, 0, 0
 
-    def _resolve_refund_counterparty(
+    def _resolve_refund_brand(
         self, *, user_id: int, brand: str,
     ) -> tuple[int | None, str | None, int | None]:
-        """For a refund cluster, find the best (counterparty, category) pair.
+        """For a refund cluster, find the best (brand, category) pair from
+        the user's expense history.
 
-        Search strategy: among the user's **expense** transactions over the last
-        365 days, find those whose counterparty name or description contains
-        `brand` (case-insensitive). Pick the counterparty with the most such
-        transactions; within that counterparty, pick the category used in the
-        most transactions. Both picks are majority vote — no weighting.
+        Search strategy: among the user's **expense** transactions over
+        the last 365 days, find those whose brand canonical_name or
+        description contains `brand` (case-insensitive). Pick the Brand
+        with the most such transactions; within that Brand, pick the
+        category used in the most transactions. Both picks are majority
+        vote — no weighting.
 
-        Returns `(counterparty_id, counterparty_name, category_id)`. Any field
-        may be None when no confident match exists (no hits → all None;
-        counterparty found but none of its purchases were categorized →
-        (id, name, None), in which case the cluster stays in attention
-        bucket to let the user pick a category manually).
+        Returns `(brand_id, brand_name, category_id)`. Any field may be
+        None when no confident match exists.
+
+        Phase C step 4 flipped this from the old Counterparty-keyed
+        version. The same `Transaction.brand_id` populated by the
+        dual-write window in steps 2-3 now drives the JOIN.
         """
         from collections import Counter as _Counter
 
@@ -1226,17 +1272,17 @@ class ImportClusterService:
 
         rows = (
             self.db.query(
-                Transaction.counterparty_id,
+                Transaction.brand_id,
                 Transaction.category_id,
-                Counterparty.name,
+                Brand.canonical_name,
             )
-            .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
+            .outerjoin(Brand, Brand.id == Transaction.brand_id)
             .filter(
                 Transaction.user_id == user_id,
                 Transaction.type == "expense",
                 Transaction.transaction_date >= lookback_start,
                 or_(
-                    func.lower(Counterparty.name).like(like_pattern),
+                    func.lower(Brand.canonical_name).like(like_pattern),
                     func.lower(Transaction.description).like(like_pattern),
                     func.lower(Transaction.normalized_description).like(like_pattern),
                 ),
@@ -1247,29 +1293,29 @@ class ImportClusterService:
         if not rows:
             return None, None, None
 
-        # Pick counterparty by frequency. Counterparty_id can be NULL on older
-        # rows — those are dropped here because we need a concrete binding to
+        # Pick brand by frequency. brand_id can be NULL on older rows —
+        # those are dropped here because we need a concrete binding to
         # inherit; description-match alone is not enough to create one.
-        cp_counter: _Counter = _Counter(
-            r.counterparty_id for r in rows if r.counterparty_id is not None
+        brand_counter: _Counter = _Counter(
+            r.brand_id for r in rows if r.brand_id is not None
         )
-        if not cp_counter:
+        if not brand_counter:
             return None, None, None
 
-        top_cp_id, _ = cp_counter.most_common(1)[0]
-        cp_name = next(
-            (r.name for r in rows if r.counterparty_id == top_cp_id and r.name),
+        top_brand_id, _ = brand_counter.most_common(1)[0]
+        brand_name = next(
+            (r.canonical_name for r in rows if r.brand_id == top_brand_id and r.canonical_name),
             None,
         )
 
-        # Dominant category for the chosen counterparty.
+        # Dominant category for the chosen brand.
         cat_counter: _Counter = _Counter(
             r.category_id for r in rows
-            if r.counterparty_id == top_cp_id and r.category_id is not None
+            if r.brand_id == top_brand_id and r.category_id is not None
         )
         top_cat_id = cat_counter.most_common(1)[0][0] if cat_counter else None
 
-        return top_cp_id, cp_name, top_cat_id
+        return top_brand_id, brand_name, top_cat_id
 
     @staticmethod
     def _classify_identifier_match(bucket: "_ClusterAccumulator", rule: Any) -> str:

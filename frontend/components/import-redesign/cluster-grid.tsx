@@ -45,12 +45,6 @@ import {
 } from '@/lib/api/imports';
 import { applyBrandToSession, listBrands } from '@/lib/api/brands';
 import { getCategories } from '@/lib/api/categories';
-// Outer ClusterGrid still renders Counterparty-typed cluster cards from
-// the bulk-cluster builder. Brand-typed clusters are computed server-side
-// off brand_fingerprints; the moderator UI stays multi-source until step 4
-// flips reads off counterparty_*. Keep the legacy fetch here so
-// `candidateCounterpartyId` chips still resolve to a name.
-import { getCounterparties } from '@/lib/api/counterparties';
 import type {
   BulkApplyPayload,
   BulkClusterRowUpdate,
@@ -58,11 +52,13 @@ import type {
   ImportPreviewResponse,
   ImportPreviewRow,
 } from '@/types/import';
-import type { Counterparty } from '@/types/counterparty';
 
 type CardData = {
   key: string;
-  type: 'counterparty' | 'brand' | 'fingerprint';
+  // Phase C step 4: 'brand-binding' replaces 'counterparty' as the
+  // explicit-binding card type. Cluster cards built from a Brand
+  // grouping pre-filled with the brand name.
+  type: 'brand-binding' | 'brand' | 'fingerprint';
   label: string;
   count: number;
   totalAmount: string;
@@ -76,10 +72,10 @@ type CardData = {
    *  (e.g. 'debt', 'transfer'). These rows have no category by design, so the
    *  card should show the type label instead of "Выбери категорию". */
   dominantOpType: string | null;
-  candidateCounterpartyId: number | null;
+  candidateBrandId: number | null;
   rowIds: number[];
   clusterKey: string;
-  clusterType: 'fingerprint' | 'brand' | 'counterparty';
+  clusterType: 'fingerprint' | 'brand' | 'brand-binding';
 };
 
 // Collect all distinct non-null category IDs across member rows.
@@ -124,7 +120,7 @@ function dominantNonCategoryOpType(
 function consensusFrom(
   rowIds: number[],
   rowsById: Map<number, ImportPreviewRow>,
-  field: 'category_id' | 'counterparty_id',
+  field: 'category_id' | 'brand_id',
 ): number | null {
   let agreed: number | null = null;
   for (const id of rowIds) {
@@ -152,8 +148,8 @@ function buildCards(
   const covered = new Set<string>();
   const cards: CardData[] = [];
 
-  // Layer 1 — counterparty groups
-  for (const g of clusters.counterparty_groups ?? []) {
+  // Layer 1 — brand-binding groups (Phase C step 4: was counterparty groups).
+  for (const g of clusters.brand_groups ?? []) {
     const members = g.fingerprint_cluster_ids
       .map((id) => fpById.get(id))
       .filter((m): m is NonNullable<typeof m> => !!m);
@@ -164,23 +160,23 @@ function buildCards(
       members.find((m) => m.candidate_category_id !== null)?.candidate_category_id ??
       consensusFrom(rowIds, rowsById, 'category_id');
     cards.push({
-      key: `cp-${g.counterparty_id}-${g.direction}`,
-      type: 'counterparty',
-      label: g.counterparty_name,
+      key: `brand-binding-${g.brand_id}-${g.direction}`,
+      type: 'brand-binding',
+      label: g.brand_name,
       count: g.count,
       totalAmount: g.total_amount,
       direction: g.direction,
       candidateCategoryId: cat,
       uniqueCategoryIds: uniqueCategoriesFrom(rowIds, rowsById),
       dominantOpType: dominantNonCategoryOpType(rowIds, rowsById),
-      candidateCounterpartyId: g.counterparty_id,
+      candidateBrandId: g.brand_id,
       rowIds,
-      clusterKey: g.counterparty_name,
-      clusterType: 'counterparty',
+      clusterKey: g.brand_name,
+      clusterType: 'brand-binding',
     });
   }
 
-  // Layer 2 — brand clusters whose members aren't already in a counterparty card
+  // Layer 2 — brand clusters whose members aren't already in a brand-binding card.
   for (const b of clusters.brand_clusters) {
     const members = b.fingerprint_cluster_ids
       .map((id) => fpById.get(id))
@@ -192,7 +188,7 @@ function buildCards(
     const cat =
       members.find((m) => m.candidate_category_id !== null)?.candidate_category_id ??
       consensusFrom(rowIds, rowsById, 'category_id');
-    const cp = consensusFrom(rowIds, rowsById, 'counterparty_id');
+    const brandId = consensusFrom(rowIds, rowsById, 'brand_id');
     const count = members.reduce((s, m) => s + m.count, 0);
     cards.push({
       key: `brand-${b.brand}-${b.direction}`,
@@ -204,7 +200,7 @@ function buildCards(
       candidateCategoryId: cat,
       uniqueCategoryIds: uniqueCategoriesFrom(rowIds, rowsById),
       dominantOpType: dominantNonCategoryOpType(rowIds, rowsById),
-      candidateCounterpartyId: cp,
+      candidateBrandId: brandId,
       rowIds,
       clusterKey: b.brand,
       clusterType: 'brand',
@@ -216,7 +212,7 @@ function buildCards(
     if (covered.has(fc.fingerprint)) continue;
     const cat =
       fc.candidate_category_id ?? consensusFrom(fc.row_ids, rowsById, 'category_id');
-    const cp = consensusFrom(fc.row_ids, rowsById, 'counterparty_id');
+    const brandId = consensusFrom(fc.row_ids, rowsById, 'brand_id');
     const rawSkeleton = fc.skeleton || '(без шаблона)';
     const label =
       fc.identifier_key && fc.identifier_value
@@ -232,7 +228,7 @@ function buildCards(
       candidateCategoryId: cat,
       uniqueCategoryIds: uniqueCategoriesFrom(fc.row_ids, rowsById),
       dominantOpType: dominantNonCategoryOpType(fc.row_ids, rowsById),
-      candidateCounterpartyId: cp,
+      candidateBrandId: brandId,
       rowIds: fc.row_ids,
       clusterKey: fc.fingerprint,
       clusterType: 'fingerprint',
@@ -264,20 +260,25 @@ export function ClusterGrid({
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: () => getCategories() });
   const categories = categoriesQuery.data ?? [];
 
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
-  const counterparties: Counterparty[] = counterpartiesQuery.data ?? [];
-
   const categoryById = useMemo(() => {
     const m = new Map<number, string>();
     for (const c of categories) m.set(c.id, c.name);
     return m;
   }, [categories]);
 
-  const counterpartyById = useMemo(() => {
+  // Phase C step 4: brand chips on cluster cards resolve via brand_id →
+  // canonical_name (or per-user display label). The legacy `counterparties`
+  // fetch is gone — `BrandSelect` already loads `/brands`, so we read the
+  // same query cache here for chip rendering.
+  const brandsListQuery = useQuery({
+    queryKey: ['brands'],
+    queryFn: () => listBrands({ limit: 200 }),
+  });
+  const brandNameById = useMemo(() => {
     const m = new Map<number, string>();
-    for (const cp of counterparties) m.set(cp.id, cp.name);
+    for (const b of brandsListQuery.data ?? []) m.set(b.id, b.canonical_name);
     return m;
-  }, [counterparties]);
+  }, [brandsListQuery.data]);
 
   if (cards.length === 0) {
     return null;
@@ -304,12 +305,12 @@ export function ClusterGrid({
             categoryName={c.candidateCategoryId != null ? categoryById.get(c.candidateCategoryId) ?? null : null}
             categoryNames={c.uniqueCategoryIds.map((id) => categoryById.get(id) ?? null).filter((n): n is string => n !== null)}
             counterpartyName={
-              // Counterparty-typed cards already use their own name as the
+              // Brand-binding cards already use their own brand name as the
               // header label, so showing a duplicate chip is noise.
-              c.type === 'counterparty'
+              c.type === 'brand-binding'
                 ? null
-                : c.candidateCounterpartyId != null
-                  ? counterpartyById.get(c.candidateCounterpartyId) ?? null
+                : c.candidateBrandId != null
+                  ? brandNameById.get(c.candidateBrandId) ?? null
                   : null
             }
             onClick={(origin) => setOpenCard({ card: c, origin })}
@@ -325,7 +326,7 @@ export function ClusterGrid({
             origin={openCard.origin}
             rowsById={rowsById}
             categoryById={categoryById}
-            counterpartyById={counterpartyById}
+            counterpartyById={brandNameById}
             onClose={() => setOpenCard(null)}
           />
         ) : null}
@@ -373,7 +374,7 @@ function ClusterCardCollapsed({
         <span
           className={[
             'grid size-[30px] shrink-0 place-items-center rounded-lg text-sm font-semibold',
-            card.type === 'counterparty'
+            card.type === 'brand-binding'
               ? 'bg-accent-amber-soft text-accent-amber'
               : card.type === 'brand'
                 ? 'bg-accent-blue-soft text-accent-blue'

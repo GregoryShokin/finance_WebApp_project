@@ -227,10 +227,14 @@ class ImportPostProcessor:
                 nd["direction"] = "income"
                 if cluster.candidate_category_id is not None and not has_user_label:
                     nd["category_id"] = int(cluster.candidate_category_id)
-                if cluster.refund_resolved_counterparty_id is not None:
-                    existing_cp = nd.get("counterparty_id")
-                    if existing_cp in (None, "", 0):
-                        nd["counterparty_id"] = int(cluster.refund_resolved_counterparty_id)
+                # Phase C step 4: stamp the resolved brand id from the
+                # refund-history JOIN. Older rows that were already
+                # carrying nd.counterparty_id keep it as-is — step 5 sweeps
+                # those off when it drops the column.
+                if cluster.refund_resolved_brand_id is not None:
+                    existing_brand = nd.get("brand_id")
+                    if existing_brand in (None, "", 0):
+                        nd["brand_id"] = int(cluster.refund_resolved_brand_id)
                 self.import_repo.update_row(row, normalized_data=nd)
 
     # ------------------------------------------------------------------

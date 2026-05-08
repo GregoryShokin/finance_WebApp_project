@@ -825,10 +825,14 @@ function aggregateCounterparties(
   preview: ImportPreviewResponse,
   clusters: BulkClustersResponse | null,
 ) {
-  const counterpartyById = new Map<number, string>();
-  if (clusters?.counterparty_groups) {
-    for (const g of clusters.counterparty_groups) {
-      counterpartyById.set(g.counterparty_id, g.counterparty_name);
+  // Phase C step 4: brand-binding groups replaced counterparty groups.
+  // The map below is consulted when a row carries only a brand_id (no
+  // human-readable name on the row itself) — falling back to brand_canonical_name
+  // is unchanged.
+  const brandNameById = new Map<number, string>();
+  if (clusters?.brand_groups) {
+    for (const g of clusters.brand_groups) {
+      brandNameById.set(g.brand_id, g.brand_name);
     }
   }
 
@@ -837,6 +841,7 @@ function aggregateCounterparties(
   for (const row of preview.rows) {
     const nd = (row.normalized_data ?? {}) as Record<string, unknown>;
     const cpName =
+      (typeof nd.brand_canonical_name === 'string' && nd.brand_canonical_name) ||
       (typeof nd.counterparty_name === 'string' && nd.counterparty_name) ||
       (typeof nd.brand === 'string' && nd.brand) ||
       (typeof nd.merchant === 'string' && nd.merchant) ||
