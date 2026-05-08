@@ -307,6 +307,9 @@ export type ImportSplitItem = {
   debt_partner_id?: number | null;
   // shared optional
   counterparty_id?: number | null;
+  // Phase C dual-write: split parts may carry brand_id alongside
+  // counterparty_id; backend stamps both onto the produced Transaction.
+  brand_id?: number | null;
 };
 
 export type ImportRowUpdatePayload = {
@@ -315,6 +318,9 @@ export type ImportRowUpdatePayload = {
   credit_account_id?: number | null;
   category_id?: number | null;
   counterparty_id?: number | null;
+  // Phase C dual-write: row updates accept brand_id; absence keeps the
+  // existing brand_id stamp from the resolver / brand-confirm path.
+  brand_id?: number | null;
   debt_partner_id?: number | null;
   amount?: number | null;
   type?: string | null;

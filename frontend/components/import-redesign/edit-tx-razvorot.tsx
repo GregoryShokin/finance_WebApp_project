@@ -252,20 +252,24 @@ export function EditTxRazvorot({
       payload.debt_direction = debtDirection || undefined;
       payload.category_id = null;
       payload.counterparty_id = null;
+      payload.brand_id = null;
     } else if (type === 'transfer') {
       payload.operation_type = 'transfer';
       payload.target_account_id = transferAccountId;
       payload.category_id = null;
       payload.counterparty_id = null;
+      payload.brand_id = null;
     } else if (type === 'investment') {
       payload.operation_type = investmentDirToOperationType(investmentDirFor(direction));
       payload.category_id = null;
       payload.counterparty_id = null;
+      payload.brand_id = null;
     } else if (type === 'credit_operation') {
       payload.operation_type = creditKindToOperationType(creditKind as CreditKind);
       payload.credit_account_id = creditAccountId;
       payload.category_id = null;
       payload.counterparty_id = null;
+      payload.brand_id = null;
       if (creditNeedsSplit) {
         payload.credit_principal_amount = creditPrincipalNum;
         payload.credit_interest_amount = creditInterestNum;

@@ -125,6 +125,11 @@ export function TxRow({
   const [type, setType] = useState<MainType>(detectInitialType(row));
   const [categoryId, setCategoryId]               = useState<number | null>((nd.category_id as number | null) ?? null);
   const [counterpartyId, setCounterpartyId]       = useState<number | null>((nd.counterparty_id as number | null) ?? null);
+  // Phase C dual-write: track nd.brand_id alongside nd.counterparty_id so
+  // payload submission keeps both stores in sync. The row UI doesn't pick
+  // a brand directly — value comes from the resolver / brand-confirm path
+  // and we just preserve it on save.
+  const [brandId, setBrandId]                     = useState<number | null>((nd.brand_id as number | null) ?? null);
   const [debtPartnerId, setDebtPartnerId]         = useState<number | null>((nd.debt_partner_id as number | null) ?? null);
   const [debtDirection, setDebtDirection]         = useState<DebtDirection | ''>(((nd.debt_direction as DebtDirection) || ''));
   const [transferAccountId, setTransferAccountId] = useState<number | null>((nd.target_account_id as number | null) ?? null);
@@ -150,12 +155,16 @@ export function TxRow({
   // setCategoryId/setCounterpartyId (state would already match prop).
   const externalCategoryId = (nd.category_id as number | null) ?? null;
   const externalCounterpartyId = (nd.counterparty_id as number | null) ?? null;
+  const externalBrandId = (nd.brand_id as number | null) ?? null;
   useEffect(() => {
     setCategoryId(externalCategoryId);
   }, [externalCategoryId]);
   useEffect(() => {
     setCounterpartyId(externalCounterpartyId);
   }, [externalCounterpartyId]);
+  useEffect(() => {
+    setBrandId(externalBrandId);
+  }, [externalBrandId]);
 
   // The parser stores amount as an absolute magnitude; direction is the
   // authoritative source of sign. Never derive sign from `amount > 0`.
@@ -277,21 +286,25 @@ export function TxRow({
       payload.operation_type = 'debt';
       payload.debt_partner_id = debtPartnerId;
       payload.counterparty_id = null;
+      payload.brand_id = null;
       payload.category_id = null;
       if (debtDirection) payload.debt_direction = debtDirection;
     } else if (type === 'transfer') {
       payload.operation_type = 'transfer';
       payload.target_account_id = transferAccountId;
       payload.counterparty_id = null;
+      payload.brand_id = null;
       payload.category_id = null;
     } else if (type === 'investment') {
       payload.operation_type = investmentDirToOperationType(investmentDirFor(direction));
       payload.counterparty_id = null;
+      payload.brand_id = null;
       payload.category_id = null;
     } else if (type === 'credit_operation') {
       payload.operation_type = creditKind ? creditKindToOperationType(creditKind) : 'regular';
       payload.credit_account_id = creditAccountId;
       payload.counterparty_id = null;
+      payload.brand_id = null;
       payload.category_id = null;
       if (creditKind === 'payment' || creditKind === 'early_repayment') {
         payload.credit_principal_amount = creditPrincipal ? Number(creditPrincipal) : null;
@@ -301,10 +314,12 @@ export function TxRow({
       payload.operation_type = 'refund';
       payload.category_id = categoryId;
       payload.counterparty_id = counterpartyId;
+      payload.brand_id = brandId;
     } else {
       payload.operation_type = 'regular';
       payload.category_id = categoryId;
       payload.counterparty_id = counterpartyId;
+      payload.brand_id = brandId;
     }
     patchMut.mutate(payload);
   };
@@ -563,6 +578,7 @@ export function TxRow({
             // Reset cross-type fields so we never send stale ids.
             setCategoryId(null);
             setCounterpartyId(null);
+            setBrandId(null);
             setDebtPartnerId(null);
             setTransferAccountId(null);
             setDebtDirection('');

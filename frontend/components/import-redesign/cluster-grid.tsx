@@ -31,21 +31,25 @@ import {
 import { toast } from 'sonner';
 
 import { Chip } from '@/components/ui/status-chip';
-import { CategorySelect, CounterpartySelect } from '@/components/import/entity-selects';
+import { BrandSelect, CategorySelect } from '@/components/import/entity-selects';
 import { fmtDateTime, fmtRubSigned } from './format';
 import { SplitModal } from './split-modal';
 import { SplitChip } from './split-chip';
 import { EditTxRazvorot } from './edit-tx-razvorot';
 import {
-  attachRowToCounterparty,
   bulkApplyCluster,
   confirmRowBrand,
   detachImportRowFromCluster,
   excludeImportRow,
   parkImportRow,
 } from '@/lib/api/imports';
-import { applyBrandToSession, createBrand, listBrands } from '@/lib/api/brands';
+import { applyBrandToSession, listBrands } from '@/lib/api/brands';
 import { getCategories } from '@/lib/api/categories';
+// Outer ClusterGrid still renders Counterparty-typed cluster cards from
+// the bulk-cluster builder. Brand-typed clusters are computed server-side
+// off brand_fingerprints; the moderator UI stays multi-source until step 4
+// flips reads off counterparty_*. Keep the legacy fetch here so
+// `candidateCounterpartyId` chips still resolve to a name.
 import { getCounterparties } from '@/lib/api/counterparties';
 import type {
   BulkApplyPayload,
@@ -528,9 +532,15 @@ function ClusterModal({
   // Auto-filled candidateCategoryId should NOT be applied on «Подтвердить» —
   // only a user-chosen category (or one set via «Применить ко всем») should.
   const [userPickedBulkCategory, setUserPickedBulkCategory] = useState(false);
-  const [bulkCounterpartyId, setBulkCounterpartyId] = useState<number | null>(
-    card.candidateCounterpartyId,
-  );
+  // Phase C step 3: cluster-modal picker is now Brand-native. The legacy
+  // `bulkCounterpartyId` was resolved to a Brand at apply time anyway —
+  // here we let the user pick the Brand directly, no CP→Brand round-trip.
+  // `card.candidateCounterpartyId` is reused as the initial seed: the
+  // bulk-cluster builder still emits the CP id today, and the picker
+  // option list (loaded from /brands) won't match it 1:1, but treating
+  // it as null when the brand list doesn't carry the same id is fine —
+  // the user re-picks if they want a brand.
+  const [bulkBrandId, setBulkBrandId] = useState<number | null>(null);
 
   // Spec §5.2/§13 v1.20: when ALL eligible rows in this cluster carry the
   // SAME suggested_target_account_id (orphan-transfer history hint), surface
@@ -569,7 +579,10 @@ function ClusterModal({
   }, [card.rowIds, rowsById]);
 
   const categoriesQuery = useQuery({ queryKey: ['categories'], queryFn: () => getCategories() });
-  const counterpartiesQuery = useQuery({ queryKey: ['counterparties'], queryFn: getCounterparties });
+  const brandsQuery = useQuery({
+    queryKey: ['brands'],
+    queryFn: () => listBrands({ limit: 200 }),
+  });
 
   // `kind` is required so EditTxRazvorot can filter by income/expense via
   // categoryOptionsForKind. Without it the per-type filter empties the list.
@@ -583,9 +596,13 @@ function ClusterModal({
       })),
     [categoriesQuery.data],
   );
-  const counterpartyOptions = useMemo(
-    () => (counterpartiesQuery.data ?? []).map((cp) => ({ value: String(cp.id), label: cp.name })),
-    [counterpartiesQuery.data],
+  const brandOptions = useMemo(
+    () =>
+      (brandsQuery.data ?? []).map((b) => ({
+        value: String(b.id),
+        label: b.canonical_name,
+      })),
+    [brandsQuery.data],
   );
 
   const direction: 'income' | 'expense' = card.direction === 'income' ? 'income' : 'expense';
@@ -737,57 +754,31 @@ function ClusterModal({
     );
     const freshPreConfirmed = visibleRowIds.filter((id) => !isFreshEligible(id)).length;
 
-    // ── v1.24 Brand-Counterparty UI unification ────────────────────────
-    // The «Бренд (необязательно)» picker (former «Контрагент») resolves
-    // to a Brand entity. Brand-confirm path (a) creates Counterparty by
-    // name (find-or-create), (b) stamps nd.counterparty_id, (c) binds
-    // CounterpartyFingerprint, (d) auto-learns a text-pattern from the
-    // skeleton — single canonical path replacing the parallel
-    // counterparty-only stamping flow. Non-eligible rows (debt/transfer)
-    // still take the fingerprint-binding-only path below to preserve
-    // §12.2 (debt rows MUST have counterparty_id=NULL on Transaction).
-    let resolvedBrandId: number | null = null;
-    if (bulkCounterpartyId) {
-      const cpName = counterpartyOptions.find(
-        (o) => Number(o.value) === bulkCounterpartyId,
-      )?.label;
-      if (cpName) {
-        try {
-          const matches = await listBrands({ q: cpName, limit: 50 });
-          const cpNameLower = cpName.toLowerCase();
-          let brand = matches.find(
-            (b) => b.canonical_name.toLowerCase() === cpNameLower,
-          );
-          if (!brand) {
-            brand = await createBrand({
-              canonical_name: cpName,
-              category_hint: null,
-            });
-          }
-          resolvedBrandId = brand.id;
-        } catch (err) {
-          // Non-fatal — fall back to legacy counterparty path. Toast at
-          // higher severity if Brand creation actually 4xx'd.
-          console.error('Brand resolve failed', err);
-        }
-      }
-    }
+    // ── Phase C: Brand-native picker ───────────────────────────────────
+    // The user picks a Brand directly via <BrandSelect>. No CP→Brand
+    // round-trip — `bulkBrandId` is the resolver target. brand-confirm
+    // (a) stamps nd.brand_id and the dual-write nd.counterparty_id,
+    // (b) binds the fingerprint on both stores, (c) auto-learns a
+    // text-pattern from the skeleton. Non-eligible rows (debt/transfer)
+    // skip the bulk-apply stamp but still receive the fingerprint
+    // binding via brand-confirm side effects, preserving §12.2
+    // (debt rows MUST have counterparty_id=NULL on Transaction).
+    const resolvedBrandId: number | null = bulkBrandId ?? null;
 
     // Two cases: (a) some regular rows are checked → run bulk-apply for them;
     // (b) only non-regular rows visible → they're already saved, just close.
     if (freshCheckedIds.length === 0) {
       if (freshPreConfirmed > 0) {
         // Non-eligible rows (debt, transfer, etc.) are already individually
-        // confirmed. If the user picked a cluster-level counterparty, create
-        // the CounterpartyFingerprint binding so these rows are grouped under
-        // the counterparty card in ClusterGrid (§6.3 — binding-level grouping
-        // is separate from row-level counterparty_id, which stays null for
-        // debt rows per §12.2 invariant).
-        if (bulkCounterpartyId) {
+        // confirmed. When the user picked a cluster-level brand, run
+        // brand-confirm on each non-eligible row so the binding (and the
+        // dual-write CP shadow) is created — same grouping that the
+        // pre-Phase-C `attachRowToCounterparty` flow produced.
+        if (resolvedBrandId !== null) {
           const nonEligibleIds = visibleRowIds.filter((id) => !isFreshEligible(id));
           await Promise.allSettled(
             nonEligibleIds.map((rowId) =>
-              attachRowToCounterparty(sessionId, rowId, bulkCounterpartyId),
+              confirmRowBrand(rowId, resolvedBrandId, null),
             ),
           );
         }
@@ -815,13 +806,14 @@ function ClusterModal({
       );
       return;
     }
-    // Brand-confirm BEFORE bulk-apply when a brand was resolved. This
-    // sets nd.counterparty_id + binds fingerprint + learns text-pattern.
+    // Brand-confirm BEFORE bulk-apply when a brand was picked. This
+    // stamps nd.brand_id (and dual-writes nd.counterparty_id) + binds
+    // the fingerprint on both stores + auto-learns the text-pattern.
     // bulk-apply that follows only has to set category + operation_type.
     if (resolvedBrandId !== null) {
       await Promise.allSettled(
         freshCheckedIds.map((rowId) =>
-          confirmRowBrand(rowId, resolvedBrandId!, null),
+          confirmRowBrand(rowId, resolvedBrandId, null),
         ),
       );
     }
@@ -837,11 +829,11 @@ function ClusterModal({
         row_id,
         operation_type: existingOp === 'refund' ? 'refund' : 'regular',
         category_id: perRowCat.get(row_id) ?? effectiveBulkCat ?? ndCat ?? null,
-        // counterparty_id: when a brand was confirmed above it's already
-        // stamped via brand-confirm; passing it again would no-op but
-        // also overwrite if user later edited the per-row name. When no
-        // brand was resolved, fall back to legacy direct stamp.
-        counterparty_id: resolvedBrandId !== null ? null : bulkCounterpartyId,
+        // counterparty_id stays null at the bulk-apply layer — brand-confirm
+        // above already handles entity stamping (and dual-writes the CP
+        // shadow). Passing counterparty_id here would only overwrite the
+        // fresh stamp without adding information.
+        counterparty_id: null,
       };
     });
     try {
@@ -988,10 +980,10 @@ function ClusterModal({
                 />
               </ControlField>
               <ControlField label="Бренд (необязательно)">
-                <CounterpartySelect
-                  value={bulkCounterpartyId}
-                  options={counterpartyOptions}
-                  onChange={setBulkCounterpartyId}
+                <BrandSelect
+                  value={bulkBrandId}
+                  options={brandOptions}
+                  onChange={setBulkBrandId}
                 />
               </ControlField>
               <button

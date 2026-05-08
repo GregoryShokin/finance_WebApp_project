@@ -25,6 +25,7 @@ import { CategoryDialog } from '@/components/categories/category-dialog';
 import { CounterpartyDialog } from '@/components/counterparties/counterparty-dialog';
 import { createCategory } from '@/lib/api/categories';
 import { createCounterparty, updateCounterparty } from '@/lib/api/counterparties';
+import { createBrand, type Brand } from '@/lib/api/brands';
 import { createDebtPartner } from '@/lib/api/debt-partners';
 import { createAccount } from '@/lib/api/accounts';
 import type {
@@ -204,6 +205,63 @@ export function CounterpartySelect({
         }}
       />
     </>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Brand (Phase C — successor to CounterpartySelect for the import moderator).
+//
+// Differences from CounterpartySelect:
+//   • options come from /brands (private + global merged), not /counterparties
+//   • inline-create produces a private brand via /brands POST
+//   • no inline rename — Brand renames live in the Brand management surface,
+//     and a per-user display label edit goes through UserBrandDisplayName
+//     (not exposed here yet; row-level brand-prompt handles it)
+// ──────────────────────────────────────────────────────────────────────────
+
+export function BrandSelect({
+  value,
+  options,
+  onChange,
+  width,
+  placeholder = '— бренд —',
+  disabled = false,
+}: {
+  value: number | null | undefined;
+  options: CreatableOption[];
+  onChange: (id: number) => void;
+  width?: number | string;
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  const queryClient = useQueryClient();
+
+  const createMut = useMutation({
+    mutationFn: (name: string) =>
+      createBrand({ canonical_name: name, category_hint: null }),
+    onSuccess: async (b: Brand) => {
+      await queryClient.invalidateQueries({ queryKey: ['brands'] });
+      toast.success(`Бренд «${b.canonical_name}» создан`);
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось создать бренд'),
+  });
+
+  return (
+    <CreatableSelect
+      value={value != null ? String(value) : null}
+      options={options}
+      onChange={(v) => onChange(Number(v))}
+      placeholder={placeholder}
+      width={width}
+      disabled={disabled}
+      createMode={{
+        kind: 'inline',
+        onCreate: async (name) => {
+          const b: Brand = await createMut.mutateAsync(name);
+          return { value: String(b.id), label: b.canonical_name };
+        },
+      }}
+    />
   );
 }
 

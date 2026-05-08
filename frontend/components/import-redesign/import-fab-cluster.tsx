@@ -826,6 +826,9 @@ function ParkedPanel({
         operation_type: nd.operation_type as string | undefined,
         category_id: nd.category_id as number | null | undefined,
         counterparty_id: nd.counterparty_id as number | null | undefined,
+        // Phase C dual-write: preserve nd.brand_id alongside nd.counterparty_id
+        // so the row's brand stamp survives this confirm round-trip.
+        brand_id: nd.brand_id as number | null | undefined,
         debt_partner_id: nd.debt_partner_id as number | null | undefined,
         target_account_id: nd.target_account_id as number | null | undefined,
       }),
