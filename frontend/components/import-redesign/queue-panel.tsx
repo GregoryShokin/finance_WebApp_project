@@ -24,6 +24,7 @@ import {
   getBulkClusters,
   getImportPreview,
   getImportSession,
+  startImportQueueAll,
 } from '@/lib/api/imports';
 import { createAccount, getAccounts } from '@/lib/api/accounts';
 import { fmtPeriod } from './format';
@@ -165,12 +166,39 @@ export function QueuePanel({
     onError: (e: Error) => toast.error(e.message || 'Не удалось импортировать'),
   });
 
+  // v1.23: bulk-trigger auto-preview for every analyzed session that has
+  // account+mapping. The backend returns `started / already_ready / skipped`
+  // counters — we surface them in the toast so the user can see at a glance
+  // which sessions still need manual fixing.
+  const startAllMut = useMutation({
+    mutationFn: startImportQueueAll,
+    onSuccess: (res) => {
+      const parts: string[] = [];
+      if (res.started > 0) parts.push(`запущено ${res.started}`);
+      if (res.already_ready > 0) parts.push(`уже готовы ${res.already_ready}`);
+      if (res.skipped > 0) parts.push(`пропущено ${res.skipped}`);
+      const message = parts.length ? `Разбор: ${parts.join(', ')}` : 'Нечего запускать';
+      if (res.started > 0) toast.success(message);
+      else toast.info(message);
+      queryClient.invalidateQueries({ queryKey: ['import-sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось запустить разбор'),
+  });
+
   const summaryParts: string[] = [];
   const ready = sessions.filter((s) => classifySession(s) === 'done_local').length;
   const errors = sessions.filter((s) => classifySession(s) === 'error').length;
   if (sessions.length) summaryParts.push(`${sessions.length} в работе`);
   if (ready) summaryParts.push(`${ready} готова к импорту`);
   if (errors) summaryParts.push(`${errors} ошибок`);
+
+  // Сколько сессий могут быть запущены кнопкой «Начать разбор всех»:
+  // status='analyzed' AND есть account_id. Backend сам отфильтрует по
+  // mapping; этот подсчёт нужен только чтобы скрыть кнопку при нуле.
+  const startableCount = sessions.filter(
+    (s) => s.status === 'analyzed' && s.account_id !== null,
+  ).length;
 
   return createPortal(
     <AnimatePresence>
@@ -208,6 +236,24 @@ export function QueuePanel({
               {summaryParts.length ? summaryParts.join(' · ') : 'Очередь пуста'}
             </div>
           </div>
+          {startableCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => startAllMut.mutate()}
+              disabled={startAllMut.isPending}
+              title={`Запустить разбор для ${startableCount} ${
+                startableCount === 1 ? 'выписки' : 'выписок'
+              }`}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-ink px-3 py-1.5 text-xs font-medium text-white transition hover:bg-ink-2 disabled:opacity-60"
+            >
+              {startAllMut.isPending ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <ArrowRight className="size-3" />
+              )}
+              Начать разбор всех ({startableCount})
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onClose}
