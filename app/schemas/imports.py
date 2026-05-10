@@ -631,6 +631,13 @@ class BrandConfirmRequest(BaseModel):
     # Optional: when set, used as the category for this brand globally for
     # the user. Default behaviour (no field) → resolver looks up by hint.
     category_id: int | None = Field(default=None, ge=1)
+    # Opt-out from `_learn_pattern_from_row`. Used by the explicit-pattern
+    # create flow (NameBindModal): the user just typed an exact recognition
+    # pattern via «По чему распознавать» — auto-learning a generic skeleton
+    # token on top would compete with their choice (e.g. user picked
+    # «APTEKA APREL» as the pattern, auto-learn would add «apteka» which
+    # then matches «Semeynaya apteka» and pulls it under the wrong brand).
+    skip_auto_learn: bool = False
 
 
 class BrandConfirmResponse(BaseModel):

@@ -233,7 +233,13 @@ export function NameBindModal({
         pattern: trimmedPattern,
         is_regex: false,
       });
-      await confirmRowBrand(rowId, brand.id, vars.category_id ?? null);
+      // skipAutoLearn=true — user just authored the recognition pattern
+      // explicitly via «По чему распознавать»; we must not let the
+      // confirm path auto-learn a parallel generic token that competes
+      // with their choice.
+      await confirmRowBrand(rowId, brand.id, vars.category_id ?? null, {
+        skipAutoLearn: true,
+      });
       let sweptCount = 0;
       try {
         const apply = await applyBrandToSession(brand.id);

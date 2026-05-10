@@ -430,6 +430,7 @@ def confirm_row_brand(
             row_id=row_id,
             brand_id=payload.brand_id,
             category_id=payload.category_id,
+            skip_auto_learn=payload.skip_auto_learn,
         )
     except BrandConfirmError as exc:
         db.rollback()

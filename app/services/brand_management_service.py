@@ -585,8 +585,16 @@ class BrandManagementService:
             self.db.flush()
 
             try:
+                # Skip auto-learn during the sweep — the brand's pattern
+                # set is what the user just told us to honour; cascading
+                # additional auto-learned tokens from each matched row
+                # produces false-positive patterns that drag in unrelated
+                # rows on the next sweep (e.g. matching «apteka» pattern
+                # caused «Semeynaya apteka» rows to be auto-learned and
+                # bound to the same brand).
                 confirmer.confirm_brand_for_row(
                     user_id=user_id, row_id=row.id, brand_id=brand_id,
+                    skip_auto_learn=True,
                 )
             except BrandConfirmError as exc:
                 logger.warning(

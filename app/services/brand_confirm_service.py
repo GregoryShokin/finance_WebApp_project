@@ -128,6 +128,7 @@ class BrandConfirmService:
         row_id: int,
         brand_id: int,
         category_id: int | None = None,
+        skip_auto_learn: bool = False,
     ) -> dict[str, Any]:
         """Confirm a brand for one row.
 
@@ -136,6 +137,14 @@ class BrandConfirmService:
         choice as a per-user override for this brand and apply it across
         every same-brand row in the session. Subsequent imports auto-pick
         the override too.
+
+        Optional `skip_auto_learn`: bypass `_learn_pattern_from_row`. Use
+        when the caller is acting on already-trusted recognition rules —
+        e.g. the explicit-pattern create flow (NameBindModal) or
+        `apply_brand_to_session` (the user just told us which patterns
+        to honour; cascading more auto-learned tokens on top causes
+        false positives like «apteka» dragging «Semeynaya apteka» under
+        «Аптека Апрель»).
         """
         session, row = self._load_row(user_id=user_id, row_id=row_id)
         brand = self._validate_brand(brand_id=brand_id, user_id=user_id)
@@ -232,10 +241,13 @@ class BrandConfirmService:
         # the dts-skeleton fingerprints, even though the user just told us
         # they belong to the same brand.
         # Pass tokens so the guard can skip personal-identifier rows (§X v1.26).
-        self._learn_pattern_from_row(
-            user_id=user_id, brand=brand, skeleton=nd.get("skeleton") or "",
-            tokens=nd.get("tokens"),
-        )
+        # `skip_auto_learn=True` opt-out is used by the explicit-pattern
+        # create flow and the bulk-apply sweep — see method docstring.
+        if not skip_auto_learn:
+            self._learn_pattern_from_row(
+                user_id=user_id, brand=brand, skeleton=nd.get("skeleton") or "",
+                tokens=nd.get("tokens"),
+            )
 
         # Propagate confirmation only when the user agreed with the
         # resolver — same-brand siblings inherit category. `force_category=True`

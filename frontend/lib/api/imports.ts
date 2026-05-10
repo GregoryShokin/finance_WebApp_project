@@ -225,12 +225,16 @@ export function confirmRowBrand(
   rowId: number,
   brandId: number,
   categoryId?: number | null,
+  options?: { skipAutoLearn?: boolean },
 ) {
   // Ph8: optional categoryId overrides the brand's default hint and saves
   // a per-user override so future imports of this brand resolve to the
   // chosen category.
+  // `skipAutoLearn` opt-out is used by the explicit-pattern create flow
+  // in NameBindModal — see backend BrandConfirmRequest for the rationale.
   const body: Record<string, unknown> = { brand_id: brandId };
   if (categoryId != null) body.category_id = categoryId;
+  if (options?.skipAutoLearn) body.skip_auto_learn = true;
   return apiClient<BrandConfirmResponse>(
     `/imports/rows/${rowId}/confirm-brand`,
     { method: 'POST', body: JSON.stringify(body) },
