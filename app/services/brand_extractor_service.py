@@ -45,7 +45,10 @@ _FILLER_TOKENS: frozenset[str] = frozenset({
     # Magnit-style format codes
     "gm", "mm", "hm",
     # Noise seen in practice
-    "md", "mop", "sbp", "qsr",
+    "md", "mop", "sbp", "сбп", "qsr",
+    # Generic service/utility words — not brands. Russian inflected forms of
+    # "сервис" so "оплата сервиса Яндекса" resolves to "яндекс", not "сервиса".
+    "сервис", "сервиса", "сервисе", "сервисов", "сервисам", "сервисами", "сервисах", "сервисы",
     # Mobile banking app prefixes — not brands
     "mbank", "мбанк",
     # Payment-method / card / transaction-type words
@@ -53,8 +56,13 @@ _FILLER_TOKENS: frozenset[str] = frozenset({
     "оплата", "оплаты", "оплате", "оплату",
     "платёж", "платежа", "платежу", "платеж",
     "покупка", "покупки", "покупке", "покупку",
-    # Generic service/utility words — not brands (e.g. "Оплата услуг mBank.MegaFon")
     "услуг", "услуга", "услуги", "услуге", "услугу", "услугами", "услугах",
+    # Generic product/goods words — same trap as «услуг». A row like "Оплата
+    # товаров и услуг yandex*5399*market" must not auto-learn «товаров» as a
+    # brand text-pattern (false positive: every "Оплата товаров..." row gets
+    # stamped with whatever brand the first one was confirmed under).
+    "товар", "товара", "товару", "товаром", "товаре",
+    "товары", "товаров", "товарам", "товарами", "товарах",
     "в",
     # Refund / reversal keywords — these describe the transaction KIND, not
     # the merchant. Required so refund rows like "Отмена операции оплаты
@@ -62,6 +70,32 @@ _FILLER_TOKENS: frozenset[str] = frozenset({
     # paired against their matching purchase.
     "возврат", "refund", "reversal", "отмена", "chargeback", "return",
     "операции", "операция",
+    # Banking-statement wrapper lexicon (spec v1.27). Russian banks include
+    # boilerplate like «Оплата товаров и услуг по кредитной карте 7497 сумма
+    # 1266.00 в YM*vkusnoitochka MOSKVA RU дата 2026 04-18 время 17:46:23».
+    # Without filtering these, `extract_brand` happily returns the first
+    # noun («товаров») as a brand candidate, which then gets auto-learned
+    # as a private pattern matching every future statement of the same
+    # wording. The structural guard in BrandConfirmService blocks Cyrillic
+    # auto-learn end-to-end; this list keeps clustering / brand-key
+    # extraction off the same trap.
+    "карта", "карты", "карте", "картой", "карту",
+    "карт",
+    "кредитной", "кредитная", "кредитному", "кредитный",
+    "дебетовой", "дебетовая", "дебетовый",
+    "сумма", "суммы", "суммой", "сумму",
+    "дата", "даты",
+    "время", "времени",
+    "номер", "номера", "номеру",
+    "счёт", "счета", "счёта", "счету", "счёту",
+    "получатель", "получателя", "получателю",
+    "отправитель", "отправителя",
+    "комиссия", "комиссии", "комиссию",
+    "начисление", "начисления",
+    "списание", "списания",
+    "заказ", "заказа", "заказу",
+    "платформе", "платформа", "платформу", "платформы",
+    "выписка", "выписки", "выписку",
     # Skeleton placeholders
     "<org>", "<person>", "<phone>", "<contract>", "<card>", "<iban>",
     "<amount>", "<date>",
@@ -86,6 +120,49 @@ _TRANSFER_SKELETON_TOKENS: frozenset[str] = frozenset({
     "transfer", "c2c",
     "внешний", "внутренний", "внутрибанковский",
 })
+
+
+def is_personal_identifier_row(skeleton: str, tokens) -> bool:
+    """True when the row identifies a personal counterparty (phone, contract,
+    person name) with NO merchant signal (legal org or SBP merchant ID).
+
+    Used to prevent personal-identifier rows from being auto-bound to Brand
+    entities — one person sends money for food, debt, rent, gifts; the category
+    is always different, so treating the phone/contract/name as a stable «brand
+    with a category» is semantically wrong (Brand Registry §X / spec v1.26).
+
+    Accepts either an `ExtractedTokens` dataclass or a plain dict
+    (from `normalized_data_json["tokens"]`).
+
+    Rules (all require org=None AND sbp_merchant_id=None):
+      • tokens.phone is set
+      • tokens.contract is set
+      • tokens.person_name (or person_name_present) is set
+    """
+    if tokens is None:
+        return False
+
+    if isinstance(tokens, dict):
+        phone = tokens.get("phone")
+        contract = tokens.get("contract")
+        person = tokens.get("person_name") or (
+            True if tokens.get("person_name_present") else None
+        )
+        org = tokens.get("counterparty_org")
+        sbp = tokens.get("sbp_merchant_id")
+    else:
+        phone = getattr(tokens, "phone", None)
+        contract = getattr(tokens, "contract", None)
+        person = getattr(tokens, "person_name", None)
+        org = getattr(tokens, "counterparty_org", None)
+        sbp = getattr(tokens, "sbp_merchant_id", None)
+
+    # Merchant signals override — if org or SBP merchant ID is present, this
+    # is a proper merchant row even if it also has a phone/contract.
+    if org or sbp:
+        return False
+
+    return bool(phone or contract or person)
 
 
 def extract_brand(skeleton: str) -> str | None:

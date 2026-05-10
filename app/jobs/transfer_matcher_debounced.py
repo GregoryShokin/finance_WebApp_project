@@ -115,6 +115,22 @@ def match_transfers_for_user_debounced(user_id: int, token: str) -> dict[str, An
         try:
             TransferMatcherService(db).match_transfers_for_user(user_id=user_id)
             db.commit()
+            # spec §9.10 v1.26 — finalize bank-mechanics suggest_exclude
+            # decisions deferred during build_preview. Rows that the matcher
+            # paired (cross-session §12.10 or branch B §8.5) keep their new
+            # status; rows still without a partner fall back to status=excluded.
+            try:
+                from app.repositories.import_repository import ImportRepository
+                from app.services.import_post_processor import ImportPostProcessor
+                ImportPostProcessor(
+                    db, import_repo=ImportRepository(db),
+                ).finalize_bank_mechanics_exclusions(user_id=user_id)
+                db.commit()
+            except Exception:
+                logger.exception(
+                    "finalize_bank_mechanics_exclusions failed for user %s", user_id
+                )
+                db.rollback()
             # spec §8.10 — Fee-aware suspect-pair second pass on leftovers.
             try:
                 from app.services.fee_matcher_service import FeeMatcherService

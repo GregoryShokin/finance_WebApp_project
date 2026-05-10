@@ -63,3 +63,30 @@ def test_extract_brand_stable_across_paren_locations() -> None:
     b = extract_brand("оплата в 14130 pyaterochka volgodonsk rus")
     c = extract_brand("оплата в pyaterochka volgodonsk 14130 rus")
     assert a == b == c == "pyaterochka"
+
+
+# ---------------------------------------------------------------------------
+# SBP / Яндекс regression — bugs fixed 2026-05-09
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("skeleton,expected", [  # type: ignore[misc]
+    # "сервис*" forms are filler → first real token is "яндекс"
+    ("оплата сервиса яндекс", "яндекс"),
+    ("оплата сервисе яндекс", "яндекс"),
+    # genitive form: resolver handles "яндекс" ⊆ "яндекса" via substring match
+    ("оплата сервиса яндекса", "яндекса"),
+    # "sbp" is filler AND "сервиса" is filler → "яндекс" wins, not "sbp"
+    ("возврат покупки sbp сервиса яндекс", "яндекс"),
+    ("возврат покупки sbp сервиса яндекса", "яндекса"),
+    # "sbp" alone → None (only fillers remain)
+    ("оплата sbp", None),
+    # transfer keyword short-circuits before reaching "sbp" or any brand
+    ("перевод sbp от <person>", None),
+    # Cyrillic СБП is also filler
+    ("оплата сбп яндекс", "яндекс"),
+    ("оплата сбп", None),
+])
+def test_extract_brand_sbp_rail_and_yandex_service(
+    skeleton: str, expected: str | None,
+) -> None:
+    assert extract_brand(skeleton) == expected

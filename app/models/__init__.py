@@ -24,6 +24,7 @@ from app.models.budget_alert import BudgetAlert
 from app.models.capital_snapshot import CapitalSnapshot
 from app.models.category import Category
 from app.models.debt_partner import DebtPartner
+from app.models.debt_partner_identifier import DebtPartnerIdentifier
 from app.models.fingerprint_alias import FingerprintAlias
 from app.models.goal import Goal
 from app.models.import_row import ImportRow
@@ -52,6 +53,7 @@ __all__ = [
     "CapitalSnapshot",
     "Category",
     "DebtPartner",
+    "DebtPartnerIdentifier",
     "FingerprintAlias",
     "Goal",
     "ImportRow",

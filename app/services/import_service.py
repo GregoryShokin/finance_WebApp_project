@@ -24,6 +24,7 @@ from app.schemas.imports import (
     ImportPreviewSummary,
     ImportRowUpdateRequest,
 )
+from app.services.brand_extractor_service import is_personal_identifier_row
 from app.services.brand_fingerprint_service import BrandFingerprintService
 from app.services.brand_identifier_service import (
     SUPPORTED_IDENTIFIER_KINDS,
@@ -1395,7 +1396,127 @@ class ImportService:
         existing.update(counts)
         return existing
 
-    def _serialize_preview_row(self, row: ImportRow) -> dict[str, Any]:
+    def search_names(
+        self, *, user_id: int, query: str, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Unified Brand + DebtPartner name search for the «+ Имя / Бренд»
+        modal. Returns one merged list with a `kind` tag per item so the
+        moderator UI can render results from both stores under a single
+        search box without making two round-trips.
+
+        Sort: exact case-fold match first, then prefix matches, then
+        substring matches. Within each tier we keep alphabetical order.
+        Limit is applied AFTER sort so the user always sees the strongest
+        matches first.
+        """
+        from app.repositories.brand_repository import BrandRepository
+        from app.repositories.category_repository import CategoryRepository
+        from app.repositories.debt_partner_repository import DebtPartnerRepository
+
+        q = (query or "").strip()
+        ql = q.lower()
+
+        brand_repo = BrandRepository(self.db)
+        dp_repo = DebtPartnerRepository(self.db)
+        cat_repo = CategoryRepository(self.db)
+
+        # Brand: filter visible (private of user + globals) by substring.
+        # We pull the full visible set and filter in Python — typical user
+        # has dozens, not millions, of brands; an OR-LIKE SQL filter would
+        # be no faster and would duplicate the casefold logic below.
+        all_brands = brand_repo.list_brands_for_user(user_id=user_id)
+        if ql:
+            brands = [
+                b for b in all_brands
+                if ql in (b.canonical_name or "").lower()
+                or ql in (b.slug or "").lower()
+            ]
+        else:
+            brands = all_brands
+
+        # DebtPartner: case-insensitive substring search via repo helper
+        # so SQLite-based test fixtures use the same code path.
+        partners = dp_repo.search_by_name(user_id=user_id, query=q, limit=limit * 2)
+
+        # Pre-resolve category names so the modal can render «бренд · Кафе»
+        # without an N+1 round-trip. The set is small (one user's
+        # categories) so a single list_call beats per-row lookups.
+        cats = {c.id: c for c in cat_repo.list(user_id=user_id)}
+
+        items: list[dict[str, Any]] = []
+        for b in brands:
+            # Brand carries only a free-form `category_hint` string; there
+            # is no FK to a Category row. Surface the hint as `category_name`
+            # so the modal can show «бренд · Кафе и рестораны» without a join.
+            items.append({
+                "kind": "brand",
+                "id": b.id,
+                "name": b.canonical_name,
+                "category_id": None,
+                "category_name": b.category_hint,
+                "is_global": bool(getattr(b, "is_global", False)),
+            })
+        for p in partners:
+            cat = cats.get(p.default_category_id) if p.default_category_id else None
+            items.append({
+                "kind": "contact",
+                "id": p.id,
+                "name": p.name,
+                "category_id": p.default_category_id,
+                "category_name": cat.name if cat is not None else None,
+                "is_global": False,
+            })
+
+        # Sort tiers: exact match → prefix → contains → other (already
+        # filtered to substring above, so the «other» tier is empty when ql).
+        def _tier(name: str) -> int:
+            n = (name or "").lower()
+            if not ql:
+                return 2
+            if n == ql:
+                return 0
+            if n.startswith(ql):
+                return 1
+            return 2
+
+        items.sort(key=lambda x: (_tier(x["name"]), x["name"].lower()))
+        return items[:limit]
+
+    def _serialize_preview_row(
+        self,
+        row: ImportRow,
+        *,
+        contact_enrichment: dict[int, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        normalized = getattr(row, "normalized_data", None) or (row.normalized_data_json or {})
+        # spec v1.26 / Brand Registry §17 — surface the same predicate the
+        # backend uses to skip Brand auto-bind so the UI can hide brand controls
+        # on personal-identifier rows (phone / contract / person without a
+        # merchant signal). Pure projection of `normalized_data` — no DB hit.
+        skeleton = str(normalized.get("skeleton") or "")
+        tokens = normalized.get("tokens")
+        is_personal = is_personal_identifier_row(skeleton, tokens) if skeleton else False
+
+        # spec v1.27 — surface the row's bound DebtPartner (if any) so the
+        # moderator can switch the description to the contact name. Order:
+        #   1. Stamp on normalized_data (set by PersonalNameBindService at
+        #      bind time AND by propagate within the same session/user).
+        #   2. Cross-session lookup: tokens.{phone, contract, person_hash}
+        #      hit a debt_partner_identifiers binding made on a different
+        #      session — caller passes the resolved dict via contact_enrichment.
+        # Same-row stamp wins because it carries the exact category the
+        # user just confirmed; the lookup is the cross-session fallback.
+        personal_id = normalized.get("personal_counterparty_id")
+        personal_name = normalized.get("personal_counterparty_name")
+        personal_cat_id = normalized.get("personal_counterparty_category_id")
+        personal_cat_name = normalized.get("personal_counterparty_category_name")
+        if personal_id is None and contact_enrichment and row.id in contact_enrichment:
+            data = contact_enrichment[row.id]
+            personal_id = data.get("id")
+            personal_name = data.get("name")
+            personal_cat_id = data.get("category_id")
+            personal_cat_name = data.get("category_name")
+
         return {
             "id": row.id,
             "row_index": row.row_index,
@@ -1407,8 +1528,100 @@ class ImportService:
             "error_message": row.error_message,
             "review_required": bool(getattr(row, "review_required", False)),
             "raw_data": getattr(row, "raw_data", None) or (row.raw_data_json or {}),
-            "normalized_data": getattr(row, "normalized_data", None) or (row.normalized_data_json or {}),
+            "normalized_data": normalized,
+            "is_personal_identifier": is_personal,
+            "personal_counterparty_id": personal_id,
+            "personal_counterparty_name": personal_name,
+            "personal_counterparty_category_id": personal_cat_id,
+            "personal_counterparty_category_name": personal_cat_name,
         }
+
+    def _build_contact_enrichment(
+        self, *, user_id: int, rows: list[ImportRow],
+    ) -> dict[int, dict[str, Any]]:
+        """One SQL round-trip lookup of debt_partner_identifiers bindings
+        for every personal-identifier row in `rows` that doesn't already
+        carry a stamp. Returns `{row_id: {id, name, category_id, category_name}}`.
+
+        Walks the rows once to collect token pairs, joins
+        debt_partner_identifiers and debt_partners in a single query, and
+        re-walks the rows to map back row_id → resolved partner. Skips
+        rows with an existing `personal_counterparty_id` stamp.
+        """
+        from app.repositories.debt_partner_identifier_repository import (
+            DebtPartnerIdentifierRepository,
+        )
+
+        # Per-row token pairs. Mapping from (kind, value) → list of row ids
+        # so a single binding row can fan out to every member of a cluster.
+        pair_rows: dict[tuple[str, str], list[int]] = {}
+        for row in rows:
+            nd = getattr(row, "normalized_data", None) or (row.normalized_data_json or {})
+            if nd.get("personal_counterparty_id") is not None:
+                continue
+            tokens = nd.get("tokens") or {}
+            if not isinstance(tokens, dict):
+                continue
+            for kind in ("phone", "contract"):
+                value = tokens.get(kind)
+                if value:
+                    pair_rows.setdefault((kind, str(value)), []).append(row.id)
+            person_hash = tokens.get("person_hash")
+            if not person_hash and tokens.get("person_name"):
+                from app.services.personal_name_bind_service import _hash_person_name
+                person_hash = _hash_person_name(str(tokens.get("person_name")))
+            if person_hash:
+                pair_rows.setdefault(("person_hash", str(person_hash)), []).append(row.id)
+
+        if not pair_rows:
+            return {}
+
+        repo = DebtPartnerIdentifierRepository(self.db)
+        bindings = repo.list_by_pairs(
+            user_id=user_id, pairs=list(pair_rows.keys()),
+        )
+        if not bindings:
+            return {}
+
+        # Resolve partner metadata in one query — without this we'd hit
+        # the DB once per binding (typical preview can have dozens).
+        from app.models.category import Category as _Cat
+        from app.models.debt_partner import DebtPartner as _DP
+        partner_ids = {b.debt_partner_id for b in bindings}
+        partners = (
+            self.db.query(_DP)
+            .filter(_DP.id.in_(partner_ids), _DP.user_id == user_id)
+            .all()
+        )
+        partner_by_id = {p.id: p for p in partners}
+        cat_ids = {p.default_category_id for p in partners if p.default_category_id}
+        cats = (
+            self.db.query(_Cat)
+            .filter(_Cat.id.in_(cat_ids), _Cat.user_id == user_id)
+            .all() if cat_ids else []
+        )
+        cat_by_id = {c.id: c for c in cats}
+
+        out: dict[int, dict[str, Any]] = {}
+        for b in bindings:
+            partner = partner_by_id.get(b.debt_partner_id)
+            if partner is None:
+                continue
+            cat = cat_by_id.get(partner.default_category_id) if partner.default_category_id else None
+            data = {
+                "id": partner.id,
+                "name": partner.name,
+                "category_id": partner.default_category_id,
+                "category_name": cat.name if cat is not None else None,
+            }
+            row_ids = pair_rows.get((b.identifier_kind, b.identifier_value), [])
+            for rid in row_ids:
+                # First binding hit wins per row — multiple identifier
+                # kinds on the same row should resolve to the same
+                # partner anyway (consistent user data); on a conflict
+                # we keep the earliest match deterministically.
+                out.setdefault(rid, data)
+        return out
 
 
     def get_existing_preview(self, *, user_id: int, session_id: int) -> dict[str, Any]:
@@ -1416,12 +1629,16 @@ class ImportService:
         rows = self.import_repo.list_rows(session_id=session.id)
         summary = session.summary_json or self._build_summary_from_rows(rows)
         detection = session.mapping_json or (session.parse_settings or {}).get("detection", {})
+        contact_enrichment = self._build_contact_enrichment(user_id=user_id, rows=rows)
         return {
             "session_id": session.id,
             "status": session.status,
             "summary": summary,
             "detection": detection,
-            "rows": [self._serialize_preview_row(row) for row in rows],
+            "rows": [
+                self._serialize_preview_row(row, contact_enrichment=contact_enrichment)
+                for row in rows
+            ],
         }
 
     def get_queue_preview(self, *, user_id: int) -> dict[str, Any]:
@@ -1478,17 +1695,31 @@ class ImportService:
 
             rows = self.import_repo.get_rows(session_id=session.id)
             all_rows.extend(rows)
+            # Defer enrichment until after the loop so we can do one batch
+            # lookup over EVERY queue row instead of per-session N round-trips.
             for row in rows:
-                serialized = self._serialize_preview_row(row)
-                serialized["session_id"] = session.id
-                serialized["account_id"] = session.account_id
-                serialized["account_name"] = account.name if account else None
-                serialized["bank_code"] = bank_code
+                serialized = {
+                    "_row_obj": row,
+                    "session_id": session.id,
+                    "account_id": session.account_id,
+                    "account_name": account.name if account else None,
+                    "bank_code": bank_code,
+                }
                 rows_payload.append(serialized)
+
+        contact_enrichment = self._build_contact_enrichment(
+            user_id=user_id, rows=all_rows,
+        )
+        rendered_rows = []
+        for entry in rows_payload:
+            row = entry.pop("_row_obj")
+            serialized = self._serialize_preview_row(row, contact_enrichment=contact_enrichment)
+            serialized.update(entry)
+            rendered_rows.append(serialized)
 
         return {
             "sessions": sessions_payload,
-            "rows": rows_payload,
+            "rows": rendered_rows,
             "summary": self._build_summary_from_rows(all_rows),
         }
 
@@ -1948,6 +2179,110 @@ class ImportService:
             "started": started,
             "already_ready": already_ready,
             "skipped": skipped,
+        }
+
+    def confirm_all_filled(self, *, user_id: int) -> dict[str, Any]:
+        """Stamp user_confirmed_at on every filled+valid row in the queue (v1.24).
+
+        Walks every preview_ready session of the user. For each unconfirmed
+        ready/warning row, runs ImportRowEditor.validate_manual_row with
+        current_status='ready' and issues=[]. Rows that pass (all required
+        fields filled, no blocking issues) get user_confirmed_at stamped and
+        status='ready'. Rows with remaining issues stay untouched.
+
+        This is a mass individual-confirm, NOT a cluster bulk-ack:
+          - user_confirmed_at is used (not cluster_bulk_acked_at)
+          - commit will route each row through Case A at weight 1.0 (§10.2)
+          - cross-cluster bulk-ack (§5.4 forbidden path) is NOT triggered
+
+        One DB commit at the end — either all stamps persist or nothing does.
+        """
+        from datetime import datetime, timezone
+        from app.services.import_row_editor import ImportRowEditor
+
+        editor = ImportRowEditor(
+            self.db,
+            import_repo=self.import_repo,
+            recalculate_summary_fn=self._recalculate_summary,
+            serialize_row_fn=self._serialize_preview_row,
+        )
+
+        sessions = self.import_repo.list_active_sessions(user_id=user_id)
+        eligible = [
+            s for s in sessions
+            if str(s.status or "") == "preview_ready" and s.account_id is not None
+        ]
+
+        confirmed_count = 0
+        skipped_row_ids: list[int] = []
+
+        for session in eligible:
+            rows = self.import_repo.get_rows(session_id=session.id)
+            session_had_changes = False
+
+            for row in rows:
+                row_status = str(row.status or "").strip().lower()
+
+                # Only process attention-bucket rows (ready / warning).
+                if row_status not in {"ready", "warning"}:
+                    continue
+                if row.created_transaction_id is not None:
+                    continue
+
+                nd = dict(
+                    getattr(row, "normalized_data", None)
+                    or (row.normalized_data_json or {})
+                )
+                # Already confirmed or bulk-acked — skip silently (idempotent).
+                if nd.get("user_confirmed_at") or nd.get("cluster_bulk_acked_at"):
+                    continue
+
+                # Validate on a working copy — validate_manual_row mutates the
+                # dict for semantic normalization (e.g. clears category_id on
+                # transfers). We save the copy on success so those normalizations
+                # are persisted alongside the confirmation stamp.
+                nd_copy = dict(nd)
+                new_status, new_issues = editor.validate_manual_row(
+                    normalized=nd_copy,
+                    current_status="ready",  # equivalent to confirm action
+                    issues=[],
+                    allow_ready_status=True,
+                )
+
+                if new_issues or new_status != "ready":
+                    skipped_row_ids.append(row.id)
+                    continue
+
+                # Row fully valid — stamp individual confirmation (§10.2 Case A).
+                nd_copy["user_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+                nd_copy.pop("cluster_bulk_acked_at", None)
+                # Clear transfer-matcher hint metadata — same as regular confirm.
+                nd_copy.pop("suggested_target_account_id", None)
+                nd_copy.pop("suggested_target_account_name", None)
+                nd_copy.pop("suggested_target_is_closed", None)
+                nd_copy.pop("suggested_reason", None)
+
+                self.import_repo.update_row(
+                    row,
+                    normalized_data=nd_copy,
+                    status="ready",
+                    errors=[],
+                    review_required=False,
+                )
+                confirmed_count += 1
+                session_had_changes = True
+
+            if session_had_changes:
+                summary = self._recalculate_summary(session.id)
+                session.summary_json = summary
+                self.db.add(session)
+
+        self.db.commit()
+
+        return {
+            "confirmed_count": confirmed_count,
+            "skipped_count": len(skipped_row_ids),
+            "skipped_row_ids": skipped_row_ids,
         }
 
     def commit_queue_confirmed(self, *, user_id: int) -> dict[str, Any]:

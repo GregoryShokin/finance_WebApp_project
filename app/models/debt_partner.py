@@ -28,6 +28,15 @@ class DebtPartner(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    # Optional category pinned by the user when first naming this contact in
+    # the import moderator («+ Имя / Бренд» modal). Treated as a hint at
+    # confirm time — never auto-applied to debt-operation transactions
+    # (debt rows take their category from operation type, not partner).
+    # ON DELETE SET NULL so removing a Category doesn't cascade-delete the
+    # contact: the user keeps the relationship, just loses the hint.
+    default_category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     opening_receivable_amount: Mapped[Decimal] = mapped_column(
         Numeric(14, 2), nullable=False, default=0, server_default="0"
     )

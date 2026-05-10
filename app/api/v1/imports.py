@@ -11,6 +11,8 @@ from app.models.user import User
 from app.schemas.imports import (
     AttachRowToClusterRequest,
     AttachRowToClusterResponse,
+    BindNameRequest,
+    BindNameResponse,
     BrandConfirmRequest,
     BrandConfirmResponse,
     BrandRejectResponse,
@@ -23,6 +25,7 @@ from app.schemas.imports import (
     ImportPreviewResponse,
     ImportQueueBulkClustersResponse,
     ImportQueueCommitResponse,
+    ImportQueueConfirmAllFilledResponse,
     ImportQueuePreviewResponse,
     ImportQueueStartAllResponse,
     ImportSessionListResponse,
@@ -33,6 +36,7 @@ from app.schemas.imports import (
     ImportRowUpdateResponse,
     ImportSessionResponse,
     ImportUploadResponse,
+    NameSearchResponse,
 )
 from app.services.import_service import (
     BankUnsupportedError,
@@ -130,6 +134,29 @@ def commit_import_queue_confirmed(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
         ) from exc
+
+
+@router.post("/queue/confirm-all-filled", response_model=ImportQueueConfirmAllFilledResponse)
+def confirm_import_queue_filled(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Stamp user_confirmed_at on every filled+valid queue row (v1.24).
+
+    Walks every preview-ready session of the user. For each unconfirmed
+    ready/warning row, validates that all required fields are present for
+    the row's operation_type. Rows that pass get user_confirmed_at stamped
+    and transition to status='ready'. Rows with remaining issues are left
+    untouched (reported in skipped_row_ids).
+
+    This is a mass individual-confirm at §10.2 Case A weight 1.0 — NOT a
+    cluster bulk-ack (§5.4). Commit after this call routes each row through
+    Case A, preserving rule-learning fidelity.
+
+    Idempotent: already-confirmed rows are silently skipped.
+    """
+    service = ImportService(db)
+    return service.confirm_all_filled(user_id=current_user.id)
 
 
 @router.get("/sessions", response_model=ImportSessionListResponse)
@@ -435,6 +462,77 @@ def reject_row_brand(
     except BrandConfirmError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/names/search", response_model=NameSearchResponse)
+def search_import_names(
+    q: str = "",
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Unified name search for the «+ Имя / Бренд» modal.
+
+    Returns one merged list of Brand and DebtPartner hits with a `kind`
+    tag per item, sorted exact > prefix > substring. The frontend feeds
+    `q` from a debounced input and renders the results under a single
+    search box; the user picks one (or types a new name) and the
+    follow-up `POST /rows/{id}/bind-name` call routes to the right
+    entity based on the chosen `kind`.
+    """
+    service = ImportService(db)
+    items = service.search_names(user_id=current_user.id, query=q, limit=limit)
+    return {"items": items}
+
+
+@router.post("/rows/{row_id}/bind-name", response_model=BindNameResponse)
+def bind_name_to_row(
+    row_id: int,
+    payload: BindNameRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Attach a Brand or DebtPartner to an import row («+ Имя / Бренд»).
+
+    Routing by `payload.kind`:
+      * `brand`   → Brand stamp (delegates to BrandConfirmService for
+        propagation + auto-learn).
+      * `contact` → DebtPartner stamp on `personal_counterparty_*` keys
+        (and `debt_partner_id` for debt rows). Propagates across other
+        active rows of the user that share the same identifier tokens.
+
+    Validation: transfer rows are rejected (transfers have no
+    counterparty); debt rows force `kind='contact'` per §12.2.
+    """
+    from app.services.personal_name_bind_service import (
+        PersonalNameBindError,
+        PersonalNameBindService,
+    )
+
+    service = PersonalNameBindService(db)
+    try:
+        result = service.bind_name_to_row(
+            user_id=current_user.id,
+            row_id=row_id,
+            kind=payload.kind,  # type: ignore[arg-type]
+            name=payload.name,
+            existing_id=payload.existing_id,
+            category_id=payload.category_id,
+        )
+    except PersonalNameBindError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+        ) from exc
+
+    return {
+        "kind": result.kind,
+        "id": result.id,
+        "name": result.name,
+        "category_id": result.category_id,
+        "category_name": result.category_name,
+        "propagated_count": result.propagated_count,
+    }
 
 
 @router.get("/{session_id}/clusters", response_model=BulkClustersResponse)

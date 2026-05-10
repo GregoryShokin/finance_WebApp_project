@@ -24,6 +24,8 @@ import app.models.goal  # noqa: F401
 import app.models.brand  # noqa: F401
 import app.models.brand_fingerprint  # noqa: F401
 import app.models.brand_identifier  # noqa: F401
+import app.models.debt_partner  # noqa: F401
+import app.models.debt_partner_identifier  # noqa: F401
 import app.models.user_brand_display_name  # noqa: F401
 import app.models.import_session  # noqa: F401
 import app.models.import_row  # noqa: F401

@@ -823,6 +823,58 @@ def test_confirm_auto_learns_text_pattern_when_skeleton_carries_new_brand_token(
     assert ("mrtshka", user.id) in text_patterns
 
 
+def test_confirm_auto_learn_skips_cyrillic_filler_words(db, user):
+    """Structural guard (spec v1.27): a row whose skeleton begins with a
+    Russian wrapper word like «Оплата товаров и услуг yandex*5399*market»
+    must NOT auto-learn «товаров» as a private text-pattern. Cyrillic
+    candidates are almost always banking-statement boilerplate that
+    bypassed the filler list — auto-learn requires a Latin merchant-shaped
+    token.
+    """
+    brand = _make_private_brand(
+        db, user_id=user.id, slug="yandex_market_u1", canonical_name="Яндекс Маркет",
+    )
+    db.commit()
+
+    session = _make_session(db, user_id=user.id)
+    # Skeleton with a Cyrillic word as the first non-filler candidate.
+    # `extract_brand` would currently return «товаров»; the structural
+    # guard in BrandConfirmService.`_looks_like_merchant_token` must
+    # reject it before it lands as a pattern.
+    row = ImportRow(
+        session_id=session.id,
+        row_index=1,
+        raw_data_json={},
+        normalized_data_json={
+            "amount": "100.00",
+            "direction": "expense",
+            "transaction_date": "2026-01-15T12:00:00+00:00",
+            # «оплата» is in _FILLER_TOKENS, «товаров» previously wasn't —
+            # we test the structural guard, not the filler list.
+            "skeleton": "товаров и услуг yandex 5399 market",
+            "fingerprint": "fp00000000000099",
+        },
+        status="warning",
+    )
+    db.add(row)
+    db.commit()
+
+    BrandConfirmService(db).confirm_brand_for_row(
+        user_id=user.id, row_id=row.id, brand_id=brand.id,
+    )
+
+    patterns = BrandRepository(db).list_patterns_for_brand(brand_id=brand.id)
+    text_patterns = [p.pattern for p in patterns if p.kind == "text"]
+    # The structural guard MUST reject «товаров» — that's the regression
+    # the spec v1.27 fix targets.
+    assert "товаров" not in text_patterns
+    # Other Cyrillic candidates that might surface from a similar
+    # skeleton must be blocked too.
+    assert all(
+        all(c.isascii() for c in p) for p in text_patterns
+    ), f"non-ASCII auto-learned pattern leaked: {text_patterns}"
+
+
 def test_confirm_auto_learn_is_idempotent_when_pattern_already_exists(
     db, user,
 ):

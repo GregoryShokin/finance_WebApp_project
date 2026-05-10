@@ -23,6 +23,7 @@ import { getAccounts } from '@/lib/api/accounts';
 import {
   commitImport,
   commitImportQueueConfirmed,
+  confirmImportQueueFilled,
   getImportSession,
   unexcludeImportRow,
   unparkImportRow,
@@ -311,6 +312,31 @@ export function ImportPage() {
     onError: (e: Error) => toast.error(e.message || 'Не удалось импортировать'),
   });
 
+  // v1.24: confirm-all-filled — stamp user_confirmed_at on every filled+valid
+  // row without requiring N individual clicks. Rows that still have issues
+  // (missing category, target account, etc.) are skipped and remain in the
+  // attention feed.
+  const confirmFilledMut = useMutation({
+    mutationFn: () => confirmImportQueueFilled(),
+    onSuccess: async (res) => {
+      if (res.confirmed_count === 0) {
+        toast.info(
+          res.skipped_count > 0
+            ? `Не подтверждено: ${res.skipped_count} строк требуют дозаполнения`
+            : 'Нет заполненных строк для подтверждения',
+        );
+      } else {
+        const skippedSuffix = res.skipped_count > 0
+          ? `, пропущено ${res.skipped_count} (нужно дозаполнить)`
+          : '';
+        toast.success(`Подтверждено ${res.confirmed_count} строк${skippedSuffix}`);
+      }
+      await queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+      await queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось подтвердить строки'),
+  });
+
   // Reset session — frontend-only batch: unpark + unexclude every row that
   // was moved off the active list. Category / counterparty edits remain
   // committed to the backend (full reset would require a dedicated endpoint).
@@ -355,6 +381,17 @@ export function ImportPage() {
       return true;
     }).length;
   }, [preview, clusters]);
+
+  // Rows that are filled (have status ready/warning) but not yet individually
+  // confirmed — these are candidates for confirm-all-filled.
+  const fillableCount = useMemo(() => {
+    return queue.rows.filter((r) => {
+      if (r.status !== 'ready' && r.status !== 'warning') return false;
+      const nd = r.normalized_data as Record<string, unknown> | undefined;
+      if (nd?.user_confirmed_at || nd?.cluster_bulk_acked_at) return false;
+      return true;
+    }).length;
+  }, [queue.rows]);
 
   const queueOk = sessions.filter((s) => s.row_count > 0 && s.ready_count === s.row_count).length;
   const queueExc = sessions.filter((s) => s.auto_preview_status === 'failed' || s.status === 'failed').length;
@@ -468,10 +505,13 @@ export function ImportPage() {
         queuePillRef={queuePillRef}
         uploading={uploadMut.isPending}
         committing={commitMut.isPending || commitQueueMut.isPending}
+        confirmingFilled={confirmFilledMut.isPending}
         resetting={resetMut.isPending}
         resetEnabled={activeSessionId !== null && !!preview}
+        fillableCount={fillableCount}
         onUpload={handleSelectFile}
         onOpenQueue={openQueueAtPill}
+        onConfirmFilled={() => confirmFilledMut.mutate()}
         // v1.23: prefer the unified queue commit. Falls back to legacy
         // per-session commit only when there are no queue rows but there
         // IS an active session (legacy `?session=N` URL deep-link).

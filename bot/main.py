@@ -5,6 +5,17 @@ import logging
 import os
 import re
 
+# OrbStack/Docker on macOS injects no_proxy / NO_PROXY values that include an
+# IPv6 CIDR (e.g. `fd07:b51a:cc66:f0::/64`). httpx parses every NO_PROXY entry
+# as a URL pattern; a CIDR isn't a URL, so the parser blows up with
+# `InvalidURL: Invalid port: 'b51a:cc66:f0::'` and the bot crashes on startup.
+# Strip the proxy env BEFORE httpx is imported so httpx.AsyncClient ignores it.
+# The bot doesn't need an HTTP proxy — it talks to api:8000 inside the compose
+# network and to api.telegram.org over the host's normal egress.
+for _v in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+           "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+    os.environ.pop(_v, None)
+
 import httpx
 from telegram import Document, Update
 from telegram.ext import (

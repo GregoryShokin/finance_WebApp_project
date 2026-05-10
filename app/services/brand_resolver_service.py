@@ -45,6 +45,7 @@ from sqlalchemy.orm import Session
 
 from app.models.brand import Brand, BrandPattern
 from app.repositories.brand_repository import BrandRepository
+from app.services.brand_extractor_service import is_personal_identifier_row
 from app.services.import_normalizer_v2 import ExtractedTokens
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,18 @@ class BrandResolverService:
                 final = score * cf
                 if final < BRAND_PROMPT_THRESHOLD:
                     continue
+                # Brand Registry §X (v1.26) — personal-identifier guard.
+                # Text and alias_exact matches resolve on generic vocabulary
+                # (skeleton substrings / full skeleton equality). When the
+                # row is identified by phone / contract / person_name with no
+                # merchant org or SBP ID, the same person can pay for food,
+                # rent, debt, gifts — a single stable brand category is wrong.
+                # SBP-merchant-id and org_full matches are exempt: those signal
+                # an actual merchant, not a personal contact.
+                if p.kind in ("text", "alias_exact") and is_personal_identifier_row(
+                    skeleton, tokens
+                ):
+                    return None
                 brand = self._get_brand(p.brand_id)
                 if brand is None:
                     continue

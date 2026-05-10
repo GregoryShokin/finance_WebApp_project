@@ -43,7 +43,7 @@ from app.repositories.user_brand_category_override_repository import (
 from app.repositories.user_brand_display_name_repository import (
     UserBrandDisplayNameRepository,
 )
-from app.services.brand_extractor_service import extract_brand
+from app.services.brand_extractor_service import extract_brand, is_personal_identifier_row
 from app.services.brand_fingerprint_service import BrandFingerprintService
 from app.services.brand_pattern_strength_service import (
     BrandPatternNotFound,
@@ -53,6 +53,49 @@ from app.services.brand_pattern_strength_service import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Payment-rail tokens that must never be auto-learned as text-kind brand
+# patterns. These are infrastructure identifiers (payment networks, clearing
+# systems, card schemes), not merchants. Even if extract_brand surfaces one
+# (e.g. via a Cyrillic alias or an unseen statement format), it gets blocked
+# here so callers can't bootstrap a spurious text:sbp pattern by confirming a
+# row that happens to have "sbp" as its first significant skeleton token.
+_FORBIDDEN_LEARN_TOKENS: frozenset[str] = frozenset({
+    "sbp", "сбп",           # Система Быстрых Платежей (payment rail)
+    "qsr", "mop",           # NSPK merchant-category codes
+    "pos",                  # point-of-sale terminal code
+    "atm",                  # ATM code
+    "mir", "visa", "mastercard",   # card schemes
+})
+
+
+def _looks_like_merchant_token(candidate: str) -> bool:
+    """Structural guard for auto-learn candidates (spec v1.27).
+
+    A real merchant token reaches our skeleton as a Latin transliteration
+    («vkusnoitochka», «pyaterochka», «mrtshka», «kofemoloko») — bank
+    statements may carry Russian wrapper text («Оплата товаров и услуг
+    YANDEX*5399*market»), but the merchant identifier itself is almost
+    always ASCII. A Cyrillic-only candidate from `extract_brand` therefore
+    signals «we picked up a Russian wrapper word that bypassed
+    `_FILLER_TOKENS`» — exactly the bug that produced
+    `товаров`/`семейная`/`кофейня`-shaped private patterns matching every
+    future statement of the same wording.
+
+    Rule: auto-learn accepts a candidate only when it consists entirely
+    of ASCII letters / digits / underscore. The minimum length is the
+    same as `extract_brand`'s `_MIN_BRAND_LEN` (3) — real merchant codes
+    can be that short (e.g. «dts» for МРТшка terminals). Manual
+    «+ Создать бренд» (BrandManagementService.create_private_brand) is
+    unaffected — Russian-named private brands stay possible, they just
+    don't get auto-bootstrapped from a single confirm.
+    """
+    if not candidate or len(candidate) < 3:
+        return False
+    return all(
+        ch.isascii() and (ch.isalnum() or ch == "_")
+        for ch in candidate
+    )
 
 
 class BrandConfirmError(Exception):
@@ -184,12 +227,14 @@ class BrandConfirmService:
         # upsert as a private text-pattern on the brand. Closes the gap where
         # a user manually attaches a brand to a row whose skeleton differs
         # from the brand's existing patterns — e.g. picking «MRTшка» on
-        # «оплата в dts mrt» when the brand was created from a «mrtshka» row.
+        # «оплата в dts mrt» when the brand was created from a «mrtshка» row.
         # Without this, the next apply_brand_to_session call still misses
         # the dts-skeleton fingerprints, even though the user just told us
         # they belong to the same brand.
+        # Pass tokens so the guard can skip personal-identifier rows (§X v1.26).
         self._learn_pattern_from_row(
             user_id=user_id, brand=brand, skeleton=nd.get("skeleton") or "",
+            tokens=nd.get("tokens"),
         )
 
         # Propagate confirmation only when the user agreed with the
@@ -481,6 +526,7 @@ class BrandConfirmService:
 
     def _learn_pattern_from_row(
         self, *, user_id: int, brand: Brand, skeleton: str,
+        tokens: dict | None = None,
     ) -> None:
         """Best-effort upsert of a `text` pattern derived from the row's skeleton.
 
@@ -493,18 +539,73 @@ class BrandConfirmService:
         Why a private pattern: confirm authors per-user knowledge — global
         brands accumulate user-scope overrides exactly the same way the
         explicit «add pattern» UI does (see `add_pattern_to_brand`).
+
+        Personal-identifier guard (Brand Registry §X, v1.26): if the row
+        identifies a personal contact (phone / contract / person_name) with
+        no merchant org or SBP ID, we skip auto-learning. The user explicitly
+        chose to bind this row to a Brand (accepted override), but we MUST NOT
+        propagate that binding by creating a generic text-pattern like
+        «погашение» or «поступление» — those words match every future row of
+        the same kind, associating unrelated operations with the same brand.
+        The explicit fingerprint binding still applies (one-row learning only).
         """
         if not skeleton:
+            return
+        if is_personal_identifier_row(skeleton, tokens):
+            logger.debug(
+                "auto-learn: skipping personal-identifier row for brand %s", brand.id,
+            )
             return
         candidate = extract_brand(skeleton)
         if not candidate:
             return
+        if candidate.casefold() in _FORBIDDEN_LEARN_TOKENS:
+            logger.debug(
+                "auto-learn: skipping forbidden rail token %r (brand %s)",
+                candidate, brand.id,
+            )
+            return
+        # Structural guard — see `_looks_like_merchant_token` docstring.
+        # Catches Cyrillic generic words («товаров», «семейная»,
+        # «кофейня») and ultra-short Latin abbreviations («ip», «ms»,
+        # «md») that no `_FILLER_TOKENS` extension can hope to enumerate
+        # exhaustively.
+        if not _looks_like_merchant_token(candidate):
+            logger.debug(
+                "auto-learn: skipping non-merchant-shaped token %r (brand %s)",
+                candidate, brand.id,
+            )
+            return
         candidate_cf = candidate.casefold()
+        # Same-brand idempotency: don't recreate a pattern this brand
+        # already owns (any scope).
         existing = self.brand_repo.list_patterns_for_brand(brand_id=brand.id)
         for p in existing:
             if p.kind != "text":
                 continue
             if (p.pattern or "").casefold() == candidate_cf:
+                return
+        # Cross-brand ambiguity guard (spec v1.27): if any OTHER brand
+        # visible to the user already owns this exact text-pattern,
+        # auto-learn would create competing matches — every future row
+        # with this token would resolve unpredictably depending on
+        # _sort_key tie-breaks. Common case: user has «Яндекс Плюс»
+        # carrying a private pattern «yandex», then confirms a Маркет
+        # row → without this guard we'd attach «yandex» to Маркет too,
+        # and from then on every yandex-* row matches whichever pattern
+        # `_sort_key` picks first. Refuse instead — the user can delete
+        # the existing pattern manually if they meant to re-bind.
+        all_user_patterns = self.brand_repo.list_active_patterns_for_user(
+            user_id=user_id,
+        )
+        for p in all_user_patterns:
+            if p.kind != "text" or p.brand_id == brand.id:
+                continue
+            if (p.pattern or "").casefold() == candidate_cf:
+                logger.debug(
+                    "auto-learn: skipping %r — already bound to brand %s, ambiguous",
+                    candidate, p.brand_id,
+                )
                 return
         try:
             self.brand_repo.upsert_pattern(

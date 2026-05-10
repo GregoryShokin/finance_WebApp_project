@@ -231,6 +231,22 @@ export type ImportPreviewRow = {
   review_required: boolean;
   raw_data: Record<string, string>;
   normalized_data: Record<string, unknown>;
+  // spec v1.26 / Brand Registry §17 — true when the only counterparty signal
+  // on this row is a personal identifier (phone / contract / person name) with
+  // no merchant signal (legal org / SBP merchant ID). Backend uses the same
+  // predicate to skip Brand auto-bind; the UI uses it to hide BrandPrompt and
+  // «Выбрать бренд» — telephone/contract is not a brand by product semantics.
+  // Optional for backward-compat with legacy payloads; treat undefined as false.
+  is_personal_identifier?: boolean;
+  // spec v1.27 — when the row is bound to a personal contact (DebtPartner)
+  // either via a same-session bind or a cross-session debt_partner_identifiers
+  // lookup, the moderator surfaces these fields and switches the row's
+  // primary label to the contact name (raw description moves to subtitle —
+  // mirrors how brand_canonical_name behaves for confirmed brands).
+  personal_counterparty_id?: number | null;
+  personal_counterparty_name?: string | null;
+  personal_counterparty_category_id?: number | null;
+  personal_counterparty_category_name?: string | null;
   // Queue-mode source attribution (v1.23). Populated only by
   // /imports/queue/preview; undefined on legacy /imports/{id}/preview
   // payloads. TxRow uses these to render the bank/account pill and to
@@ -497,6 +513,12 @@ export type ImportQueueStartAllResponse = {
   started: number;
   already_ready: number;
   skipped: number;
+};
+
+export type ImportQueueConfirmAllFilledResponse = {
+  confirmed_count: number;
+  skipped_count: number;
+  skipped_row_ids: number[];
 };
 
 export type BulkClusterRowUpdate = {

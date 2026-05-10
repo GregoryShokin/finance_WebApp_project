@@ -22,7 +22,6 @@ import { CreatableSelect, type CreatableOption } from '@/components/ui/creatable
 import {
   AccountSelect,
   CategorySelect,
-  DebtPartnerSelect,
 } from '@/components/import/entity-selects';
 // CounterpartyRazvorotButton removed in v1.24 — Brand-Counterparty UI
 // unification (Option B). Brand picker is the sole entry point.
@@ -52,7 +51,7 @@ import {
 import { BrandPrompt } from './brand-prompt';
 import { BrandCategoryEdit } from './brand-category-edit';
 import { BrandEditModal } from './brand-edit-modal';
-import { BrandPickerModal } from './brand-picker-modal';
+import { NameBindModal } from './name-bind-modal';
 import { OrphanTransferHint } from './orphan-transfer-hint';
 import type { Account } from '@/types/account';
 import type { ImportPreviewRow, ImportRowUpdatePayload } from '@/types/import';
@@ -137,10 +136,11 @@ export function TxRow({
   const [creditAccountId, setCreditAccountId]     = useState<number | null>((nd.credit_account_id as number | null) ?? null);
   const [creditPrincipal, setCreditPrincipal]     = useState<string>(((nd.credit_principal_amount as string | number | null) ?? '').toString());
   const [creditInterest, setCreditInterest]       = useState<string>(((nd.credit_interest_amount as string | number | null) ?? '').toString());
-  // Ph8b: «Выбрать бренд» modal on rows that didn't resolve to a brand (or
-  // where the user rejected the suggestion). Picker has a nested «+ Создать
-  // бренд» button that opens BrandCreateModal — single entry point per row.
-  const [brandPickerOpen, setBrandPickerOpen]     = useState(false);
+  // v1.27 unified «+ Имя / Бренд» modal. Replaces the prior split between
+  // a Brand picker (BrandPickerModal) and the inline DebtPartnerSelect
+  // pick-or-create flow — one button on the row, one modal that routes
+  // to Brand or DebtPartner via a single `bind-name` endpoint.
+  const [nameBindOpen, setNameBindOpen]           = useState(false);
   // Ph8b: «Изменить бренд» — only available on confirmed rows; modal
   // gates write actions on `is_global=false` (global brands are read-only).
   const [brandEditOpen, setBrandEditOpen]         = useState(false);
@@ -156,6 +156,12 @@ export function TxRow({
   const externalCategoryId = (nd.category_id as number | null) ?? null;
   const externalCounterpartyId = (nd.counterparty_id as number | null) ?? null;
   const externalBrandId = (nd.brand_id as number | null) ?? null;
+  // v1.27 — sync debt_partner_id from normalized_data so a contact bind
+  // (which stamps nd.debt_partner_id on debt rows) is reflected in the
+  // local state used by handleConfirm. Without this, the row picks up the
+  // new partner but the confirm payload still carries the old (possibly
+  // null) value because state hasn't reread the prop.
+  const externalDebtPartnerId = (nd.debt_partner_id as number | null) ?? null;
   useEffect(() => {
     setCategoryId(externalCategoryId);
   }, [externalCategoryId]);
@@ -165,6 +171,9 @@ export function TxRow({
   useEffect(() => {
     setBrandId(externalBrandId);
   }, [externalBrandId]);
+  useEffect(() => {
+    setDebtPartnerId(externalDebtPartnerId);
+  }, [externalDebtPartnerId]);
 
   // The parser stores amount as an absolute magnitude; direction is the
   // authoritative source of sign. Never derive sign from `amount > 0`.
@@ -180,7 +189,16 @@ export function TxRow({
   const confirmedBrandName = nd.user_confirmed_brand_id != null
     ? (nd.brand_canonical_name as string | undefined)
     : undefined;
-  const description = confirmedBrandName || rawDescription;
+  // v1.27 — bound personal contact (DebtPartner via «+ Имя / Бренд»). Same
+  // override semantics as confirmedBrandName: when present, the contact name
+  // is the primary label and the raw bank description moves to the subtitle.
+  // Backend exposes the resolution via `row.personal_counterparty_*` fields
+  // (covers both same-row stamps and cross-session identifier lookups), so
+  // we don't need to peek into normalized_data here.
+  const personalContactId = (row.personal_counterparty_id as number | null) ?? null;
+  const personalContactName = (row.personal_counterparty_name as string | null) ?? null;
+  const personalContactCategoryId = (row.personal_counterparty_category_id as number | null) ?? null;
+  const description = confirmedBrandName || personalContactName || rawDescription;
   const cardLast4 =
     (nd.card_last4 as string) ||
     (row.raw_data?.card as string) ||
@@ -414,7 +432,8 @@ export function TxRow({
                 <span className="font-normal text-ink-3"> · карта {cardLast4}</span>
               ) : null}
             </div>
-            {confirmedBrandName && rawDescription && rawDescription !== confirmedBrandName ? (
+            {(confirmedBrandName || personalContactName) && rawDescription
+              && rawDescription !== (confirmedBrandName || personalContactName) ? (
               <div className="mt-0.5 text-[11px] text-ink-3 break-words">
                 {rawDescription}
               </div>
@@ -435,6 +454,22 @@ export function TxRow({
                 >
                   <Pencil className="size-3" /> Изменить бренд
                 </button>
+              </div>
+            ) : personalContactName ? (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setNameBindOpen(true)}
+                  title={`Изменить контакт «${personalContactName}»`}
+                  className="inline-flex items-center gap-1 rounded-md border border-line bg-bg-surface px-2 py-0.5 text-[11px] text-ink hover:border-ink-3 hover:bg-bg-surface2"
+                >
+                  {personalContactName}
+                </button>
+                {personalContactCategoryId != null ? (
+                  <span className="inline-flex items-center rounded-md border border-line bg-bg-surface2 px-2 py-0.5 text-[11px] text-ink-3">
+                    {(row.personal_counterparty_category_name as string | null) ?? ''}
+                  </span>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -475,11 +510,17 @@ export function TxRow({
           threshold AND the user has not yet confirmed/rejected it AND the
           row's operation is brand-bearing (regular/refund — transfers,
           debt, credit ops carry no merchant brand by design). Confirm
-          propagates to same-brand siblings server-side; reject is local. */}
+          propagates to same-brand siblings server-side; reject is local.
+          spec v1.26 / Brand Registry §17 — defensive: even though the
+          resolver no longer returns a match for personal-identifier rows,
+          legacy rows imported before v1.26 may still carry a stale
+          brand_id. Hide the prompt so the user can't bind a phone/contract
+          to a brand by clicking «Да». */}
       {nd.brand_id != null
         && nd.user_confirmed_brand_id == null
         && nd.user_rejected_brand_id == null
-        && (type === 'regular' || type === 'refund') ? (
+        && (type === 'regular' || type === 'refund')
+        && !row.is_personal_identifier ? (
         <BrandPrompt
           data={{
             brand_id: Number(nd.brand_id),
@@ -500,33 +541,50 @@ export function TxRow({
         />
       ) : null}
 
-      {/* Brand registry Ph8b: single «Выбрать бренд» entry point on rows
-          with no bound brand. Picker's body has a «+ Создать» button and
-          a fallback «Создать "<query>"» row when search returns nothing —
-          one button on the row, both flows live inside the picker. Hidden
-          once the brand is confirmed (BrandCategoryEdit takes over). */}
-      {nd.user_confirmed_brand_id == null
-        && (type === 'regular' || type === 'refund')
-        && (nd.brand_id == null || nd.user_rejected_brand_id != null) ? (
+      {/* spec v1.27 — unified «+ Имя / Бренд» entry point. Visible on
+          regular / refund / debt / credit_operation rows that don't
+          already carry a brand or contact stamp. Transfer rows are
+          excluded (transfer between own accounts has no counterparty —
+          §6.10 / §12.11). Debt rows lock the modal's kind to «контакт»
+          per §12.2 (operation_type='debt' requires debt_partner_id and
+          forbids brand_id). */}
+      {type !== 'transfer'
+        && type !== 'investment'
+        && nd.user_confirmed_brand_id == null
+        && personalContactId == null
+        && (type !== 'debt' || debtPartnerId == null) ? (
         <div className="mt-1 flex flex-wrap items-center gap-1.5">
           <button
             type="button"
-            onClick={() => setBrandPickerOpen(true)}
+            onClick={() => setNameBindOpen(true)}
             className="inline-flex items-center gap-1 rounded-md border border-line bg-bg-surface px-2 py-0.5 text-[11px] text-ink-3 hover:border-ink-3 hover:bg-bg-surface2 hover:text-ink"
           >
-            Выбрать бренд
+            + Имя / Бренд
           </button>
         </div>
       ) : null}
 
-      {brandPickerOpen ? (
-        <BrandPickerModal
-          open={brandPickerOpen}
+      {nameBindOpen ? (
+        <NameBindModal
+          open={nameBindOpen}
           rowId={row.id}
-          sessionId={effectiveSessionId}
           rawDescription={rawDescription}
           categoryOptions={filteredCategoryOptions}
-          onClose={() => setBrandPickerOpen(false)}
+          defaultKind={
+            type === 'debt'
+              ? 'contact'
+              : (row.is_personal_identifier ? 'contact' : 'brand')
+          }
+          lockedKind={type === 'debt' ? 'contact' : null}
+          onClose={() => setNameBindOpen(false)}
+          onSuccess={(resp) => {
+            // Mirror local debt_partner_id state so handleConfirm sends
+            // the right FK. Brand binding is reflected via nd refresh
+            // (preview invalidation pulls the new normalized_data).
+            if (resp.kind === 'contact' && type === 'debt') {
+              setDebtPartnerId(resp.id);
+            }
+          }}
         />
       ) : null}
 
@@ -592,21 +650,19 @@ export function TxRow({
         />
 
         {type === 'debt' ? (
-          <>
-            <CreatableSelect
-              value={debtDirection}
-              options={debtDirOptionsFor(direction)}
-              placeholder="— направление —"
-              onChange={(v) => setDebtDirection(v as DebtDirection)}
-              width={200}
-            />
-            <DebtPartnerSelect
-              value={debtPartnerId}
-              options={options.debtPartners}
-              onChange={setDebtPartnerId}
-              width={210}
-            />
-          </>
+          // v1.27 — partner picking moved into the unified «+ Имя / Бренд»
+          // modal (locked to kind='contact' on debt rows). The inline
+          // DebtPartnerSelect was the second entry point that this PR
+          // collapsed; the row still picks debt direction here, but the
+          // partner is named via the same single button as every other
+          // row type.
+          <CreatableSelect
+            value={debtDirection}
+            options={debtDirOptionsFor(direction)}
+            placeholder="— направление —"
+            onChange={(v) => setDebtDirection(v as DebtDirection)}
+            width={200}
+          />
         ) : type === 'transfer' ? (
           <AccountSelect
             value={transferAccountId}

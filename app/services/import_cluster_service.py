@@ -885,6 +885,16 @@ class ImportClusterService:
             # transfer skeletons, but this is a defense-in-depth guard.
             if v2_is_transfer_like(cluster.skeleton, None):
                 continue
+            # Brand Registry §X (v1.26) — personal-identifier guard for
+            # BrandCluster (soft, auto-inferred level). A cluster whose primary
+            # identifier is a phone number, contract, or person hash represents
+            # a personal contact, not a merchant with a stable category.
+            # Letting these clusters accumulate a brand-token like «погашение»
+            # or «поступление» would produce a misleading brand card in the UI.
+            # BrandGroup (explicit binding level) is NOT filtered here — the
+            # user explicitly chose to associate that identifier with a Brand.
+            if cluster.identifier_key in ("phone", "contract", "person_hash"):
+                continue
             brand = extract_brand(cluster.skeleton)
             if brand is None:
                 continue

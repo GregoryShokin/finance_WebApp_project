@@ -9,6 +9,7 @@ import type {
   ImportPreviewRow,
   ImportQueueBulkClustersResponse,
   ImportQueueCommitResponse,
+  ImportQueueConfirmAllFilledResponse,
   ImportQueuePreviewResponse,
   ImportQueueStartAllResponse,
   ImportSessionResponse,
@@ -88,6 +89,12 @@ export function commitImportQueueConfirmed() {
 
 export function startImportQueueAll() {
   return apiClient<ImportQueueStartAllResponse>('/imports/queue/start-all', {
+    method: 'POST',
+  });
+}
+
+export function confirmImportQueueFilled() {
+  return apiClient<ImportQueueConfirmAllFilledResponse>('/imports/queue/confirm-all-filled', {
     method: 'POST',
   });
 }
@@ -305,4 +312,54 @@ export function getParkedQueue() {
 
 export function rematchTransfers() {
   return apiClient<{ status: string }>('/imports/rematch-transfers', { method: 'POST' });
+}
+
+// ── Unified «+ Имя / Бренд» search + bind (spec v1.27) ──────────────────
+
+export type NameSearchItem = {
+  kind: 'brand' | 'contact';
+  id: number;
+  name: string;
+  category_id: number | null;
+  category_name: string | null;
+  is_global: boolean;
+};
+
+export type NameSearchResponse = { items: NameSearchItem[] };
+
+export function searchImportNames(query: string, limit = 20) {
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  params.set('limit', String(limit));
+  return apiClient<NameSearchResponse>(`/imports/names/search?${params.toString()}`);
+}
+
+export type BindImportNamePayload = {
+  kind: 'brand' | 'contact';
+  name?: string | null;
+  existing_id?: number | null;
+  category_id?: number | null;
+};
+
+export type BindImportNameResponse = {
+  kind: 'brand' | 'contact';
+  id: number;
+  name: string;
+  category_id: number | null;
+  category_name: string | null;
+  propagated_count: number;
+};
+
+export function bindImportRowName(rowId: number, payload: BindImportNamePayload) {
+  // Strip null-valued fields so the backend Pydantic validator doesn't see
+  // an explicit null when the caller meant «not set» (e.g. `category_id`
+  // optional).
+  const body: Record<string, unknown> = { kind: payload.kind };
+  if (payload.name) body.name = payload.name;
+  if (payload.existing_id != null) body.existing_id = payload.existing_id;
+  if (payload.category_id != null) body.category_id = payload.category_id;
+  return apiClient<BindImportNameResponse>(`/imports/rows/${rowId}/bind-name`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
 }

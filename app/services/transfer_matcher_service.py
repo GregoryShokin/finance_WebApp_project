@@ -73,6 +73,31 @@ _PRO_TRANSFER_KEYWORDS = frozenset({
     "c2c",
 })
 
+# v1.26 — credit-repayment phrasings that ALSO satisfy the pro-transfer guard
+# in `_score_pair`. A debit→credit repayment («Погашение основного долга»,
+# «Погашение кредита по договору») is semantically a transfer between the
+# user's own accounts but does NOT contain «перевод» / «transfer» — so without
+# this set the pair guard rejects it (returns 0.0). These keywords must stay
+# tightly scoped to credit-loan vocabulary; broadening them would re-enable
+# the false positives the guard was added to prevent (v1.10).
+_CREDIT_PAIR_KEYWORDS = frozenset({
+    "погашение",
+    "погашение основного долга",
+    "погашение тела",
+    "погашение просроченной",
+    "погашение процентов",
+    "погашение кредита",
+    "погашение задолженности",
+    "проценты по кредиту",
+    "проценты пользование",
+    "уплата процентов",
+    "досрочное погашение",
+    "оплата по кредиту",
+    "оплата кредита",
+    "оплата по договору",
+    "перевод по договору",
+})
+
 
 @dataclass
 class _Candidate:
@@ -383,7 +408,7 @@ class TransferMatcherService:
         # finds a partner, `_apply_assignments` rewrites status to ready/duplicate
         # and clears error_message; if not, status stays `error` — same result.
         rows_with_sessions = (
-            self.db.query(ImportSession, ImportRow)
+            self.db.query(ImportSession, ImportRow, AccountModel)
             .join(ImportRow, ImportRow.session_id == ImportSession.id)
             .join(AccountModel, AccountModel.id == ImportSession.account_id)
             .filter(
@@ -397,7 +422,7 @@ class TransferMatcherService:
         )
 
         candidates: list[_Candidate] = []
-        for session, row in rows_with_sessions:
+        for session, row, account in rows_with_sessions:
             nd: dict = row.normalized_data_json or {}
 
             if nd.get("transfer_match_locked"):
@@ -420,10 +445,21 @@ class TransferMatcherService:
                 continue
 
             parse_settings: dict = session.parse_settings or {}
+            # v1.26 — contract resolution priority for credit-repayment pairing:
+            #   1. tokens.contract on the row (explicit «договор №…» in desc)
+            #   2. parse_settings.contract_number (statement-level metadata)
+            #   3. account.contract_number (Сплит/Кредитка configured contract).
+            # The third tier covers Yandex Сплит «Погашение основного долга по
+            # договору» rows where the description omits the number — without
+            # it shared_contract bonus and skeleton-guard exemption never fire
+            # for the credit-side row of the pair.
             contract = (
                 self._extract_contract(nd)
                 or parse_settings.get("contract_number")
                 or parse_settings.get("statement_account_number")
+                or (str(account.contract_number).strip()
+                    if account is not None and getattr(account, "contract_number", None)
+                    else None)
             )
 
             candidates.append(_Candidate(
@@ -633,9 +669,16 @@ class TransferMatcherService:
         # a transfer pair — they are an amount coincidence. Without this
         # filter the matcher fired false positives across every dataset
         # where amounts repeat (e.g. round-number cashbacks and refunds).
+        #
+        # v1.26: credit-repayment phrasings («погашение основного долга»,
+        # «погашение кредита по договору») also satisfy the guard — they're
+        # semantically transfers Дебет↔credit-account but do not carry
+        # «перевод» / «transfer» literals (§9.10).
         if not (
             self._has_pro_transfer_keyword(a)
             or self._has_pro_transfer_keyword(b)
+            or self._has_credit_pair_keyword(a)
+            or self._has_credit_pair_keyword(b)
         ):
             return 0.0
 
@@ -735,6 +778,25 @@ class TransferMatcherService:
         if not c.description:
             return False
         return any(kw in c.description for kw in _PRO_TRANSFER_KEYWORDS)
+
+    @staticmethod
+    def _has_credit_pair_keyword(c: _Candidate) -> bool:
+        """v1.26 — true when the candidate's description carries a credit-
+        repayment phrasing that should be treated as pro-transfer for guard
+        purposes (Дебет↔credit-account). Skeleton is also checked because
+        normalization can drop the contract number while the keyword
+        remains in the placeholdered form."""
+        haystack: list[str] = []
+        if c.description:
+            haystack.append(c.description.lower())
+        if c.row_skeleton:
+            haystack.append(c.row_skeleton.lower())
+        if not haystack:
+            return False
+        for text in haystack:
+            if any(kw in text for kw in _CREDIT_PAIR_KEYWORDS):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Greedy 1-to-1 assignment
@@ -1269,7 +1331,20 @@ class TransferMatcherService:
 
     @staticmethod
     def _extract_contract(nd: dict) -> str | None:
-        for key in ("contract_number", "source_reference"):
+        # v1.26 — prefer the v2-normalized token when present. `tokens.contract`
+        # is set by `import_normalizer_v2.extract_tokens` from the description's
+        # explicit «договор №…» phrase. Falling back to `contract_number` /
+        # `source_reference` first (the legacy order) was wrong: Yandex
+        # Дебет/Сплит rows put the date string into `source_reference`, which
+        # would be returned as a "contract" and clash with the real contract
+        # token from the partner side. Token-first ensures the shared-contract
+        # bonus (+0.05 in `_score_pair`) and skeleton-guard exemption (§8.6)
+        # fire only when both sides actually carry the same contract number.
+        tokens = nd.get("tokens") or {}
+        token_contract = tokens.get("contract") if isinstance(tokens, dict) else None
+        if token_contract and str(token_contract).strip():
+            return str(token_contract).strip()
+        for key in ("contract_number",):
             val = nd.get(key)
             if val and str(val).strip():
                 return str(val).strip()

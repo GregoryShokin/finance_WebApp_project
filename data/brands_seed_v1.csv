@@ -24,3 +24,4 @@ tele2,Tele2,Связь,text:tele2|text:теле2|text:tele 2
 yandex_plus,Яндекс Плюс,Подписки,"re:yandex.{0,30}plus|re:яндекс.{0,30}плюс|text:yandex plus|text:yandex.plus"
 yandex_music,Яндекс Музыка,Подписки,"re:yandex.{0,30}music|re:яндекс.{0,30}музыка|text:yandex music|text:yandex.music"
 yandex_market,Яндекс Маркет,Маркетплейсы,"re:yandex.{0,30}market|re:яндекс.{0,30}маркет|text:yandex.market"
+yandex,Яндекс,Сервисы,text:yandex|text:яндекс

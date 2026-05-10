@@ -194,6 +194,21 @@ class ImportPreviewRowResponse(BaseModel):
     review_required: bool = False
     raw_data: dict[str, str]
     normalized_data: dict
+    # spec v1.26 / Brand Registry §17 — projection of `is_personal_identifier_row`
+    # so the moderator UI can hide brand controls (Выбрать бренд / BrandPrompt)
+    # on rows whose only counterparty signal is a phone / contract / person name.
+    # Defaults False so legacy responses (rows without skeleton) stay consistent.
+    is_personal_identifier: bool = False
+    # spec v1.27 / unified «+ Имя / Бренд» — when the row's identifier
+    # tokens (phone / contract / person_hash) resolve to a DebtPartner
+    # via the user's debt_partner_identifiers bindings, the moderator
+    # surfaces the contact name as the row's primary label. Populated
+    # by `_serialize_preview_row` after a batch lookup; null when no
+    # binding exists or the row carries no personal identifier.
+    personal_counterparty_id: int | None = None
+    personal_counterparty_name: str | None = None
+    personal_counterparty_category_id: int | None = None
+    personal_counterparty_category_name: str | None = None
 
 
 class ImportPreviewSummary(BaseModel):
@@ -527,6 +542,23 @@ class ImportQueueStartAllResponse(BaseModel):
     skipped: int
 
 
+class ImportQueueConfirmAllFilledResponse(BaseModel):
+    """Result of `POST /imports/queue/confirm-all-filled` (v1.24).
+
+    Walks every unconfirmed ready/warning row across all preview-ready
+    sessions and stamps `user_confirmed_at` on rows that pass full
+    structural validation (all required fields filled, no blocking issues).
+
+    confirmed_count  — rows that were stamped and flipped to status='ready'.
+    skipped_count    — rows that still have validation issues (left untouched).
+    skipped_row_ids  — IDs of skipped rows (for UI highlighting / debug).
+    """
+
+    confirmed_count: int
+    skipped_count: int
+    skipped_row_ids: list[int]
+
+
 class BulkClusterRowUpdate(BaseModel):
     """Per-row update inside a bulk-apply batch — mirrors the subset of
     ImportRowUpdateRequest the bulk flow needs. Each row keeps full
@@ -631,3 +663,48 @@ class ApplyBrandCategoryResponse(BaseModel):
     category_name: str
     rows_updated: int
     override_id: int
+
+
+# ── Unified «+ Имя / Бренд» search + bind (spec v1.27) ──────────────────
+
+
+class NameSearchItem(BaseModel):
+    """One result from `GET /imports/names/search`. `kind` distinguishes
+    Brand from DebtPartner so the modal can render a tag and route the
+    follow-up `bind-name` call to the right entity.
+    """
+
+    kind: str  # "brand" | "contact"
+    id: int
+    name: str
+    category_id: int | None = None
+    category_name: str | None = None
+    is_global: bool = False
+
+
+class NameSearchResponse(BaseModel):
+    items: list[NameSearchItem] = Field(default_factory=list)
+
+
+class BindNameRequest(BaseModel):
+    kind: str  # "brand" | "contact"
+    name: str | None = None
+    existing_id: int | None = Field(default=None, ge=1)
+    category_id: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _require_name_or_existing(self):
+        if (self.name is None or not self.name.strip()) and self.existing_id is None:
+            raise ValueError("Укажи name или existing_id.")
+        if self.kind not in ("brand", "contact"):
+            raise ValueError("kind должен быть 'brand' или 'contact'.")
+        return self
+
+
+class BindNameResponse(BaseModel):
+    kind: str
+    id: int
+    name: str
+    category_id: int | None = None
+    category_name: str | None = None
+    propagated_count: int = 0

@@ -7,7 +7,7 @@
  */
 
 import { type ChangeEvent, useRef } from 'react';
-import { ChevronRight, Check, FileText, RotateCcw, Upload } from 'lucide-react';
+import { ChevronRight, Check, CheckCheck, FileText, RotateCcw, Upload } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 import { UPLOAD_ACCEPT_ATTR } from '@/lib/upload/limits';
 
@@ -15,6 +15,7 @@ export function ImportActionsBar({
   onUpload,
   onOpenQueue,
   onCommit,
+  onConfirmFilled,
   onReset,
   queueCount,
   queueOk,
@@ -22,8 +23,10 @@ export function ImportActionsBar({
   queueExc,
   readyCount,
   readySum,
+  fillableCount = 0,
   uploading = false,
   committing = false,
+  confirmingFilled = false,
   resetting = false,
   queuePillRef,
   resetEnabled = true,
@@ -31,6 +34,7 @@ export function ImportActionsBar({
   onUpload: (file: File) => void;
   onOpenQueue: () => void;
   onCommit: () => void;
+  onConfirmFilled: () => void;
   onReset?: () => void;
   queueCount: number;
   queueOk: number;
@@ -39,8 +43,11 @@ export function ImportActionsBar({
   readyCount: number;
   /** Optional human-formatted total (e.g. "21 348 ₽"). Hidden if absent. */
   readySum?: string | null;
+  /** Rows that are filled but not yet individually confirmed. */
+  fillableCount?: number;
   uploading?: boolean;
   committing?: boolean;
+  confirmingFilled?: boolean;
   resetting?: boolean;
   resetEnabled?: boolean;
   queuePillRef?: React.MutableRefObject<HTMLButtonElement | null>;
@@ -114,6 +121,30 @@ export function ImportActionsBar({
             Сбросить сессию
           </button>
         ) : null}
+        <button
+          type="button"
+          disabled={fillableCount === 0 || confirmingFilled || committing}
+          onClick={onConfirmFilled}
+          title={
+            fillableCount === 0
+              ? 'Нет заполненных строк для подтверждения'
+              : `Подтвердить ${fillableCount} заполненных строк`
+          }
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2.5 text-[13px] font-medium transition',
+            fillableCount > 0 && !confirmingFilled && !committing
+              ? 'border-accent-blue/30 bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/20'
+              : 'cursor-not-allowed border-line bg-bg-surface2 text-ink-3',
+          )}
+        >
+          <CheckCheck className={cn('size-3.5', confirmingFilled && 'animate-pulse')} />
+          Подтвердить заполненные
+          {fillableCount > 0 && (
+            <span className="rounded-pill bg-accent-blue/15 px-1.5 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-accent-blue">
+              {fillableCount}
+            </span>
+          )}
+        </button>
         <button
           type="button"
           disabled={readyCount === 0 || committing}

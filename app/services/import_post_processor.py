@@ -247,16 +247,29 @@ class ImportPostProcessor:
         Two effects, applied only when the row has not been explicitly
         confirmed by the user (guarded by `user_confirmed_at`):
 
-        1. `suggest_exclude=True` — auto-exclude phantom-mirror rows, e.g.
-           Яндекс Сплит income «погашение основного долга» that is already
-           covered by the phantom income created when the paired Дебет
-           transfer committed. Committing a second time would double-credit
-           the Сплит account balance.
+        1. `suggest_exclude=True` — set `bank_mechanics_pending_exclude=True`
+           on the row's normalized_data and (if missing) `operation_type='transfer'`.
+           Status is NOT changed here. The cross-session transfer matcher runs
+           after this pass; if it pairs the row with a debit-side counterpart
+           (cross_session pair, §12.10) or marks it duplicate against a
+           committed phantom income (branch B, §8.5), the pending flag is
+           cleared by `finalize_bank_mechanics_exclusions` and the row stays
+           visible in «Переводы и дубли» with the partner link. Only if the
+           matcher couldn't find a pair does finalize set `status='excluded'`
+           as a fallback safety net (avoids double-credit when the user
+           imports only the credit-side statement).
 
         2. `resolved_target_account_id` — stamp `target_account_id` onto
            Яндекс Дебет transfer rows so the user does not have to pick the
            Сплит counter-account manually (account resolved from the
            contract token in the cluster's identifier at cluster-build time).
+
+        Idempotent + rehabilitates legacy excluded rows: if a row is currently
+        `status='excluded'` from the pre-deferral version of this method (no
+        `bank_mechanics_pending_exclude` flag, no `created_transaction_id`,
+        op='transfer', and the cluster still says suggest_exclude), reset
+        status to 'ready' and stamp the pending flag so the matcher gets a
+        fresh chance to pair it.
         """
         from app.services.import_cluster_service import ImportClusterService
 
@@ -294,11 +307,28 @@ class ImportPostProcessor:
                 nd_changed = False
                 new_status: str | None = None
 
-                if (
-                    cluster.bank_mechanics_suggest_exclude
-                    and row.status not in ("excluded", "committed")
-                ):
-                    new_status = "excluded"
+                if cluster.bank_mechanics_suggest_exclude:
+                    # Defer the actual exclusion until after the cross-session
+                    # transfer matcher runs (see `finalize_bank_mechanics_exclusions`).
+                    if not nd.get("bank_mechanics_pending_exclude"):
+                        nd["bank_mechanics_pending_exclude"] = True
+                        nd_changed = True
+                    # The phantom-mirror is logically a transfer between Дебет
+                    # and credit accounts; tag op_type so the matcher and §12.10
+                    # cross-session pair logic recognize it.
+                    if str(nd.get("operation_type") or "") not in ("transfer",):
+                        nd["operation_type"] = "transfer"
+                        nd_changed = True
+                    # Rehabilitate rows excluded by the pre-deferral version of
+                    # this method: if the row is uncommitted and currently
+                    # status='excluded', return it to 'ready' so the matcher
+                    # can examine it. The pending flag (set above) ensures the
+                    # exclusion is re-applied later if no pair is found.
+                    if (
+                        str(row.status or "").lower() == "excluded"
+                        and getattr(row, "created_transaction_id", None) is None
+                    ):
+                        new_status = "ready"
 
                 if (
                     cluster.bank_mechanics_resolved_target_account_id is not None
@@ -331,3 +361,67 @@ class ImportPostProcessor:
                     if nd_changed:
                         kwargs["normalized_data"] = nd
                     self.import_repo.update_row(row, **kwargs)
+
+    # ------------------------------------------------------------------
+    # 5. Finalize bank-mechanics exclusions (post-matcher, §9.10 / §12.10)
+    # ------------------------------------------------------------------
+
+    def finalize_bank_mechanics_exclusions(self, *, user_id: int) -> None:
+        """Resolve `bank_mechanics_pending_exclude` flags after the
+        cross-session transfer matcher has had its turn.
+
+        For every active row of `user_id` carrying the pending flag:
+          • If `transfer_match` is now present (matcher paired the row with a
+            debit-side counterpart, §12.10, or marked it duplicate against a
+            committed phantom-income tx, §8.5 branch B) — clear the pending
+            flag and leave status alone. The matcher already chose the
+            correct status ('ready' for cross-session pair, 'duplicate' for
+            committed phantom).
+          • Otherwise — set status='excluded' (the original safety net,
+            §9.10): the credit-side phantom-mirror has no paired Дебет row in
+            any active or committed scope, so committing it would
+            double-credit the credit account when the Дебет statement is
+            eventually imported.
+
+        Idempotent: runs once per matcher cycle, no-op when there are no
+        rows with the pending flag.
+        """
+        rows = (
+            self.db.query(ImportRow)
+            .join(ImportSession, ImportRow.session_id == ImportSession.id)
+            .filter(
+                ImportSession.user_id == user_id,
+                ImportSession.status != "committed",
+            )
+            .all()
+        )
+
+        for row in rows:
+            nd = dict(row.normalized_data_json or {})
+            if not nd.get("bank_mechanics_pending_exclude"):
+                continue
+            # Don't touch terminal/committed rows.
+            if str(row.status or "").lower() in ("committed", "parked"):
+                continue
+            # Respect explicit user confirmation: if the user already confirmed
+            # this row (e.g. via UI override), leave it alone. Clearing the
+            # flag prevents future runs from re-evaluating.
+            if nd.get("user_confirmed_at"):
+                nd.pop("bank_mechanics_pending_exclude", None)
+                self.import_repo.update_row(row, normalized_data=nd)
+                continue
+
+            paired = bool(nd.get("transfer_match"))
+            nd.pop("bank_mechanics_pending_exclude", None)
+
+            if paired:
+                # Matcher attached a partner — keep its status decision and
+                # clear the pending flag.
+                self.import_repo.update_row(row, normalized_data=nd)
+            else:
+                # Matcher didn't find a pair — fall back to the original
+                # auto-exclude behavior so the credit balance isn't doubled
+                # when the Дебет statement arrives later.
+                self.import_repo.update_row(
+                    row, normalized_data=nd, status="excluded",
+                )
