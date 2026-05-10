@@ -276,10 +276,22 @@ class ImportPostProcessor:
         cluster_svc = ImportClusterService(self.db)
         clusters = cluster_svc.build_clusters(session)
 
+        # Include clusters with ANY bank-mechanics signal:
+        # • suggest_exclude — phantom-mirror auto-exclusion (Yandex Сплит
+        #   income side of a Дебет-paid repayment).
+        # • resolved_target_account_id — Дебет→Сплит transfer with target
+        #   resolved from contract token.
+        # • bank_mechanics_operation_type — rule fired with op-override
+        #   (e.g. Yandex Сплит «погашение тела долга» expense → transfer)
+        #   but contract token absent on the credit-side row, so target
+        #   stays None. Without this branch, the cluster's op-decision
+        #   wouldn't reach the row and it would render as «Обычная»; the
+        #   cross-session matcher pairs the credit-side later.
         mechanic_clusters = [
             c for c in clusters
             if c.bank_mechanics_suggest_exclude
             or c.bank_mechanics_resolved_target_account_id is not None
+            or c.bank_mechanics_operation_type is not None
         ]
         if not mechanic_clusters:
             return
@@ -353,6 +365,28 @@ class ImportPostProcessor:
                     # 'warning' to 'ready' so it appears correctly in the UI.
                     if str(row.status or "") == "warning" and not new_status:
                         new_status = "ready"
+
+                # Op-override without target: e.g. Yandex Сплит credit-side
+                # «погашение тела долга» expense — bank_mechanics knows it's
+                # a transfer but only the Дебет side carries the contract,
+                # so we can't resolve target here. Stamp op_type anyway so
+                # the cross-session matcher recognises this as a pair
+                # candidate; the user sees «Перевод» in the UI instead of
+                # the misleading «Обычная».
+                if (
+                    cluster.bank_mechanics_operation_type
+                    and nd.get("operation_type") != cluster.bank_mechanics_operation_type
+                    and not nd.get("target_account_id")
+                ):
+                    nd["operation_type"] = cluster.bank_mechanics_operation_type
+                    nd_changed = True
+
+                # Stamp the human-readable label so the moderator UI can
+                # show «Сработало правило: Яндекс: погашение тела долга»
+                # and the user understands WHY the row was classified.
+                if cluster.bank_mechanics_label and nd.get("bank_mechanics_label") != cluster.bank_mechanics_label:
+                    nd["bank_mechanics_label"] = cluster.bank_mechanics_label
+                    nd_changed = True
 
                 if new_status or nd_changed:
                     kwargs: dict[str, Any] = {}
