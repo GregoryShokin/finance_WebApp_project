@@ -30,13 +30,31 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { CreatableSelect, type CreatableOption } from '@/components/ui/creatable-select';
-import { applyBrandToSession } from '@/lib/api/brands';
+import {
+  addBrandPattern,
+  applyBrandToSession,
+  createBrand,
+  suggestBrandFromRow,
+  type BrandPatternKind,
+} from '@/lib/api/brands';
 import {
   bindImportRowName,
+  confirmRowBrand,
   searchImportNames,
   type BindImportNameResponse,
   type NameSearchItem,
 } from '@/lib/api/imports';
+
+const PATTERN_KIND_LABEL: Record<BrandPatternKind, string> = {
+  text: 'Подстрока в описании',
+  sbp_merchant_id: 'SBP merchant_id',
+  org_full: 'Полное название юр. лица',
+  alias_exact: 'Точное совпадение',
+};
+
+const PATTERN_KIND_OPTIONS: CreatableOption[] = (
+  ['text', 'sbp_merchant_id', 'org_full', 'alias_exact'] as BrandPatternKind[]
+).map((k) => ({ value: k, label: PATTERN_KIND_LABEL[k] }));
 
 type Kind = 'brand' | 'contact';
 
@@ -69,6 +87,14 @@ export function NameBindModal({
   const [kind, setKindRaw] = useState<Kind>(lockedKind || defaultKind);
   const [categoryId, setCategoryId] = useState<number | null>(null);
   const [picked, setPicked] = useState<NameSearchItem | null>(null);
+  // Editable pattern fields (kind=brand + creating new). Prefilled from
+  // /brands/suggest-from-row so the user sees WHICH skeleton token the
+  // resolver will use as the recognition signal — and can override it
+  // before saving. Empty values mean «let the backend auto-learn». For
+  // existing brands and contacts these are unused.
+  const [patternKind, setPatternKind] = useState<BrandPatternKind>('text');
+  const [patternValue, setPatternValue] = useState('');
+  const [patternTouched, setPatternTouched] = useState(false);
 
   const setKind = (next: Kind) => {
     if (lockedKind) return;
@@ -85,6 +111,9 @@ export function NameBindModal({
       setKindRaw(lockedKind || defaultKind);
       setCategoryId(null);
       setPicked(null);
+      setPatternKind('text');
+      setPatternValue('');
+      setPatternTouched(false);
     }
   }, [open, defaultKind, lockedKind]);
 
@@ -99,6 +128,32 @@ export function NameBindModal({
     enabled: open,
     staleTime: 30_000,
   });
+
+  // Brand-suggest prefill — shows the user the row's extracted candidate
+  // token (text-pattern from the skeleton, or sbp_merchant_id when
+  // present). Only relevant for kind=brand AND when creating a new brand
+  // (no item picked from the search list).
+  const suggestQuery = useQuery({
+    queryKey: ['brand-suggest-from-row', rowId],
+    queryFn: () => suggestBrandFromRow(rowId),
+    enabled: open && kind === 'brand' && rowId > 0,
+    staleTime: 0,
+  });
+
+  // Sync the suggestion into the editable fields on first arrival, but
+  // never overwrite a value the user has already typed. The user's edit
+  // is sticky — flipping radio off and back, or refetching, doesn't blow
+  // away their input.
+  useEffect(() => {
+    if (!suggestQuery.data || patternTouched) return;
+    const s = suggestQuery.data;
+    if (s.pattern_kind) setPatternKind(s.pattern_kind);
+    if (s.pattern_value) setPatternValue(s.pattern_value);
+    // Pre-seed the search input with the suggested canonical name when
+    // the user hasn't typed anything yet — saves a step on the common
+    // «just confirm what the system found» case.
+    if (s.canonical_name && !q.trim()) setQ(s.canonical_name);
+  }, [suggestQuery.data, patternTouched, q]);
 
   const items = searchQuery.data?.items ?? [];
   const filteredItems = useMemo(
@@ -151,6 +206,56 @@ export function NameBindModal({
     onError: (e: Error) => toast.error(e.message || 'Не удалось привязать имя'),
   });
 
+  // Explicit-pattern create flow (kind=brand, no existing_id). Mirrors
+  // the pre-v1.27 BrandCreateModal sequence: createBrand → addPattern →
+  // confirmRowBrand → applyBrandToSession. We split this off from
+  // `bindMut` because `bind-name` always defers pattern selection to the
+  // backend's auto-learn — for new brands we want the user's chosen
+  // (kind, value) pair to be authoritative instead.
+  const createBrandMut = useMutation({
+    mutationFn: async (vars: {
+      name: string;
+      patternKind: BrandPatternKind;
+      patternValue: string;
+      category_id?: number | null;
+    }) => {
+      const trimmedName = vars.name.trim();
+      const trimmedPattern = vars.patternValue.trim();
+      if (!trimmedName) throw new Error('Введите название бренда');
+      if (!trimmedPattern) throw new Error('Укажите паттерн распознавания');
+
+      const brand = await createBrand({
+        canonical_name: trimmedName,
+        category_hint: null,
+      });
+      await addBrandPattern(brand.id, {
+        kind: vars.patternKind,
+        pattern: trimmedPattern,
+        is_regex: false,
+      });
+      await confirmRowBrand(rowId, brand.id, vars.category_id ?? null);
+      let sweptCount = 0;
+      try {
+        const apply = await applyBrandToSession(brand.id);
+        sweptCount = apply.confirmed ?? 0;
+      } catch {
+        // Sweep is best-effort.
+      }
+      return { brand, sweptCount };
+    },
+    onSuccess: ({ brand, sweptCount }) => {
+      const extra = sweptCount > 0 ? ` (+${sweptCount} ${pluralRows(sweptCount)})` : '';
+      toast.success(`Бренд «${brand.canonical_name}» создан${extra}`);
+      queryClient.invalidateQueries({ queryKey: ['imports', 'preview'] });
+      queryClient.invalidateQueries({ queryKey: ['imports', 'bulk-clusters'] });
+      queryClient.invalidateQueries({ queryKey: ['brand-suggested-groups'] });
+      onClose();
+    },
+    onError: (e: Error) => toast.error(e.message || 'Не удалось создать бренд'),
+  });
+
+  const isPending = bindMut.isPending || createBrandMut.isPending;
+
   const handleSave = () => {
     if (picked) {
       bindMut.mutate({
@@ -165,10 +270,26 @@ export function NameBindModal({
       toast.error('Введи имя или выбери из списка');
       return;
     }
+    // New brand creation goes through the explicit-pattern path so the
+    // user's chosen pattern is used as the recognition signal — auto-learn
+    // doesn't get a chance to second-guess them.
+    if (kind === 'brand') {
+      if (!patternValue.trim()) {
+        toast.error('Укажи паттерн распознавания');
+        return;
+      }
+      createBrandMut.mutate({
+        name,
+        patternKind,
+        patternValue,
+        category_id: categoryId,
+      });
+      return;
+    }
     bindMut.mutate({ kind, name, category_id: categoryId });
   };
 
-  const canSave = (picked != null || q.trim().length > 0) && !bindMut.isPending;
+  const canSave = (picked != null || q.trim().length > 0) && !isPending;
 
   const categoryHint = kind === 'brand'
     ? 'Категория закрепится за этим брендом для всех операций.'
@@ -253,6 +374,53 @@ export function NameBindModal({
           )}
         </div>
 
+        {/* Pattern editor — visible only when creating a NEW brand
+            (kind=brand AND nothing picked from the list). Shows the
+            user WHICH skeleton token the resolver will use as the
+            recognition signal, and lets them override it. Mirrors the
+            pre-v1.27 BrandCreateModal UX. */}
+        {kind === 'brand' && picked == null ? (
+          <div className="rounded-md border border-line bg-bg-surface2 p-3">
+            <div className="mb-1.5 text-[11px] font-medium text-ink-2">
+              По чему распознавать
+            </div>
+            <div className="grid grid-cols-[180px_1fr] gap-2">
+              <CreatableSelect
+                value={patternKind}
+                options={PATTERN_KIND_OPTIONS}
+                onChange={(v) => {
+                  setPatternKind(v as BrandPatternKind);
+                  setPatternTouched(true);
+                }}
+                width={180}
+              />
+              <input
+                type="text"
+                value={patternValue}
+                onChange={(e) => {
+                  setPatternValue(e.target.value);
+                  setPatternTouched(true);
+                }}
+                placeholder={
+                  suggestQuery.isLoading
+                    ? 'Подбираем…'
+                    : 'Например: vkusnoitochka'
+                }
+                className="rounded-md border border-line bg-bg-surface px-3 py-1.5 text-sm text-ink focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            </div>
+            <div className="mt-1.5 text-[10.5px] text-ink-3">
+              {patternKind === 'text'
+                ? 'Подстрока в нормализованном описании. Минимум 3 символа.'
+                : patternKind === 'sbp_merchant_id'
+                ? 'Точный merchant_id СБП — самый сильный сигнал.'
+                : patternKind === 'org_full'
+                ? 'Полное название юр. лица — для случаев «ООО Ромашка».'
+                : 'Точное совпадение всего нормализованного описания.'}
+            </div>
+          </div>
+        ) : null}
+
         <div>
           <div className="mb-1 text-[11px] text-ink-3">Категория (необязательно)</div>
           <CreatableSelect
@@ -270,7 +438,7 @@ export function NameBindModal({
             Отмена
           </Button>
           <Button type="button" onClick={handleSave} disabled={!canSave}>
-            {bindMut.isPending ? 'Сохраняем…' : 'Сохранить'}
+            {isPending ? 'Сохраняем…' : 'Сохранить'}
           </Button>
         </div>
       </div>
